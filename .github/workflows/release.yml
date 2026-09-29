@@ -76,7 +76,7 @@ jobs:
           else
             sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           fi
-          cargo generate-lockfile
+          cargo update --workspace
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -129,11 +129,11 @@ jobs:
         run: |
           TARGET="${{ matrix.target }}"
           if [[ -n "${{ matrix.glibc }}" ]]; then TARGET="${TARGET}.${{ matrix.glibc }}"; fi
-          cargo zigbuild --release --target "$TARGET" -p vera-cli
+          cargo zigbuild --locked --release --target "$TARGET" -p vera-cli
 
       - name: Build (native)
         if: ${{ !matrix.zig }}
-        run: cargo build --release --target ${{ matrix.target }} -p vera-cli
+        run: cargo build --locked --release --target ${{ matrix.target }} -p vera-cli
 
       - name: Check Linux binary portability
         if: matrix.zig
