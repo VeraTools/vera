@@ -73,3 +73,14 @@ Benchmark details: [docs/benchmarks.md](docs/benchmarks.md).
 ## Branch Policy
 
 Pull requests target `master` directly.
+
+## Release Recovery
+
+To retry publication of the newest release tag when Blacksmith is unavailable, cancel the earlier Release run for that tag, then dispatch the workflow on GitHub-hosted runners. Replace the example tag with the existing tag to recover:
+
+```bash
+gh workflow run release.yml --ref master \
+  -f tag=v1.4.2 -f use_github_runners=true
+```
+
+The workflow checks out the tag and derives every package version from it. It does not move the tag.

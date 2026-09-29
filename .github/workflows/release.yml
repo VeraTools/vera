@@ -3,6 +3,16 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish (never moves the tag)'
+        required: true
+        type: string
+      use_github_runners:
+        description: 'Use GitHub-hosted runners when Blacksmith is unavailable'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -11,6 +21,11 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -28,17 +43,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: blacksmith-8vcpu-ubuntu-2404
+            fallback_os: ubuntu-24.04
             archive: tar.gz
             zig: true
             glibc: "2.28"
 
           - target: x86_64-unknown-linux-musl
             os: blacksmith-16vcpu-ubuntu-2404
+            fallback_os: ubuntu-24.04
             archive: tar.gz
             zig: true
 
           - target: aarch64-unknown-linux-gnu
             os: blacksmith-16vcpu-ubuntu-2404-arm
+            fallback_os: ubuntu-24.04-arm
             archive: tar.gz
             zig: true
             glibc: "2.28"
@@ -46,21 +64,33 @@ jobs:
           # Blacksmith macOS runners are Apple Silicon; x86_64-apple-darwin is cross-compiled via the rust target.
           - target: x86_64-apple-darwin
             os: blacksmith-6vcpu-macos-15
+            fallback_os: macos-15
             archive: tar.gz
 
           - target: aarch64-apple-darwin
             os: blacksmith-6vcpu-macos-15
+            fallback_os: macos-15
             archive: tar.gz
 
           - target: x86_64-pc-windows-msvc
             os: blacksmith-16vcpu-windows-2025
+            fallback_os: windows-2025
             archive: zip
 
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    runs-on: ${{ inputs.use_github_runners && matrix.fallback_os || matrix.os }}
+    timeout-minutes: ${{ inputs.use_github_runners && 60 || 30 }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -70,7 +100,7 @@ jobs:
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           if [[ "$OSTYPE" == darwin* ]]; then
             sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           else
@@ -180,7 +210,7 @@ jobs:
   release:
     name: Create Release
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ inputs.use_github_runners && 'ubuntu-24.04' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 20
     permissions:
       contents: write
@@ -191,13 +221,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           fetch-tags: true
 
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" packages/npm-cli/package.json
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" packages/python-cli/pyproject.toml
 
@@ -216,13 +247,13 @@ jobs:
       - name: Generate release manifest
         shell: bash
         run: |
-          python3 scripts/generate_release_manifest.py release "${GITHUB_REF_NAME}" "${{ github.repository }}"
+          python3 scripts/generate_release_manifest.py release "$RELEASE_TAG" "${{ github.repository }}"
 
       - name: Determine if latest release
         id: latest
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="$RELEASE_TAG"
           HIGHEST=$(git tag --sort=-v:refname | head -1)
           if [ "$TAG" = "$HIGHEST" ]; then
             echo "is_latest=true" >> "$GITHUB_OUTPUT"
@@ -234,7 +265,7 @@ jobs:
         id: changelog
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="$RELEASE_TAG"
           # Find the previous tag by version order (the one just below current)
           PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1)
           # If grep matched only the tag itself, there's no previous
@@ -276,13 +307,14 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             release/*.tar.gz
             release/*.zip
             release/release-manifest.json
           body_path: release/CHANGELOG.md
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') || contains(env.RELEASE_TAG, '-alpha') }}
           make_latest: ${{ steps.latest.outputs.is_latest }}
 
       - name: Set up Node.js
@@ -325,8 +357,8 @@ jobs:
   docker:
     name: Docker (${{ matrix.variant }})
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 30
+    runs-on: ${{ inputs.use_github_runners && 'ubuntu-24.04' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    timeout-minutes: ${{ inputs.use_github_runners && 60 || 30 }}
     permissions:
       contents: read
       packages: write
@@ -354,6 +386,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Download Linux binary artifact
         uses: actions/download-artifact@v4
@@ -388,7 +422,7 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: publish
