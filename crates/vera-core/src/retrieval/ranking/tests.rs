@@ -1,7 +1,8 @@
-use super::score::*;
+use super::path::*;
+use super::query::*;
 use super::*;
 use crate::config::VeraConfig;
-use crate::types::SymbolType;
+use crate::types::{Language, SymbolType};
 
 fn make_result(
     file_path: &str,

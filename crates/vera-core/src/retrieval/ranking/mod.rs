@@ -6,8 +6,7 @@
 //! same-file crowding for multi-file questions.
 
 use crate::config::VeraConfig;
-use crate::corpus::{classify_path, content_class_label};
-use crate::types::{Language, SearchFilters, SearchResult};
+use crate::types::{SearchFilters, SearchResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RankingStage {
@@ -15,14 +14,23 @@ pub(crate) enum RankingStage {
     PostRerank,
 }
 
+mod content;
+mod diversification;
+mod path;
 pub(crate) mod query;
 pub(crate) mod score;
 
 #[cfg(test)]
 mod tests;
 
-use query::*;
-use score::*;
+pub(crate) use path::file_role_label;
+pub(crate) use query::is_path_weighted_query;
+
+use content::apply_content_symbol_boost;
+use diversification::{apply_coherence_boost, diversify_by_file};
+use path::apply_keyword_path_boost;
+use query::QueryFeatures;
+use score::score_prior_with_config;
 
 #[cfg(test)]
 pub(crate) fn apply_query_ranking(
@@ -155,53 +163,10 @@ fn finish_ranking(
     stamp_rank_scores(reranked)
 }
 
-pub(crate) fn file_role_label(file_path: &str, language: Language) -> &'static str {
-    content_class_label(classify_path(file_path, language))
-}
-
-pub(crate) fn is_path_weighted_query(query: &str) -> bool {
-    let lower = query.trim().to_ascii_lowercase();
-    if lower.contains(".toml")
-        || lower.contains(".json")
-        || lower.contains(".yaml")
-        || lower.contains(".yml")
-        || lower.contains(".ini")
-        || lower.contains(".conf")
-        || lower.contains("dockerfile")
-        || lower.contains("makefile")
-        || lower.contains("cmakelists.txt")
-    {
-        return true;
+fn stamp_rank_scores(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
+    let len = results.len().max(1) as f64;
+    for (idx, result) in results.iter_mut().enumerate() {
+        result.score = 1.0 - (idx as f64 / len);
     }
-
-    // A slash alone does not make a path query: prose like "read/write
-    // request handling" must stay semantic. Require a slash-bearing token
-    // that is the whole query or has path shape (prefix or file extension).
-    let tokens: Vec<&str> = lower
-        .split_whitespace()
-        .map(crate::retrieval::query_utils::trim_query_token)
-        .filter(|token| !token.is_empty())
-        .collect();
-    tokens
-        .iter()
-        .any(|token| is_path_shaped_token(token, tokens.len() == 1))
-}
-
-fn is_path_shaped_token(token: &str, single_token_query: bool) -> bool {
-    if !token.contains('/') && !token.contains('\\') {
-        return false;
-    }
-    if single_token_query
-        || token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with('/')
-        || token.starts_with('~')
-        || token.as_bytes().get(1) == Some(&b':')
-    // Windows drive prefix
-    {
-        return true;
-    }
-    // src/main.rs: the last path segment carries a file extension.
-    let last_segment = token.rsplit(['/', '\\']).next().unwrap_or(token);
-    last_segment.contains('.')
+    results
 }
