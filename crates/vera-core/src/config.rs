@@ -1772,8 +1772,10 @@ card0, 1073741824, 4294967296\n";
         assert!(!back.ranking_recall_pool_expansion_enabled());
 
         // true round-trip
-        let mut cfg2 = RetrievalConfig::default();
-        cfg2.ranking_filename_stem_boost = true;
+        let cfg2 = RetrievalConfig {
+            ranking_filename_stem_boost: true,
+            ..Default::default()
+        };
         let json2 = serde_json::to_string(&cfg2).unwrap();
         let back2: RetrievalConfig = serde_json::from_str(&json2).unwrap();
         assert!(back2.ranking_filename_stem_boost);

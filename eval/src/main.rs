@@ -4,8 +4,10 @@
 //! alongside human-readable summaries.
 //!
 //! Usage:
-//!   vera-eval run [--tasks-dir <path>] [--output <path>] [--tool <name>]
-//!   vera-eval verify-corpus [--corpus <path>]
+//! ```text
+//! vera-eval run [--tasks-dir <path>] [--output <path>] [--tool <name>]
+//! vera-eval verify-corpus [--corpus <path>]
+//! ```
 
 mod lanes;
 mod loader;

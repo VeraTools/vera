@@ -5,7 +5,7 @@
 //! `vera search` prints on stderr, attached to the tool result itself.
 //!
 //! A freshness scan re-hashes every tracked file, which is too expensive to run
-//! on every tool call, so the outcome is cached for [`STALENESS_TTL`].
+//! on every tool call, so the outcome is cached for `STALENESS_TTL`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -63,7 +63,7 @@ fn store_notice(key: PathBuf, notice: Option<String>) {
     });
 }
 
-/// Stale-index notice for `repo`, rescanning at most once per [`STALENESS_TTL`].
+/// Stale-index notice for `repo`, rescanning at most once per `STALENESS_TTL`.
 ///
 /// A scan failure is not a tool failure: it is logged and treated as fresh.
 pub fn notice_for_repo(repo: &Path) -> Option<String> {
