@@ -72,6 +72,10 @@ pub async fn search_vector_with_stores_timed(
     query: &str,
     limit: usize,
 ) -> Result<(Vec<SearchResult>, Duration), VectorSearchError> {
+    crate::indexing::freshness::ensure_index_chunking_compatible(
+        metadata_store,
+        std::path::Path::new("."),
+    )?;
     if limit == 0 {
         return Ok((Vec::new(), Duration::ZERO));
     }

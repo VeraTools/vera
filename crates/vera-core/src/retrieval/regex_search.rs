@@ -17,7 +17,6 @@ use crate::retrieval::file_scan::{
     symbol_for_line,
 };
 use crate::retrieval::ranking::{RankingStage, apply_query_ranking_with_filters};
-use crate::storage::metadata::MetadataStore;
 use crate::types::{Chunk, SearchFilters, SearchResult};
 
 /// Search indexed files for a regex pattern.
@@ -38,8 +37,7 @@ pub fn search_regex(
         .build()
         .map_err(|e| anyhow::anyhow!("Invalid regex pattern: {e}"))?;
 
-    let metadata_path = index_dir.join("metadata.db");
-    let store = MetadataStore::open(&metadata_path)?;
+    let store = super::open_search_metadata(index_dir)?;
     let mut files = store.indexed_files()?;
     sort_files_by_scan_priority(&mut files, filters);
 

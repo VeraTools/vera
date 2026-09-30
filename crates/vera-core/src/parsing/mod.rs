@@ -35,21 +35,6 @@ pub struct ParseDiagnostics {
     pub used_tier0_fallback: bool,
 }
 
-/// Apply both byte- and char-budget splits, gated behind the ~750-char knob.
-///
-/// Byte splitting is always applied (max_chunk_bytes default 24576). Char
-/// splitting is gated by `chunk_max_chars_effective()` so default behavior
-/// remains byte-identical when the knob is off (DEFAULT OFF).
-fn apply_splits(chunks: Vec<Chunk>, config: &IndexingConfig) -> Vec<Chunk> {
-    let chunks = chunker::split_oversized_chunks(chunks, config.max_chunk_bytes);
-    let max_chars = config.chunk_max_chars_effective();
-    if max_chars != 0 {
-        chunker::split_oversized_chunks_by_chars(chunks, max_chars)
-    } else {
-        chunks
-    }
-}
-
 /// Parse a source file and return both code chunks and parser diagnostics.
 pub fn parse_file_with_diagnostics(
     source: &str,
@@ -61,19 +46,23 @@ pub fn parse_file_with_diagnostics(
     if language == Language::Markdown {
         let chunks = chunker::markdown_section_chunks(source, file_path);
         return Ok((
-            apply_splits(chunks, config),
+            chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
             Vec::new(),
             ParseDiagnostics::default(),
         ));
     }
     if language == Language::Rst {
         let (chunks, diagnostics) = parse_rst_section_chunks(source, file_path)?;
-        return Ok((apply_splits(chunks, config), Vec::new(), diagnostics));
+        return Ok((
+            chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
+            Vec::new(),
+            diagnostics,
+        ));
     }
     if language.prefers_file_chunking() {
         let chunks = chunker::whole_file_chunk(source, file_path, language);
         return Ok((
-            apply_splits(chunks, config),
+            chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
             Vec::new(),
             ParseDiagnostics::default(),
         ));
@@ -81,7 +70,7 @@ pub fn parse_file_with_diagnostics(
     if uses_indexing_tier0_fallback(language) {
         let chunks = chunker::tier0_line_chunks(source, file_path, language);
         return Ok((
-            apply_splits(chunks, config),
+            chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
             Vec::new(),
             ParseDiagnostics {
                 used_tier0_fallback: true,
@@ -95,7 +84,7 @@ pub fn parse_file_with_diagnostics(
         None => {
             let chunks = chunker::tier0_line_chunks(source, file_path, language);
             return Ok((
-                apply_splits(chunks, config),
+                chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
                 Vec::new(),
                 ParseDiagnostics {
                     used_tier0_fallback: true,
@@ -129,7 +118,7 @@ pub fn parse_file_with_diagnostics(
     };
 
     Ok((
-        apply_splits(chunks, config),
+        chunker::split_oversized_chunks(chunks, config.max_chunk_bytes),
         refs,
         ParseDiagnostics {
             tree_has_error,

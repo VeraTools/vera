@@ -42,17 +42,6 @@ pub struct IndexingConfig {
     /// (measured on the Semble suite, see issue #67), not a model limit.
     #[serde(default = "default_max_chunk_bytes")]
     pub max_chunk_bytes: usize,
-    /// Maximum chunk size in characters. When non-zero, chunks exceeding this
-    /// are split at line boundaries. 0 disables char-based splitting (default
-    /// OFF). Mechanism: 750-char windows give finer embedding locality than
-    /// the 24 KB byte cap, reducing concept blur within long chunks while
-    /// preserving symbol coherence.
-    #[serde(
-        default = "default_chunk_max_chars",
-        alias = "max_chunk_chars",
-        alias = "max_chunk_characters"
-    )]
-    pub chunk_max_chars: usize,
 }
 
 /// Read a `usize` config override from an environment variable, falling back
@@ -151,33 +140,6 @@ fn default_max_chunk_bytes() -> usize {
     env_usize("VERA_MAX_CHUNK_BYTES", 24_576)
 }
 
-fn default_chunk_max_chars() -> usize {
-    // Alias set and precedence match `IndexingConfig::chunk_max_chars_effective`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in [
-        "VERA_INDEXING_CHUNK_MAX_CHARS",
-        "VERA_INDEXING_MAX_CHUNK_CHARS",
-        "VERA_MAX_CHUNK_CHARS",
-        "VERA_CHUNK_MAX_CHARS",
-    ] {
-        if let Ok(value) = std::env::var(key) {
-            return match value.parse::<usize>() {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    tracing::warn!(
-                        key,
-                        value = %value,
-                        error = %error,
-                        "invalid numeric environment override; using default 0"
-                    );
-                    0
-                }
-            };
-        }
-    }
-    0
-}
-
 impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
@@ -197,44 +159,7 @@ impl Default for IndexingConfig {
             no_ignore: false,
             no_default_excludes: false,
             max_chunk_bytes: default_max_chunk_bytes(),
-            chunk_max_chars: default_chunk_max_chars(),
         }
-    }
-}
-
-impl IndexingConfig {
-    /// Effective char-budget for chunk splitting, with env override.
-    /// 0 means disabled (DEFAULT OFF). Env var `VERA_INDEXING_CHUNK_MAX_CHARS`
-    /// (and alias `VERA_INDEXING_MAX_CHUNK_CHARS` / `VERA_MAX_CHUNK_CHARS`)
-    /// authoritatively overrides the persisted value.
-    pub fn chunk_max_chars_effective(&self) -> usize {
-        for key in [
-            "VERA_INDEXING_CHUNK_MAX_CHARS",
-            "VERA_INDEXING_MAX_CHUNK_CHARS",
-            "VERA_MAX_CHUNK_CHARS",
-            "VERA_CHUNK_MAX_CHARS",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                return match value.parse::<usize>() {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        tracing::warn!(
-                            key,
-                            value = %value,
-                            error = %error,
-                            "invalid numeric environment override; using stored value"
-                        );
-                        self.chunk_max_chars
-                    }
-                };
-            }
-        }
-        self.chunk_max_chars
-    }
-
-    /// Whether the ~750-char chunking hypothesis is active.
-    pub fn chunk_max_chars_enabled(&self) -> bool {
-        self.chunk_max_chars_effective() != 0
     }
 }
 
@@ -390,38 +315,6 @@ pub struct RetrievalConfig {
     /// promote it.
     #[serde(default = "default_ranking_recall_pool_expansion")]
     pub ranking_recall_pool_expansion: bool,
-    /// Multiplicative path penalty for test/compat/example directories.
-    ///
-    /// When enabled, results whose file path lies in `tests/`, `compat/`,
-    /// `examples/` (or classified as `Test` / `Example` / `Bench`) are
-    /// demoted multiplicatively (~0.3×) when the query does not explicitly
-    /// ask for those directories. Mechanism: boilerplate, fixture and example
-    /// directories are keyword-dense but rarely contain the implementation a
-    /// developer is seeking; a multiplicative penalty scales with retrieval
-    /// confidence, preserving ordering among non-penalized candidates while
-    /// consistently demoting penalized ones. Respects the existing
-    /// boost-directory gating (definition boost's `wants_*` checks) so explicit
-    /// requests for test/compat/example paths are not penalized.
-    /// Default OFF (0.3 factor only when enabled).
-    #[serde(default = "default_ranking_multiplicative_path_penalty")]
-    pub ranking_multiplicative_path_penalty: bool,
-    /// Candidate-pool multiplier for broader ranking consideration.
-    ///
-    /// When enabled, the retrieval fetch limit (`top_k` driven) is multiplied
-    /// by ~5× so that more low-ranked but correct candidates enter the
-    /// reranking/ranking stage. Mechanism: ranking signals can only promote
-    /// files that are present in the pool; a broader pool trades a modest
-    /// increase in candidates for higher recall of the correct file.
-    /// This is distinct from `ranking_recall_pool_expansion` which applies a
-    /// table-driven expansion gated on structural/NL intent (full-suite
-    /// delta 0.54% reported in #239); the new knob is a bare 5× `top_k`
-    /// multiplier applied uniformly after the table, not duplicating the
-    /// conditional recall expansion. Default OFF.
-    #[serde(
-        default = "default_ranking_candidate_pool_multiplier",
-        alias = "ranking_pool_multiplier"
-    )]
-    pub ranking_candidate_pool_multiplier: bool,
     /// Filter-during-scan optimization for filtered flat-vector queries.
     ///
     /// When enabled, filtered queries on the flat backend avoid hydrating the whole index:
@@ -538,53 +431,6 @@ fn default_ranking_recall_pool_expansion() -> bool {
     env_bool("VERA_RANKING_RECALL_POOL_EXPANSION", true)
 }
 
-fn default_ranking_multiplicative_path_penalty() -> bool {
-    // Default OFF — only enabled when env is truthy or config explicitly true.
-    // Alias set and precedence match `ranking_multiplicative_path_penalty_enabled`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in [
-        "VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY",
-        "VERA_RANKING_PATH_PENALTY",
-        "VERA_RANKING_MULTIPLICATIVE_PENALTY",
-    ] {
-        if std::env::var(key).is_ok() {
-            return env_bool(key, false);
-        }
-    }
-    false
-}
-
-fn default_ranking_candidate_pool_multiplier() -> bool {
-    // Default OFF. Accepts boolean truthy values plus numeric "5" as truthy for flexibility,
-    // because the hypothesis is described as "5x" and validators may set env to "5".
-    for key in [
-        "VERA_RANKING_CANDIDATE_POOL_MULTIPLIER",
-        "VERA_RANKING_CANDIDATE_POOL_SIZE_MULTIPLIER",
-        "VERA_RANKING_POOL_MULTIPLIER",
-        "VERA_RANKING_CANDIDATE_POOL_MULT",
-    ] {
-        if let Ok(value) = std::env::var(key) {
-            // Numeric >0 enables (covers "5"), bool parsing covers "1"/"true"
-            if let Ok(num) = value.parse::<usize>() {
-                return num != 0;
-            }
-            match value.to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => return true,
-                "0" | "false" | "no" | "off" => return false,
-                _ => {
-                    tracing::warn!(
-                        key,
-                        value = %value,
-                        "invalid boolean/numeric environment override; using default false"
-                    );
-                    return false;
-                }
-            }
-        }
-    }
-    false
-}
-
 fn default_vector_filter_during_scan() -> bool {
     // Default ON since the r5 evidence-backed flip (issue #197). The r5
     // preregistered decision round at 98e6e50 (3 flag-on + 3 flag-off
@@ -627,8 +473,6 @@ impl Default for RetrievalConfig {
                 default_ranking_filename_stem_skip_symbol_queries(),
             ranking_definition_boost: default_ranking_definition_boost(),
             ranking_recall_pool_expansion: default_ranking_recall_pool_expansion(),
-            ranking_multiplicative_path_penalty: default_ranking_multiplicative_path_penalty(),
-            ranking_candidate_pool_multiplier: default_ranking_candidate_pool_multiplier(),
             vector_filter_during_scan: default_vector_filter_during_scan(),
         }
     }
@@ -692,50 +536,6 @@ impl RetrievalConfig {
             )
         } else {
             self.ranking_recall_pool_expansion
-        }
-    }
-
-    /// Multiplicative path penalty enabled, with env-var override.
-    /// Checks multiple aliases for validator flexibility; numeric "5" counts as true.
-    pub fn ranking_multiplicative_path_penalty_enabled(&self) -> bool {
-        for key in [
-            "VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY",
-            "VERA_RANKING_PATH_PENALTY",
-            "VERA_RANKING_MULTIPLICATIVE_PENALTY",
-        ] {
-            if std::env::var(key).is_ok() {
-                return env_bool(key, self.ranking_multiplicative_path_penalty);
-            }
-        }
-        self.ranking_multiplicative_path_penalty
-    }
-
-    /// Candidate-pool multiplier enabled, with env-var override.
-    /// Numeric env values like "5" are treated as enabled (non-zero).
-    pub fn ranking_candidate_pool_multiplier_enabled(&self) -> bool {
-        for key in [
-            "VERA_RANKING_CANDIDATE_POOL_MULTIPLIER",
-            "VERA_RANKING_CANDIDATE_POOL_SIZE_MULTIPLIER",
-            "VERA_RANKING_POOL_MULTIPLIER",
-            "VERA_RANKING_CANDIDATE_POOL_MULT",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                if let Ok(num) = value.parse::<usize>() {
-                    return num != 0;
-                }
-                return env_bool(key, self.ranking_candidate_pool_multiplier);
-            }
-        }
-        self.ranking_candidate_pool_multiplier
-    }
-
-    /// Candidate-pool multiplier factor (5 when enabled, 1 otherwise).
-    /// Used by `compute_fetch_limit_with_config` to scale the fetch limit.
-    pub fn candidate_pool_multiplier_factor(&self) -> usize {
-        if self.ranking_candidate_pool_multiplier_enabled() {
-            5
-        } else {
-            1
         }
     }
 
@@ -931,21 +731,6 @@ impl FromStr for InferenceBackend {
 pub fn is_local_mode() -> bool {
     std::env::var("VERA_LOCAL")
         .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
-}
-
-/// Whether experimental structural graph augmentation is enabled.
-///
-/// This is intentionally an environment-only ablation switch rather than a
-/// persisted retrieval setting. Accepted truthy values are `1`, `true`, and
-/// `yes`, case-insensitively.
-pub fn graph_augmentation_enabled() -> bool {
-    std::env::var("VERA_GRAPH_AUGMENT")
-        .map(|value| {
-            value.eq_ignore_ascii_case("1")
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-        })
         .unwrap_or(false)
 }
 
@@ -1367,43 +1152,6 @@ mod tests {
         assert!(
             batch_size * concurrency <= config.embedding.max_in_flight_inputs,
             "default embedding parallelism must respect its in-flight bound"
-        );
-    }
-
-    #[test]
-    fn graph_augmentation_env_accepts_only_truthy_values() {
-        for value in ["1", "true", "TRUE", "yes", "YeS"] {
-            run_env_test(
-                "config::tests::graph_augmentation_truthy_probe",
-                &[("VERA_GRAPH_AUGMENT", Some(value))],
-            );
-        }
-
-        for value in ["0", "false", "no", "", "on"] {
-            run_env_test(
-                "config::tests::graph_augmentation_falsey_probe",
-                &[("VERA_GRAPH_AUGMENT", Some(value))],
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "driven by graph_augmentation_env_accepts_only_truthy_values"]
-    fn graph_augmentation_truthy_probe() {
-        let value = std::env::var("VERA_GRAPH_AUGMENT").unwrap();
-        assert!(
-            graph_augmentation_enabled(),
-            "{value} should enable the flag"
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by graph_augmentation_env_accepts_only_truthy_values"]
-    fn graph_augmentation_falsey_probe() {
-        let value = std::env::var("VERA_GRAPH_AUGMENT").unwrap();
-        assert!(
-            !graph_augmentation_enabled(),
-            "{value} should disable the flag"
         );
     }
 
@@ -2156,371 +1904,28 @@ card0, 1073741824, 4294967296\n";
         assert!(RetrievalConfig::default().ranking_recall_pool_expansion_enabled());
     }
 
-    // ── Issue #196 hypotheses (feat/issue196-hypotheses): three remaining knobs ──
-    // Each hypothesis is a toggleable knob, DEFAULT OFF, with env override.
-    // These tests pin the default-off contract and independent flip behavior.
-
     #[test]
-    fn issue196_hypotheses_default_off() {
-        // Ensure no env leakage: this test must run with all three new envs unset.
-        // We do not use run_env_test here so it also validates that Default
-        // itself (which reads env) sees OFF when env absent. Caller must ensure
-        // env is clean; the later matrix tests cover the env-flip cases.
-        // To be deterministic, we explicitly check the underlying default
-        // functions return OFF when env absent via a probe subprocess.
-        // Inline check: VeraConfig::default() should have OFF for all three.
-        // If env is set from a prior test, this would flake; run_env_test probes
-        // avoid that by isolating env. So we delegate to a subprocess probe.
-        run_env_test(
-            "config::tests::issue196_hypotheses_default_off_probe",
-            &[
-                ("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY", None),
-                ("VERA_RANKING_CANDIDATE_POOL_MULTIPLIER", None),
-                ("VERA_RANKING_POOL_MULTIPLIER", None),
-                ("VERA_INDEXING_CHUNK_MAX_CHARS", None),
-                ("VERA_MAX_CHUNK_CHARS", None),
-                ("VERA_INDEXING_MAX_CHUNK_CHARS", None),
-            ],
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_default_off"]
-    fn issue196_hypotheses_default_off_probe() {
+    fn legacy_experiment_settings_load_without_being_serialized() {
+        let mut legacy = serde_json::to_value(VeraConfig::default()).unwrap();
+        legacy["indexing"]["chunk_max_chars"] = serde_json::json!(750);
+        legacy["indexing"]["max_chunk_chars"] = serde_json::json!(750);
+        legacy["indexing"]["max_chunk_characters"] = serde_json::json!(750);
         for key in [
-            "VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY",
-            "VERA_RANKING_CANDIDATE_POOL_MULTIPLIER",
-            "VERA_RANKING_POOL_MULTIPLIER",
-            "VERA_INDEXING_CHUNK_MAX_CHARS",
-            "VERA_MAX_CHUNK_CHARS",
-            "VERA_INDEXING_MAX_CHUNK_CHARS",
+            "ranking_multiplicative_path_penalty",
+            "ranking_path_penalty",
+            "ranking_multiplicative_penalty",
+            "ranking_candidate_pool_multiplier",
+            "ranking_candidate_pool_size_multiplier",
+            "ranking_pool_multiplier",
         ] {
-            assert!(
-                std::env::var(key).is_err(),
-                "{key} should be unset for default-off probe"
-            );
+            legacy["retrieval"][key] = serde_json::json!(true);
         }
-        let cfg = VeraConfig::default();
-        assert!(
-            !cfg.retrieval.ranking_multiplicative_path_penalty,
-            "multiplicative penalty must default OFF"
-        );
-        assert!(
-            !cfg.retrieval.ranking_multiplicative_path_penalty_enabled(),
-            "multiplicative penalty enabled() must be false when OFF"
-        );
-        assert!(
-            !cfg.retrieval.ranking_candidate_pool_multiplier,
-            "candidate-pool multiplier must default OFF (false / 1×)"
-        );
-        assert!(
-            !cfg.retrieval.ranking_candidate_pool_multiplier_enabled(),
-            "candidate-pool multiplier enabled() must be false when OFF"
-        );
+        let config: VeraConfig = serde_json::from_value(legacy).unwrap();
+        let serialized = serde_json::to_value(config).unwrap();
         assert_eq!(
-            cfg.retrieval.candidate_pool_multiplier_factor(),
-            1,
-            "pool multiplier factor must be 1 when OFF"
+            serialized,
+            serde_json::to_value(VeraConfig::default()).unwrap()
         );
-        assert_eq!(
-            cfg.indexing.chunk_max_chars, 0,
-            "chunk_max_chars must default 0 (OFF)"
-        );
-        assert_eq!(
-            cfg.indexing.chunk_max_chars_effective(),
-            0,
-            "chunk_max_chars_effective must be 0 when OFF"
-        );
-        assert!(
-            !cfg.indexing.chunk_max_chars_enabled(),
-            "chunk_max_chars_enabled must be false when OFF"
-        );
-        // Legacy deserialization must also default OFF for all three
-        let legacy = r#"{
-            "default_limit": 5,
-            "rrf_k": 60.0,
-            "rerank_candidates": 50,
-            "reranking_enabled": false,
-            "max_rerank_batch": 20,
-            "max_output_chars": 0
-        }"#;
-        let rcfg: RetrievalConfig = serde_json::from_str(legacy).unwrap();
-        assert!(!rcfg.ranking_multiplicative_path_penalty);
-        assert!(!rcfg.ranking_candidate_pool_multiplier);
-        let vera_legacy = r#"{"indexing":{"max_chunk_lines":200,"default_excludes":[],"max_file_size_bytes":1000000,"max_chunk_bytes":24576},"retrieval":{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":20,"max_output_chars":0},"embedding":{"batch_size":128,"max_concurrent_requests":8,"timeout_secs":60,"max_retries":3,"max_stored_dim":1024}}"#;
-        let vcfg: VeraConfig = serde_json::from_str(vera_legacy).unwrap();
-        assert_eq!(vcfg.indexing.chunk_max_chars, 0);
-        assert!(!vcfg.retrieval.ranking_multiplicative_path_penalty);
-        assert!(!vcfg.retrieval.ranking_candidate_pool_multiplier);
-    }
-
-    #[test]
-    fn issue196_hypotheses_env_flips_independently() {
-        // Each env flips only its knob; setting one must not affect the others.
-        run_env_test(
-            "config::tests::issue196_penalty_env_flip_probe",
-            &[("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY", Some("1"))],
-        );
-        run_env_test(
-            "config::tests::issue196_pool_env_flip_probe",
-            &[("VERA_RANKING_CANDIDATE_POOL_MULTIPLIER", Some("1"))],
-        );
-        // Also verify numeric "5" style flips the pool multiplier (hypothesis is 5×)
-        run_env_test(
-            "config::tests::issue196_pool_env_flip_numeric_5_probe",
-            &[("VERA_RANKING_CANDIDATE_POOL_MULTIPLIER", Some("5"))],
-        );
-        run_env_test(
-            "config::tests::issue196_chunk_env_flip_probe",
-            &[("VERA_INDEXING_CHUNK_MAX_CHARS", Some("750"))],
-        );
-        // Alias envs also flip
-        run_env_test(
-            "config::tests::issue196_chunk_env_flip_alias_probe",
-            &[("VERA_MAX_CHUNK_CHARS", Some("750"))],
-        );
-        run_env_test(
-            "config::tests::issue196_pool_env_flip_alias_pool_multiplier_probe",
-            &[("VERA_RANKING_POOL_MULTIPLIER", Some("1"))],
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_penalty_env_flip_probe() {
-        assert_eq!(
-            std::env::var("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY").unwrap(),
-            "1"
-        );
-        let cfg = VeraConfig::default();
-        assert!(
-            cfg.retrieval.ranking_multiplicative_path_penalty_enabled(),
-            "penalty should be enabled when VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY=1"
-        );
-        // Other knobs must remain OFF — independent flipping
-        assert!(
-            !cfg.retrieval.ranking_candidate_pool_multiplier_enabled(),
-            "pool multiplier must stay OFF when only penalty env is set"
-        );
-        assert_eq!(
-            cfg.indexing.chunk_max_chars_effective(),
-            0,
-            "chunk knob must stay OFF when penalty env is set"
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_pool_env_flip_probe() {
-        assert!(std::env::var("VERA_RANKING_CANDIDATE_POOL_MULTIPLIER").is_ok());
-        let cfg = VeraConfig::default();
-        assert!(
-            cfg.retrieval.ranking_candidate_pool_multiplier_enabled(),
-            "pool multiplier should be enabled when env=1"
-        );
-        assert_eq!(cfg.retrieval.candidate_pool_multiplier_factor(), 5);
-        assert!(
-            !cfg.retrieval.ranking_multiplicative_path_penalty_enabled(),
-            "penalty must stay OFF when only pool env is set"
-        );
-        assert_eq!(cfg.indexing.chunk_max_chars_effective(), 0);
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_pool_env_flip_numeric_5_probe() {
-        assert_eq!(
-            std::env::var("VERA_RANKING_CANDIDATE_POOL_MULTIPLIER").unwrap(),
-            "5"
-        );
-        let cfg = VeraConfig::default();
-        assert!(
-            cfg.retrieval.ranking_candidate_pool_multiplier_enabled(),
-            "pool multiplier should be enabled when env=5"
-        );
-        assert_eq!(cfg.retrieval.candidate_pool_multiplier_factor(), 5);
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_chunk_env_flip_probe() {
-        assert_eq!(
-            std::env::var("VERA_INDEXING_CHUNK_MAX_CHARS").unwrap(),
-            "750"
-        );
-        let cfg = VeraConfig::default();
-        assert_eq!(cfg.indexing.chunk_max_chars_effective(), 750);
-        assert!(cfg.indexing.chunk_max_chars_enabled());
-        assert_eq!(cfg.indexing.chunk_max_chars, 750);
-        // Retrieval knobs must stay OFF
-        assert!(!cfg.retrieval.ranking_multiplicative_path_penalty_enabled());
-        assert!(!cfg.retrieval.ranking_candidate_pool_multiplier_enabled());
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_chunk_env_flip_alias_probe() {
-        assert_eq!(std::env::var("VERA_MAX_CHUNK_CHARS").unwrap(), "750");
-        let cfg = VeraConfig::default();
-        assert_eq!(cfg.indexing.chunk_max_chars_effective(), 750);
-        assert!(cfg.indexing.chunk_max_chars_enabled());
-    }
-
-    #[test]
-    #[ignore = "driven by issue196_hypotheses_env_flips_independently"]
-    fn issue196_pool_env_flip_alias_pool_multiplier_probe() {
-        assert_eq!(std::env::var("VERA_RANKING_POOL_MULTIPLIER").unwrap(), "1");
-        let cfg = VeraConfig::default();
-        assert!(cfg.retrieval.ranking_candidate_pool_multiplier_enabled());
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn issue196_hypotheses_round_trip() {
-        let mut cfg = RetrievalConfig::default();
-        cfg.ranking_multiplicative_path_penalty = true;
-        cfg.ranking_candidate_pool_multiplier = true;
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: RetrievalConfig = serde_json::from_str(&json).unwrap();
-        assert!(back.ranking_multiplicative_path_penalty);
-        assert!(back.ranking_candidate_pool_multiplier);
-        assert!(back.ranking_multiplicative_path_penalty_enabled());
-        assert!(back.ranking_candidate_pool_multiplier_enabled());
-        assert_eq!(back.candidate_pool_multiplier_factor(), 5);
-
-        let mut icfg = IndexingConfig::default();
-        icfg.chunk_max_chars = 750;
-        let j2 = serde_json::to_string(&icfg).unwrap();
-        let back2: IndexingConfig = serde_json::from_str(&j2).unwrap();
-        assert_eq!(back2.chunk_max_chars, 750);
-        assert_eq!(back2.chunk_max_chars_effective(), 750);
-
-        // Alias deserialization: max_chunk_chars should also populate chunk_max_chars
-        let alias_json = r#"{"max_chunk_lines":200,"default_excludes":[],"max_file_size_bytes":1000000,"max_chunk_bytes":24576,"max_chunk_chars":750}"#;
-        let alias_cfg: IndexingConfig = serde_json::from_str(alias_json).unwrap();
-        assert_eq!(alias_cfg.chunk_max_chars, 750);
-    }
-
-    #[test]
-    fn alias_precedence_parity() {
-        // Chunk aliases: default* vs effective* must have identical set/order.
-        run_env_test(
-            "config::tests::chunk_alias_precedence_probe",
-            &[
-                ("VERA_INDEXING_CHUNK_MAX_CHARS", Some("111")),
-                ("VERA_INDEXING_MAX_CHUNK_CHARS", Some("222")),
-                ("VERA_MAX_CHUNK_CHARS", Some("333")),
-                ("VERA_CHUNK_MAX_CHARS", Some("444")),
-            ],
-        );
-        run_env_test(
-            "config::tests::chunk_alias_second_precedence_probe",
-            &[
-                ("VERA_INDEXING_CHUNK_MAX_CHARS", None),
-                ("VERA_INDEXING_MAX_CHUNK_CHARS", Some("222")),
-                ("VERA_MAX_CHUNK_CHARS", Some("333")),
-                ("VERA_CHUNK_MAX_CHARS", Some("444")),
-            ],
-        );
-        // Penalty aliases: default* vs effective* must be identical.
-        run_env_test(
-            "config::tests::penalty_alias_precedence_probe",
-            &[
-                ("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY", Some("0")),
-                ("VERA_RANKING_PATH_PENALTY", Some("1")),
-                ("VERA_RANKING_MULTIPLICATIVE_PENALTY", Some("1")),
-            ],
-        );
-        run_env_test(
-            "config::tests::penalty_alias_second_precedence_probe",
-            &[
-                ("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY", None),
-                ("VERA_RANKING_PATH_PENALTY", Some("1")),
-                ("VERA_RANKING_MULTIPLICATIVE_PENALTY", Some("0")),
-            ],
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by alias_precedence_parity"]
-    fn chunk_alias_precedence_probe() {
-        // All four chunk aliases set; first in precedence must win for both helpers.
-        assert_eq!(
-            std::env::var("VERA_INDEXING_CHUNK_MAX_CHARS").unwrap(),
-            "111"
-        );
-        let cfg = VeraConfig::default();
-        assert_eq!(
-            cfg.indexing.chunk_max_chars, 111,
-            "default_chunk_max_chars must respect first alias"
-        );
-        assert_eq!(
-            cfg.indexing.chunk_max_chars_effective(),
-            111,
-            "chunk_max_chars_effective must respect same first alias"
-        );
-        // Verify with a distinct stored value that effective still prefers env first.
-        let stored = IndexingConfig {
-            chunk_max_chars: 999,
-            ..Default::default()
-        };
-        assert_eq!(
-            stored.chunk_max_chars_effective(),
-            111,
-            "effective must prefer env over stored value with same precedence"
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by alias_precedence_parity"]
-    fn chunk_alias_second_precedence_probe() {
-        assert!(std::env::var("VERA_INDEXING_CHUNK_MAX_CHARS").is_err());
-        assert_eq!(
-            std::env::var("VERA_INDEXING_MAX_CHUNK_CHARS").unwrap(),
-            "222"
-        );
-        let cfg = VeraConfig::default();
-        assert_eq!(cfg.indexing.chunk_max_chars, 222);
-        assert_eq!(cfg.indexing.chunk_max_chars_effective(), 222);
-    }
-
-    #[test]
-    #[ignore = "driven by alias_precedence_parity"]
-    fn penalty_alias_precedence_probe() {
-        // All three penalty aliases set with conflicting values; first must win.
-        assert_eq!(
-            std::env::var("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY").unwrap(),
-            "0"
-        );
-        let cfg = VeraConfig::default();
-        // default helper should be false (first alias 0 wins)
-        assert!(
-            !cfg.retrieval.ranking_multiplicative_path_penalty,
-            "default helper must respect first penalty alias (0=false)"
-        );
-        assert!(
-            !cfg.retrieval.ranking_multiplicative_path_penalty_enabled(),
-            "effective helper must respect same first alias (0=false)"
-        );
-        // With stored true, effective must still be false due to env first.
-        let rcfg = RetrievalConfig {
-            ranking_multiplicative_path_penalty: true,
-            ..Default::default()
-        };
-        assert!(
-            !rcfg.ranking_multiplicative_path_penalty_enabled(),
-            "effective must prefer env first alias even when stored:true"
-        );
-    }
-
-    #[test]
-    #[ignore = "driven by alias_precedence_parity"]
-    fn penalty_alias_second_precedence_probe() {
-        assert!(std::env::var("VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY").is_err());
-        assert_eq!(std::env::var("VERA_RANKING_PATH_PENALTY").unwrap(), "1");
-        let cfg = VeraConfig::default();
-        assert!(cfg.retrieval.ranking_multiplicative_path_penalty);
-        assert!(cfg.retrieval.ranking_multiplicative_path_penalty_enabled());
     }
 
     // ── Filter-during-scan knob (#197) ──

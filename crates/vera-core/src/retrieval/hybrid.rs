@@ -18,7 +18,6 @@ use tracing::{debug, info, warn};
 
 use crate::embedding::EmbeddingProvider;
 use crate::retrieval::bm25::search_bm25_with_stores_and_filters;
-use crate::retrieval::graph_augmentation::augment_pool;
 use crate::retrieval::query_classifier::{QueryType, classify_query, params_for_query_type};
 use crate::retrieval::query_utils::result_key;
 use crate::retrieval::ranking::is_path_weighted_query;
@@ -210,8 +209,7 @@ impl SearchStores {
         let bm25 = Bm25Index::open(&index_dir.join("bm25"))
             .context("failed to open BM25 index for search")?;
         let metadata_path = index_dir.join("metadata.db");
-        let bm25_metadata = MetadataStore::open(&metadata_path)
-            .context("failed to open metadata store for search")?;
+        let bm25_metadata = super::open_search_metadata(index_dir)?;
         let vector_metadata = MetadataStore::open(&metadata_path)
             .context("failed to open vector metadata store for search")?;
         let open_stamp = metadata_db_stamp(&metadata_path);
@@ -357,18 +355,11 @@ impl SearchStores {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn eligibility_cached(&self) -> bool {
         self.eligibility
             .lock()
             .map(|g| g.is_some())
             .unwrap_or(false)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn invalidate_eligibility_for_test(&self) {
-        let _ = self.eligibility.lock().map(|mut g| *g = None);
     }
 
     pub(crate) fn vector_store(&self, dim: usize) -> Result<Arc<Mutex<VectorStore>>> {
@@ -487,40 +478,6 @@ pub async fn search_hybrid(
     .await
 }
 
-/// Perform hybrid search using stores retained by a reusable search context.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) async fn search_hybrid_with_stores(
-    index_dir: &Path,
-    provider: &impl EmbeddingProvider,
-    bm25_query: &str,
-    vector_query: &str,
-    filters: &SearchFilters,
-    limit: usize,
-    rrf_k: f64,
-    stored_dim: usize,
-    vector_candidates: usize,
-    stores: Arc<SearchStores>,
-) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
-    let filter_during_scan_enabled = crate::config::VeraConfig::default()
-        .retrieval
-        .vector_filter_during_scan_enabled();
-    search_hybrid_inner(
-        index_dir,
-        provider,
-        bm25_query,
-        vector_query,
-        filters,
-        limit,
-        rrf_k,
-        stored_dim,
-        vector_candidates,
-        filter_during_scan_enabled,
-        Some(stores),
-    )
-    .await
-}
-
 /// Perform hybrid search using stores + explicit filter-during-scan flag.
 /// SearchContext uses this to respect file-config + env precedence.
 #[allow(clippy::too_many_arguments)]
@@ -567,6 +524,9 @@ async fn search_hybrid_inner(
     filter_during_scan_enabled: bool,
     stores: Option<Arc<SearchStores>>,
 ) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
+    if stores.is_none() {
+        super::open_search_metadata(index_dir)?;
+    }
     let query_type = classify_query(bm25_query);
     let query_params = params_for_query_type(query_type);
     let bm25_candidates = compute_bm25_candidates(bm25_query, limit);
@@ -943,43 +903,6 @@ pub async fn search_hybrid_reranked(
     rerank_candidates: usize,
     vector_candidates: usize,
 ) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
-    search_hybrid_reranked_with_augmentation(
-        index_dir,
-        provider,
-        reranker,
-        bm25_query,
-        vector_query,
-        filters,
-        fetch_limit,
-        result_limit,
-        rrf_k,
-        stored_dim,
-        rerank_candidates,
-        vector_candidates,
-        false,
-    )
-    .await
-}
-
-/// Perform reranked hybrid search using stores retained by a reusable context.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) async fn search_hybrid_reranked_with_stores(
-    index_dir: &Path,
-    provider: &impl EmbeddingProvider,
-    reranker: &impl Reranker,
-    bm25_query: &str,
-    vector_query: &str,
-    filters: &SearchFilters,
-    fetch_limit: usize,
-    result_limit: usize,
-    rrf_k: f64,
-    stored_dim: usize,
-    rerank_candidates: usize,
-    vector_candidates: usize,
-    graph_augmentation_enabled: bool,
-    stores: Arc<SearchStores>,
-) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
     search_hybrid_reranked_inner(
         index_dir,
         provider,
@@ -993,18 +916,16 @@ pub(crate) async fn search_hybrid_reranked_with_stores(
         stored_dim,
         rerank_candidates,
         vector_candidates,
-        graph_augmentation_enabled,
         crate::config::VeraConfig::default()
             .retrieval
             .vector_filter_during_scan_enabled(),
-        Some(stores),
+        None,
     )
     .await
 }
 
-/// Flagged variant respecting config-override for filter-during-scan.
+/// Reranked search with retained stores and an explicit filter-scan setting.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub(crate) async fn search_hybrid_reranked_with_stores_and_flag(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -1018,7 +939,6 @@ pub(crate) async fn search_hybrid_reranked_with_stores_and_flag(
     stored_dim: usize,
     rerank_candidates: usize,
     vector_candidates: usize,
-    graph_augmentation_enabled: bool,
     stores: Arc<SearchStores>,
     filter_during_scan_enabled: bool,
 ) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
@@ -1035,84 +955,6 @@ pub(crate) async fn search_hybrid_reranked_with_stores_and_flag(
         stored_dim,
         rerank_candidates,
         vector_candidates,
-        graph_augmentation_enabled,
-        filter_during_scan_enabled,
-        Some(stores),
-    )
-    .await
-}
-
-/// Perform hybrid search with optional experimental graph augmentation.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn search_hybrid_reranked_with_augmentation(
-    index_dir: &Path,
-    provider: &impl EmbeddingProvider,
-    reranker: &impl Reranker,
-    bm25_query: &str,
-    vector_query: &str,
-    filters: &SearchFilters,
-    fetch_limit: usize,
-    result_limit: usize,
-    rrf_k: f64,
-    stored_dim: usize,
-    rerank_candidates: usize,
-    vector_candidates: usize,
-    graph_augmentation_enabled: bool,
-) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
-    search_hybrid_reranked_inner(
-        index_dir,
-        provider,
-        reranker,
-        bm25_query,
-        vector_query,
-        filters,
-        fetch_limit,
-        result_limit,
-        rrf_k,
-        stored_dim,
-        rerank_candidates,
-        vector_candidates,
-        graph_augmentation_enabled,
-        crate::config::VeraConfig::default()
-            .retrieval
-            .vector_filter_during_scan_enabled(),
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn search_hybrid_reranked_with_augmentation_and_flag(
-    index_dir: &Path,
-    provider: &impl EmbeddingProvider,
-    reranker: &impl Reranker,
-    bm25_query: &str,
-    vector_query: &str,
-    filters: &SearchFilters,
-    fetch_limit: usize,
-    result_limit: usize,
-    rrf_k: f64,
-    stored_dim: usize,
-    rerank_candidates: usize,
-    vector_candidates: usize,
-    graph_augmentation_enabled: bool,
-    stores: Arc<SearchStores>,
-    filter_during_scan_enabled: bool,
-) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
-    search_hybrid_reranked_inner(
-        index_dir,
-        provider,
-        reranker,
-        bm25_query,
-        vector_query,
-        filters,
-        fetch_limit,
-        result_limit,
-        rrf_k,
-        stored_dim,
-        rerank_candidates,
-        vector_candidates,
-        graph_augmentation_enabled,
         filter_during_scan_enabled,
         Some(stores),
     )
@@ -1133,13 +975,12 @@ async fn search_hybrid_reranked_inner(
     stored_dim: usize,
     rerank_candidates: usize,
     vector_candidates: usize,
-    graph_augmentation_enabled: bool,
     filter_during_scan_enabled: bool,
     stores: Option<Arc<SearchStores>>,
 ) -> Result<(Vec<SearchResult>, HybridTimings), HybridSearchError> {
     let fusion_limit = rerank_candidates.max(fetch_limit);
 
-    let (mut hybrid_results, mut timings) = match stores {
+    let (hybrid_results, mut timings) = match stores {
         Some(stores) => {
             search_hybrid_with_stores_and_flag(
                 index_dir,
@@ -1178,29 +1019,16 @@ async fn search_hybrid_reranked_inner(
         }
     };
 
-    let augmented_count = if graph_augmentation_enabled {
-        augment_pool(index_dir, &mut hybrid_results, filters)
-    } else {
-        0
-    };
-
     if hybrid_results.is_empty() {
         return Ok((hybrid_results, timings));
     }
 
-    if hybrid_results.len() <= result_limit && augmented_count == 0 {
+    if hybrid_results.len() <= result_limit {
         return Ok((hybrid_results, timings));
     }
 
     let rerank_start = Instant::now();
-    // When graph candidates were appended, score the whole expanded pool so
-    // candidates beyond the normal rerank prefix still compete semantically.
-    let rerank_limit = if augmented_count > 0 {
-        hybrid_results.len()
-    } else {
-        rerank_candidates
-    };
-    match rerank_results(reranker, vector_query, &hybrid_results, rerank_limit).await {
+    match rerank_results(reranker, vector_query, &hybrid_results, rerank_candidates).await {
         Ok(mut reranked) => {
             timings.reranking = Some(rerank_start.elapsed());
             info!(
@@ -1209,7 +1037,8 @@ async fn search_hybrid_reranked_inner(
                 reranked = reranked.len(),
                 "reranking complete"
             );
-            reranked = merge_reranked_results(reranked, hybrid_results, rerank_limit, fetch_limit);
+            reranked =
+                merge_reranked_results(reranked, hybrid_results, rerank_candidates, fetch_limit);
             Ok((reranked, timings))
         }
         Err(rerank_err) => {

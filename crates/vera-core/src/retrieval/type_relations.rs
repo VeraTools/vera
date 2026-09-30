@@ -12,7 +12,6 @@ use crate::retrieval::file_scan::{
     allows_class, language_for_path, line_context_snippet, smallest_symbol_chunk_for_line,
     symbol_for_line,
 };
-use crate::storage::metadata::MetadataStore;
 use crate::types::{SearchFilters, SearchResult, SymbolType};
 
 pub fn search_explicit_implementations(
@@ -25,8 +24,7 @@ pub fn search_explicit_implementations(
         anyhow::bail!("limit must be greater than zero");
     }
 
-    let metadata_path = index_dir.join("metadata.db");
-    let store = MetadataStore::open(&metadata_path)?;
+    let store = super::open_search_metadata(index_dir)?;
     let repo_root = canonical_project_root(index_dir)?;
     let root_dir = crate::discovery::open_root_dir(&repo_root)?;
     let max_file_size_bytes = super::configured_max_file_size_bytes(&store);

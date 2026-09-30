@@ -10,7 +10,6 @@
 
 pub mod bm25;
 pub(crate) mod exact_matches;
-pub(crate) mod graph_augmentation;
 pub mod hybrid;
 pub mod query_classifier;
 pub mod ranking;
@@ -51,6 +50,18 @@ pub use vector::{VectorSearchError, search_vector_with_stores};
 use crate::config::{DEFAULT_MAX_FILE_SIZE_BYTES, IndexingConfig};
 use crate::storage::metadata::MetadataStore;
 use crate::types::{SearchFilters, SearchResult};
+
+/// Open search metadata only after checking the stored chunking contract.
+pub(crate) fn open_search_metadata(index_dir: &std::path::Path) -> anyhow::Result<MetadataStore> {
+    use anyhow::Context;
+    let store = MetadataStore::open(&index_dir.join("metadata.db"))
+        .context("failed to open metadata store for search")?;
+    crate::indexing::freshness::ensure_index_chunking_compatible(
+        &store,
+        index_dir.parent().unwrap_or(index_dir),
+    )?;
+    Ok(store)
+}
 
 /// The file-size cap query-time source reads must honor.
 ///

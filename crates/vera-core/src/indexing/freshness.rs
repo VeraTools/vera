@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use tracing::warn;
 
@@ -34,6 +34,41 @@ pub fn index_format_is_current(metadata_store: &MetadataStore) -> bool {
         metadata_store.get_index_meta(INDEX_FORMAT_VERSION_KEY),
         Ok(Some(stored)) if stored == INDEX_FORMAT_VERSION
     )
+}
+
+/// Reject indexes built with the retired character-cap chunking experiment.
+///
+/// Missing or zero caps preserve compatibility with ordinary indexes. Inspect
+/// the raw metadata before deserialization can discard historical aliases.
+pub fn ensure_index_chunking_compatible(
+    metadata_store: &MetadataStore,
+    repo_path: &Path,
+) -> Result<()> {
+    let rebuild = || {
+        format!(
+            "Run `vera index {}` to rebuild the full index.",
+            repo_path.display()
+        )
+    };
+    let Some(encoded) = metadata_store
+        .get_index_meta(INDEXING_CONFIG_KEY)
+        .context("failed to read saved indexing config")?
+    else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(&encoded)
+        .with_context(|| format!("Invalid saved indexing config. {}", rebuild()))?;
+    for key in ["chunk_max_chars", "max_chunk_chars", "max_chunk_characters"] {
+        if let Some(cap) = value.get(key)
+            && cap.as_u64() != Some(0)
+        {
+            bail!(
+                "Index uses retired character-cap chunking ({key}={cap}). {}",
+                rebuild()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Summary of drift between the working tree and the current index.
@@ -125,6 +160,8 @@ pub fn detect_staleness(
     let metadata_path = index_dir(&repo_root).join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
+
+    ensure_index_chunking_compatible(&metadata_store, &repo_root)?;
 
     let indexing_config = load_indexing_config(&metadata_store, fallback_config);
     let discovery = discovery::discover_files(&repo_root, &indexing_config)
@@ -291,6 +328,45 @@ mod tests {
     #[test]
     fn fresh_index_has_no_stale_warning() {
         assert_eq!(IndexFreshness::default().stale_warning(), None);
+    }
+
+    #[test]
+    fn retired_character_caps_require_a_full_rebuild_under_every_alias() {
+        let metadata = MetadataStore::open_in_memory().unwrap();
+        let root = Path::new("fixture-repo");
+        ensure_index_chunking_compatible(&metadata, root).unwrap();
+        for encoded in [
+            r#"{}"#,
+            r#"{"chunk_max_chars":0,"max_chunk_chars":0,"max_chunk_characters":0}"#,
+        ] {
+            metadata
+                .set_index_meta(INDEXING_CONFIG_KEY, encoded)
+                .unwrap();
+            ensure_index_chunking_compatible(&metadata, root).unwrap();
+        }
+        for key in ["chunk_max_chars", "max_chunk_chars", "max_chunk_characters"] {
+            let mut encoded = serde_json::json!({
+                "chunk_max_chars": 0,
+                "max_chunk_chars": 0,
+                "max_chunk_characters": 0,
+            });
+            encoded[key] = serde_json::json!(750);
+            metadata
+                .set_index_meta(INDEXING_CONFIG_KEY, &encoded.to_string())
+                .unwrap();
+            let error = ensure_index_chunking_compatible(&metadata, root)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key));
+            assert!(error.contains("vera index fixture-repo"));
+        }
+        metadata
+            .set_index_meta(INDEXING_CONFIG_KEY, "invalid-json")
+            .unwrap();
+        let error = ensure_index_chunking_compatible(&metadata, root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("vera index fixture-repo"));
     }
 
     #[test]

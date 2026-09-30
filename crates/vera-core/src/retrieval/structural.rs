@@ -64,8 +64,7 @@ pub fn search_structural(
         bail!("limit must be greater than zero");
     }
 
-    let metadata_path = index_dir.join("metadata.db");
-    let store = MetadataStore::open(&metadata_path)?;
+    let store = super::open_search_metadata(index_dir)?;
     let repo_root = canonical_project_root(index_dir)?;
     let root_dir = crate::discovery::open_root_dir(&repo_root)?;
     let max_file_size_bytes = super::configured_max_file_size_bytes(&store);

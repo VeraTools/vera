@@ -72,8 +72,6 @@
 | `retrieval.ranking_filename_stem_skip_symbol_queries` | `false` | Skips filename-stem boosting for symbol queries. |
 | `retrieval.ranking_definition_boost` | `true` | Boosts matching definitions. |
 | `retrieval.ranking_recall_pool_expansion` | `true` | Expands the recall pool before final ranking. |
-| `retrieval.ranking_multiplicative_path_penalty` (`ranking_path_penalty`, `ranking_multiplicative_penalty`) | `false` | Enables the multiplicative path penalty. |
-| `retrieval.ranking_candidate_pool_multiplier` (`ranking_pool_multiplier`, `ranking_candidate_pool_size_multiplier`) | `false` | Enables the 5x candidate-pool multiplier. |
 | `retrieval.vector_filter_during_scan` | `true` | Applies eligible path and language filters during vector scanning. |
 
 ### Environment variables
@@ -91,13 +89,6 @@
 | `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` | `false` | Skips that boost for symbol queries. |
 | `VERA_RANKING_DEFINITION_BOOST` | `true` | Enables definition-content boosting. |
 | `VERA_RANKING_RECALL_POOL_EXPANSION` | `true` | Enables recall-pool expansion. |
-| `VERA_RANKING_MULTIPLICATIVE_PATH_PENALTY` | `false` | Enables multiplicative path penalties. |
-| `VERA_RANKING_PATH_PENALTY` | `false` | Alias for the path-penalty switch. |
-| `VERA_RANKING_MULTIPLICATIVE_PENALTY` | `false` | Alias for the path-penalty switch. |
-| `VERA_RANKING_CANDIDATE_POOL_MULTIPLIER` | `false` | Enables the candidate-pool multiplier. |
-| `VERA_RANKING_CANDIDATE_POOL_SIZE_MULTIPLIER` | `false` | Alias for the candidate-pool multiplier. |
-| `VERA_RANKING_POOL_MULTIPLIER` | `false` | Alias for the candidate-pool multiplier. |
-| `VERA_RANKING_CANDIDATE_POOL_MULT` | `false` | Alias for the candidate-pool multiplier. |
 | `VERA_VECTOR_FILTER_DURING_SCAN` | `true` | Enables filtering during flat vector scans. |
 | `VERA_VECTOR_SCAN` | flat | Selects the flat SIMD scan or `vec0` fallback. |
 
@@ -114,7 +105,6 @@
 | `indexing.no_ignore` | `false` | Disables `.gitignore` and `.veraignore` parsing. |
 | `indexing.no_default_excludes` | `false` | Disables smart default exclusions. |
 | `indexing.max_chunk_bytes` | 24576 | Splits oversized embedding chunks at line boundaries; `0` disables this cap. |
-| `indexing.chunk_max_chars` (`max_chunk_chars`, `max_chunk_characters`) | 0 | Splits chunks by character count; `0` disables this cap. |
 
 ### Environment variables
 
@@ -122,11 +112,6 @@
 |---|---:|---|
 | `VERA_MAX_CHUNK_BYTES` | 24576 | Overrides the byte chunk cap. |
 | `VERA_MAX_IN_FLIGHT_INPUTS` | 0 | Caps the number of embedding inputs held in flight. |
-| `VERA_INDEXING_CHUNK_MAX_CHARS` | 0 | Overrides the character chunk cap. |
-| `VERA_INDEXING_MAX_CHUNK_CHARS` | 0 | Alias for the character chunk cap. |
-| `VERA_MAX_CHUNK_CHARS` | 0 | Alias for the character chunk cap. |
-| `VERA_CHUNK_MAX_CHARS` | 0 | Alias for the character chunk cap. |
-| `VERA_GRAPH_AUGMENT` | unset | Enables graph-based indexing augmentation where supported. |
 | `VERA_OVERCAP_FIXTURE` | unset | Selects the filter-scan over-cap test fixture. |
 
 ## Runtime/misc

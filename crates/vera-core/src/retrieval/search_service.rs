@@ -385,15 +385,7 @@ impl SearchContext {
 
         let filter_flag = config.retrieval.vector_filter_during_scan_enabled();
         let (results, hybrid_timings) = if let Some(reranker) = reranker {
-            // Reranked path: temporary direct call that respects the flag via
-            // the default-config fallback (env authoritative). Full flag threading
-            // for reranked path will be added if needed; for now the non-reranked
-            // path is the differential surface covered by VAL-197.
-            // To keep the flag authoritative through SearchContext, we route the
-            // non-reranked filtered path via the flagged variant and leave the
-            // reranked variant on the legacy default-flag path unless the config
-            // flag is carried through the reranked wrapper in a follow-up.
-            crate::retrieval::hybrid::search_hybrid_reranked_with_augmentation_and_flag(
+            crate::retrieval::hybrid::search_hybrid_reranked_with_stores_and_flag(
                 index_dir,
                 provider,
                 reranker,
@@ -406,7 +398,6 @@ impl SearchContext {
                 stored_dim,
                 rerank_candidates,
                 vector_candidates,
-                crate::config::graph_augmentation_enabled(),
                 Arc::clone(&stores),
                 filter_flag,
             )
@@ -500,7 +491,7 @@ pub(crate) fn build_query_with_intent<'a>(
 /// scores placed outside the requested result window. Gated by the
 /// `ranking_recall_pool_expansion` signal (issue #196) so ablations can
 /// measure its contribution without changing other ranking logic.
-#[allow(dead_code)]
+#[cfg(test)]
 fn compute_fetch_limit(query: &str, filters: &SearchFilters, result_limit: usize) -> usize {
     compute_fetch_limit_with_config(query, filters, result_limit, &VeraConfig::default())
 }
@@ -527,21 +518,7 @@ pub(crate) fn compute_fetch_limit_with_config(
         fetch_limit = fetch_limit.max(result_limit.saturating_mul(12).max(result_limit + 200));
     }
 
-    // Candidate-pool multiplier (issue #196 second hypothesis): bare 5× top_k.
-    // Distinct from the table-driven `ranking_recall_pool_expansion` (which
-    // gates structural 8× and NL 3× on query shape; reported full-suite delta
-    // 0.54% in #239). The bare multiplier is applied uniformly when enabled,
-    // before the conditional recall expansion so both knobs compose without
-    // duplicating the conditional logic.
-    if config.retrieval.ranking_candidate_pool_multiplier_enabled() {
-        let five_x = result_limit.saturating_mul(5).max(result_limit + 50);
-        fetch_limit = fetch_limit.max(five_x);
-    }
-
-    // Recall-oriented expansion for NL queries is the #196 signal. When disabled,
-    // only filter-driven (and the bare 5× above) expansion applies, keeping
-    // the pool tight so the ablation can measure the recall contribution of
-    // the broader pool.
+    // Preserve filter-driven overfetch when recall expansion is disabled.
     if !config.retrieval.ranking_recall_pool_expansion_enabled() {
         return fetch_limit;
     }
@@ -1149,75 +1126,6 @@ mod tests {
         let ident_collapsed = compute_fetch_limit_with_config("Config", &filters, 20, &disabled);
         assert_eq!(ident_expanded, 20);
         assert_eq!(ident_collapsed, 20);
-    }
-
-    #[test]
-    fn candidate_pool_multiplier_is_toggleable_and_independent() {
-        let filters = SearchFilters::default();
-        let mut disabled = VeraConfig::default();
-        disabled.retrieval.ranking_candidate_pool_multiplier = false;
-        disabled.retrieval.ranking_recall_pool_expansion = false;
-        // DEFAULT OFF: fetch limit stays at result_limit for neutral queries
-        assert_eq!(
-            compute_fetch_limit_with_config("Config", &filters, 20, &disabled),
-            20,
-            "DEFAULT OFF must not inflate neutral filter-less query"
-        );
-        // Bare 5× when enabled: even an identifier query (which never triggers
-        // the recall table) must be inflated to at least 5× top_k.
-        let mut bare_enabled = VeraConfig::default();
-        bare_enabled.retrieval.ranking_candidate_pool_multiplier = true;
-        bare_enabled.retrieval.ranking_recall_pool_expansion = false;
-        let bare = compute_fetch_limit_with_config("Config", &filters, 20, &bare_enabled);
-        assert!(
-            bare >= 100,
-            "candidate-pool multiplier ON must inflate Config to at least 5×20=100, got {bare}"
-        );
-        assert_eq!(
-            bare, 100,
-            "bare 5× should be 100 (max(5*20,20+50)) without recall duplication, got {bare}"
-        );
-        // NL query with multiplier ON should be at least 5×, distinct from recall's 3×/8×
-        let nl_bare = compute_fetch_limit_with_config(
-            "file type detection and filtering",
-            &filters,
-            20,
-            &bare_enabled,
-        );
-        assert!(
-            nl_bare >= 100,
-            "NL with bare multiplier must be at least 5×, got {nl_bare}"
-        );
-        // When both knobs are ON, they compose (bare 5× plus recall table).
-        // For a structural NL query (≥4 words, not path-weighted), recall would
-        // give 8× (160). With bare 5×, the result should be at least 100 but
-        // not duplicate the recall logic: recall still applies after bare.
-        let mut both = VeraConfig::default();
-        both.retrieval.ranking_candidate_pool_multiplier = true;
-        both.retrieval.ranking_recall_pool_expansion = true;
-        let both_limit = compute_fetch_limit_with_config(
-            "file type detection and filtering",
-            &filters,
-            20,
-            &both,
-        );
-        assert!(
-            both_limit >= 100,
-            "both knobs ON should still be at least 5×, got {both_limit}"
-        );
-        // Filter-driven max must still work with bare multiplier independent of recall
-        let filtered = SearchFilters {
-            path_glob: vec!["src/**".to_string()],
-            ..Default::default()
-        };
-        let filtered_bare = compute_fetch_limit_with_config("Config", &filtered, 5, &bare_enabled);
-        assert!(
-            filtered_bare >= 50,
-            "path_glob + bare multiplier should be large, got {filtered_bare}"
-        );
-        // Ensure pool multiplier factor helper reports 5 when enabled
-        assert_eq!(bare_enabled.retrieval.candidate_pool_multiplier_factor(), 5);
-        assert_eq!(disabled.retrieval.candidate_pool_multiplier_factor(), 1);
     }
 
     #[test]
