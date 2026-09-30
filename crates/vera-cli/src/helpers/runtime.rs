@@ -3,6 +3,23 @@
 use anyhow::Context;
 use clap::Args;
 
+/// Treat Escape/Ctrl-C during a prompt as a clean command cancellation.
+pub fn finish_prompt_command(result: anyhow::Result<()>, message: &str) -> anyhow::Result<()> {
+    match result {
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
+            }) =>
+        {
+            println!("{message}");
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// Install the process interrupt handler and return a future for its first event.
 #[cfg(unix)]
 pub fn wait_for_interrupt(

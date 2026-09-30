@@ -1,6 +1,6 @@
 //! `vera agent ...` — install and manage the Vera skill for coding agents.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -151,13 +151,6 @@ pub enum AgentScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectionPreset {
-    Installed,
-    All,
-    None,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallWorkflowChoice {
     RefreshStale,
     Manage,
@@ -209,13 +202,6 @@ impl ClientInstallStatus {
         self.scopes
             .iter()
             .any(|scope| scope.installed && !scope.up_to_date)
-    }
-
-    fn install_scopes(&self) -> impl Iterator<Item = AgentScope> + '_ {
-        self.scopes
-            .iter()
-            .filter(|scope| scope.installed)
-            .map(|scope| scope.scope)
     }
 
     fn scopes_needing_install(&self) -> impl Iterator<Item = AgentScope> + '_ {
@@ -273,7 +259,7 @@ pub fn run(
     scope: Option<AgentScope>,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    match command {
+    let result = match command {
         AgentCommand::Install => install(client, scope, json_output),
         AgentCommand::Status => status(
             client.unwrap_or(AgentClient::All),
@@ -286,7 +272,19 @@ pub fn run(
             scope.unwrap_or(AgentScope::All),
             json_output,
         ),
+    };
+    crate::helpers::finish_prompt_command(result, "Cancelled. Any completed changes remain saved.")
+}
+
+fn require_terminal(command: &str) -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "`vera agent {command}` needs a terminal for interactive selection. \
+            Pass `--client <client>` and `--scope <global|project|all>`, or `--json`, \
+            to run without prompts."
+        );
     }
+    Ok(())
 }
 
 fn install(
@@ -311,7 +309,8 @@ fn install(
     Ok(())
 }
 
-fn install_interactive() -> anyhow::Result<()> {
+pub(crate) fn install_interactive() -> anyhow::Result<()> {
+    require_terminal("install")?;
     cliclack::intro("vera agent install")?;
 
     let scope: AgentScope = cliclack::select("Install scope")
@@ -323,7 +322,6 @@ fn install_interactive() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to resolve current directory")?;
     let home = state::user_home_dir()?;
     let statuses = collect_client_install_statuses(scope, &cwd, &home)?;
-    let all_clients: Vec<AgentClient> = AgentClient::all_concrete().collect();
     let installed_clients: Vec<AgentClient> = statuses
         .iter()
         .filter(|status| status.is_installed())
@@ -335,7 +333,7 @@ fn install_interactive() -> anyhow::Result<()> {
         let stale_install_count = statuses.iter().filter(|status| status.is_stale()).count();
         let choice = cliclack::select(format!(
             "Detected {} stale Vera skill install(s) across {} agent(s)",
-            stale_locations.len(),
+            group_skill_locations(&stale_locations).len(),
             stale_install_count,
         ))
         .item(
@@ -345,8 +343,8 @@ fn install_interactive() -> anyhow::Result<()> {
         )
         .item(
             InstallWorkflowChoice::Manage,
-            "Manage installs manually",
-            "open the full install/remove selector",
+            "Choose agents to install",
+            "add or update selected agents",
         )
         .initial_value(InstallWorkflowChoice::RefreshStale)
         .interact()?;
@@ -358,84 +356,59 @@ fn install_interactive() -> anyhow::Result<()> {
         }
     }
 
-    let preset = cliclack::select("Starting selection")
-        .item(
-            SelectionPreset::Installed,
-            "Keep installed",
-            "preselect agents that already have Vera installed",
-        )
-        .item(
-            SelectionPreset::All,
-            "Enable all",
-            "start with every supported agent selected",
-        )
-        .item(
-            SelectionPreset::None,
-            "Disable all",
-            "start with nothing selected",
-        )
-        .initial_value(if installed_clients.is_empty() {
-            SelectionPreset::None
-        } else {
-            SelectionPreset::Installed
-        })
-        .interact()?;
-
-    let initial_selected = match preset {
-        SelectionPreset::Installed => installed_clients.clone(),
-        SelectionPreset::All => all_clients.to_vec(),
-        SelectionPreset::None => Vec::new(),
-    };
-
     let mut multi = cliclack::multiselect(
-        "Select agents to install (space to toggle, enter applies installs and removals)",
+        "Select agents to add or update (Space toggles, Enter confirms; empty skips)",
     )
-    .initial_values(initial_selected);
+    .initial_values(installed_clients)
+    .required(false)
+    .max_rows(10);
     for status in &statuses {
         multi = multi.item(status.client, status.client.display_name(), status.hint());
     }
     let selected: Vec<AgentClient> = multi.interact()?;
-
-    let mut install_locations = Vec::new();
-    let mut remove_locations = Vec::new();
-
-    for status in &statuses {
-        if selected.contains(&status.client) {
-            for scope in status.scopes_needing_install() {
-                install_locations.push(SkillLocation {
-                    client: status.client,
-                    scope,
-                    path: skill_path_for(status.client, scope, &cwd, &home)?,
-                });
-            }
-        } else {
-            for scope in status.install_scopes() {
-                let path = skill_path_for(status.client, scope, &cwd, &home)?;
-                remove_locations.push(SkillLocation {
-                    client: status.client,
-                    scope,
-                    path,
-                });
-            }
-        }
-    }
-
-    if !remove_locations.is_empty() {
-        do_remove(&remove_locations, false)?;
-    }
-    if !install_locations.is_empty() {
-        do_install(&install_locations, false)?;
-    }
     if selected.is_empty() {
-        cliclack::outro("Done!")?;
+        cliclack::outro("No changes selected.")?;
         return Ok(());
     }
-    if install_locations.is_empty() && remove_locations.is_empty() {
-        cliclack::log::info("No skill changes needed. Installed selections are already current.")?;
+    let install_locations = selected_install_locations(&statuses, &selected, &cwd, &home)?;
+    if install_locations.is_empty() {
+        cliclack::log::info("Selected skills are already current.")?;
+    } else {
+        do_install(&install_locations, false)?;
     }
     offer_agents_md_snippet(&selected)?;
     cliclack::outro("Done!")?;
     Ok(())
+}
+
+fn selected_install_locations(
+    statuses: &[ClientInstallStatus],
+    selected: &[AgentClient],
+    cwd: &Path,
+    home: &Path,
+) -> anyhow::Result<Vec<SkillLocation>> {
+    let mut locations = Vec::new();
+    for status in statuses
+        .iter()
+        .filter(|status| selected.contains(&status.client))
+    {
+        for scope in status.scopes_needing_install() {
+            locations.push(SkillLocation {
+                client: status.client,
+                scope,
+                path: skill_path_for(status.client, scope, cwd, home)?,
+            });
+        }
+    }
+    Ok(locations)
+}
+
+fn group_skill_locations(locations: &[SkillLocation]) -> BTreeMap<&Path, Vec<&SkillLocation>> {
+    let mut groups = BTreeMap::<&Path, Vec<&SkillLocation>>::new();
+    for location in locations {
+        groups.entry(&location.path).or_default().push(location);
+    }
+    groups
 }
 
 fn do_install(locations: &[SkillLocation], json_output: bool) -> anyhow::Result<()> {
@@ -443,16 +416,13 @@ fn do_install(locations: &[SkillLocation], json_output: bool) -> anyhow::Result<
         return Ok(());
     }
 
-    for location in locations {
-        if location.path.exists() {
-            fs::remove_dir_all(&location.path).with_context(|| {
-                format!(
-                    "failed to replace existing skill at {}",
-                    location.path.display()
-                )
+    for path in group_skill_locations(locations).keys() {
+        if path.exists() {
+            fs::remove_dir_all(path).with_context(|| {
+                format!("failed to replace existing skill at {}", path.display())
             })?;
         }
-        install_skill_to(&location.path)?;
+        install_skill_to(path)?;
     }
 
     let reports: Vec<SkillLocationReport> = locations
@@ -507,51 +477,49 @@ fn remove(
 }
 
 fn remove_interactive() -> anyhow::Result<()> {
+    require_terminal("remove")?;
     let cwd = std::env::current_dir().context("failed to resolve current directory")?;
     let home = state::user_home_dir()?;
-    let all_clients: Vec<AgentClient> = AgentClient::all_concrete().collect();
-
-    let mut installed: Vec<(AgentClient, AgentScope, PathBuf)> = Vec::new();
-    for &client in &all_clients {
-        for scope in [AgentScope::Global, AgentScope::Project] {
-            let path = skill_path_for(client, scope, &cwd, &home)?;
-            if path.join("SKILL.md").exists() {
-                installed.push((client, scope, path));
-            }
-        }
-    }
-
+    let installed: Vec<SkillLocation> =
+        resolve_locations_with_roots(AgentClient::All, AgentScope::All, &cwd, &home)?
+            .into_iter()
+            .filter(|location| location.path.join("SKILL.md").exists())
+            .collect();
     if installed.is_empty() {
         println!("No Vera skill installations found.");
         return Ok(());
     }
 
     cliclack::intro("vera agent remove")?;
-
-    let mut multi = cliclack::multiselect("Select installations to remove");
-    for (i, (c, s, p)) in installed.iter().enumerate() {
-        let label = format!(
-            "{} ({})",
-            c.display_name(),
-            format!("{:?}", s).to_lowercase()
-        );
-        let hint = p.display().to_string();
-        multi = multi.item(i, label, hint);
+    let groups: Vec<_> = group_skill_locations(&installed).into_iter().collect();
+    let mut multi = cliclack::multiselect(
+        "Select skill directories to remove (Space toggles, Enter confirms; empty skips)",
+    )
+    .required(false)
+    .max_rows(10);
+    for (index, (path, locations)) in groups.iter().enumerate() {
+        let label = locations
+            .iter()
+            .map(|location| {
+                format!(
+                    "{} ({})",
+                    location.client.display_name(),
+                    location.scope.label()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        multi = multi.item(index, label, path.display().to_string());
     }
-    let selected: Vec<usize> = multi.required(true).interact()?;
-
+    let selected: Vec<usize> = multi.interact()?;
+    if selected.is_empty() {
+        cliclack::outro("No changes selected.")?;
+        return Ok(());
+    }
     let locations: Vec<SkillLocation> = selected
         .iter()
-        .map(|&idx| {
-            let (client, scope, path) = &installed[idx];
-            SkillLocation {
-                client: *client,
-                scope: *scope,
-                path: path.clone(),
-            }
-        })
+        .flat_map(|&index| groups[index].1.iter().map(|location| (*location).clone()))
         .collect();
-
     do_remove(&locations, false)?;
     cliclack::outro("Done!")?;
     Ok(())
@@ -602,12 +570,10 @@ fn remove_skill_locations(locations: &[SkillLocation]) -> SkillRemoval {
         failures: Vec::new(),
     };
 
-    for location in locations {
-        let marker = location.path.join("SKILL.md");
-        // `Path::exists` coerces a permission error into `false`, which reports an
-        // installed skill as absent. `try_exists` keeps that call's symlink-following
-        // semantics, so a broken `SKILL.md` symlink stays "not installed" exactly as
-        // before, and only separates "cannot tell" from "not there".
+    let mut outcomes = BTreeMap::new();
+    for path in group_skill_locations(locations).keys() {
+        let marker = path.join("SKILL.md");
+        // Keep permission errors distinct from an absent installation.
         let installed = match marker.try_exists() {
             Ok(installed) => installed,
             Err(error) => {
@@ -615,29 +581,33 @@ fn remove_skill_locations(locations: &[SkillLocation]) -> SkillRemoval {
                     .failures
                     .push(anyhow::Error::new(error).context(format!(
                         "failed to check for an installed skill at {}",
-                        marker.display()
+                        marker.display(),
                     )));
                 false
             }
         };
         let removed = installed
-            && match fs::remove_dir_all(&location.path) {
+            && match fs::remove_dir_all(path) {
                 Ok(()) => true,
                 Err(error) => {
                     removal
                         .failures
                         .push(anyhow::Error::new(error).context(format!(
                             "failed to remove installed skill at {}",
-                            location.path.display()
+                            path.display(),
                         )));
                     false
                 }
             };
+        outcomes.insert(*path, (installed, removed));
+    }
+    for location in locations {
+        let (installed, removed) = outcomes[location.path.as_path()];
         removal.reports.push(SkillLocationReport {
             client: location.client,
             scope: location.scope,
             path: location.path.display().to_string(),
-            installed: false,
+            installed: installed && !removed,
             up_to_date: None,
             removed: Some(removed),
         });
@@ -1079,9 +1049,12 @@ fn sync_to_roots(
             .collect();
 
     let mut updated = Vec::new();
+    let mut seen = BTreeSet::new();
     for location in stale_locations_from_statuses(&statuses, cwd, home)? {
-        install_skill_to(&location.path)?;
-        updated.push(location.path);
+        if seen.insert(location.path.clone()) {
+            install_skill_to(&location.path)?;
+            updated.push(location.path);
+        }
     }
 
     // Refresh managed markdown snippets whenever a project directory is
@@ -1610,6 +1583,96 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn empty_and_additive_selections_preserve_unselected_installs() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let existing =
+            skill_path_for(AgentClient::Claude, AgentScope::Global, &cwd, &home).unwrap();
+        install_skill_to(&existing).unwrap();
+        fs::write(existing.join("user-file"), "keep").unwrap();
+        let statuses = collect_client_install_statuses(AgentScope::Global, &cwd, &home).unwrap();
+        let empty = selected_install_locations(&statuses, &[], &cwd, &home).unwrap();
+        do_install(&empty, false).unwrap();
+        let selected =
+            selected_install_locations(&statuses, &[AgentClient::Codex], &cwd, &home).unwrap();
+        do_install(&selected, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(existing.join("user-file")).unwrap(),
+            "keep"
+        );
+        assert!(
+            skill_path_for(AgentClient::Codex, AgentScope::Global, &cwd, &home)
+                .unwrap()
+                .join("SKILL.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn shared_paths_group_clients_and_report_every_logical_removal() {
+        let temp = tempdir().unwrap();
+        let locations = resolve_locations_with_roots(
+            AgentClient::All,
+            AgentScope::Project,
+            temp.path(),
+            temp.path(),
+        )
+        .unwrap();
+        let shared_path = temp.path().join(".agents/skills/vera");
+        install_skill_to(&shared_path).unwrap();
+        let groups = group_skill_locations(&locations);
+        let shared = &groups[shared_path.as_path()];
+        assert!(
+            shared
+                .iter()
+                .any(|location| location.client == AgentClient::Codex)
+        );
+        assert!(
+            shared
+                .iter()
+                .any(|location| location.client == AgentClient::Copilot)
+        );
+        assert!(shared.len() > 2);
+        let removal = remove_skill_locations(&locations);
+        assert!(removal.failures.is_empty());
+        assert_eq!(removal.reports.len(), locations.len());
+        for report in removal
+            .reports
+            .iter()
+            .filter(|report| report.path == shared_path.display().to_string())
+        {
+            assert!(report.was_removed());
+            assert!(!report.installed);
+        }
+        let again = remove_skill_locations(&locations);
+        assert!(again.reports.iter().all(|report| !report.was_removed()));
+    }
+
+    #[test]
+    fn shared_stale_install_is_synced_once() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let shared = skill_path_for(AgentClient::Agents, AgentScope::Project, &cwd, &home).unwrap();
+        install_skill_to(&shared).unwrap();
+        fs::write(shared.join(".version"), "0.0.0").unwrap();
+        let outcome = sync_to_roots(
+            AgentClient::All,
+            AgentScope::Project,
+            Some(&cwd),
+            &home,
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome.updated, vec![shared]);
+    }
+
     /// #153 regression: a scripted install must not reach the interactive
     /// snippet prompts.
     #[test]
@@ -1822,10 +1885,7 @@ mod tests {
             .unwrap();
 
         assert!(claude.is_installed());
-        assert_eq!(
-            claude.install_scopes().collect::<Vec<_>>(),
-            vec![AgentScope::Global, AgentScope::Project]
-        );
+        assert!(claude.scopes.iter().all(|scope| scope.installed));
         assert_eq!(
             claude.scopes_needing_install().collect::<Vec<_>>(),
             vec![AgentScope::Global]

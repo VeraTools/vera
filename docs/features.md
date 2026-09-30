@@ -253,7 +253,7 @@ Docker images available for CPU, CUDA, ROCm, and OpenVINO. Details: [docker.md](
 
 ### Skill Files for Agent Clients
 
-`vera agent install` installs skill files that teach AI agents how to write effective queries, when to use semantic search vs regex, and how to interpret results. Supports Junie, Claude Code, Cursor, Windsurf, Copilot, Cline, Roo Code, and 30+ agent clients. Skills install globally or per-project.
+`vera agent install` installs skill files that teach AI agents how to write effective queries, when to use semantic search vs regex, and how to interpret results. Supports Junie, Claude Code, Cursor, Windsurf, Copilot, Cline, Roo Code, and 30+ agent clients. Skills install globally or per-project. Interactive installation preselects existing clients and adds or updates selected skills. An empty selection makes no changes; unselected installations stay in place. Use `vera agent remove` to remove skills.
 
 ### Agent Config Snippets
 
@@ -268,7 +268,7 @@ During setup, Vera offers to add a usage snippet to your project's agent config 
 
 ### Interactive Setup Wizard
 
-`vera setup` walks through backend selection, agent skill installation, and optional project indexing in one command for local backends. The API first-run flow with a preset (Qwen) completes immediately after credential entry and skips the skills and indexing prompts. Skip the wizard with flags for non-interactive use.
+`vera setup` walks through backend configuration, optional agent skill installation, and optional project indexing. Potion Code CPU is the default; API mode is the second choice, with Qwen/OpenRouter recommended among API providers. Indexing defaults to Yes for local backends and No for API mode. Use explicit backend flags for a shorter configuration flow, or add `--yes` for non-interactive setup.
 
 ### Backend Management
 
