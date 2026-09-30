@@ -12,6 +12,10 @@ on:
         description: 'Release tag to build images for (e.g. v1.0.1)'
         required: true
         type: string
+      use_github_runners:
+        description: 'Use GitHub-hosted runners when Blacksmith is unavailable'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.variant }})
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ inputs.use_github_runners && 'ubuntu-24.04' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 30
     # Job-level groups are repository-global: a manual republish cannot race
     # the release workflow's docker job on the same variant's mutable tag.
@@ -55,24 +59,24 @@ jobs:
       # openvino base-image fix), and a tag created before such a fix would
       # check out a Dockerfile that no longer builds. The release binary is
       # still pinned to the requested tag via the asset download below.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download release binary
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          gh release download "$TAG" --pattern 'vera-x86_64-unknown-linux-gnu.tar.gz' --dir artifacts --clobber
-          mkdir -p dist
-          tar xzf artifacts/vera-x86_64-unknown-linux-gnu.tar.gz -C artifacts
-          cp artifacts/vera-x86_64-unknown-linux-gnu/vera dist/vera
-          chmod +x dist/vera
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]
+          gh release download "$TAG" --pattern 'vera-x86_64-unknown-linux-gnu.tar.gz' \
+            --pattern release-manifest.json --dir artifacts --clobber
+          python3 scripts/verify_release_archive.py artifacts/release-manifest.json \
+            artifacts/vera-x86_64-unknown-linux-gnu.tar.gz "$TAG" "${{ github.repository }}" dist/vera
 
       - name: Lowercase image name
         run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -84,25 +88,26 @@ jobs:
       # digest mismatches. The runner's own docker daemon remains the
       # fallback below.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Extract version
-        id: version
+      - name: Preserve existing versioned image
+        id: versioned
         env:
-          REF: ${{ inputs.tag }}
-        run: echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/docker_publication.py check "${{ github.repository }}" \
+            "$RELEASE_TAG" "$REGISTRY/$IMAGE_NAME_LC" "${{ matrix.variant }}"
 
       - name: Build and push
+        if: steps.versioned.outputs.build == 'true'
         id: publish
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ matrix.tag_suffix }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.version.outputs.version }}-${{ matrix.tag_suffix }}
+          tags: ${{ steps.versioned.outputs.image }}
 
       # Fallback when the buildkit path fails (seen: "unexpected commit digest"
       # on a rocm base layer whose computed digest varied per run, i.e. fetch
@@ -118,11 +123,18 @@ jobs:
       - name: Build and push (retry via docker daemon)
         if: steps.publish.outcome == 'failure'
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.tag }}
           TAG_SUFFIX: ${{ matrix.tag_suffix }}
           DOCKERFILE: ${{ matrix.dockerfile }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME_LC}"
-          docker build -f "$DOCKERFILE" -t "$IMAGE:$TAG_SUFFIX" -t "$IMAGE:$VERSION-$TAG_SUFFIX" .
-          docker push "$IMAGE:$TAG_SUFFIX"
-          docker push "$IMAGE:$VERSION-$TAG_SUFFIX"
+          docker build -f "$DOCKERFILE" -t "$IMAGE:${VERSION#v}-$TAG_SUFFIX" .
+          docker push "$IMAGE:${VERSION#v}-$TAG_SUFFIX"
+
+      - name: Promote newest stable release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/docker_publication.py promote "${{ github.repository }}" \
+            "$RELEASE_TAG" "$REGISTRY/$IMAGE_NAME_LC" "${{ matrix.variant }}"

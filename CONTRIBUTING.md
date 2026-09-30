@@ -74,13 +74,32 @@ Benchmark details: [docs/benchmarks.md](docs/benchmarks.md).
 
 Pull requests target `master` directly.
 
-## Release Recovery
+## Releases and Recovery
 
-To retry publication of the newest release tag when Blacksmith is unavailable, cancel the earlier Release run for that tag, then dispatch the workflow on GitHub-hosted runners. Replace the example tag with the existing tag to recover:
+Run the release helper from clean `master` after its exact commit passes CI:
+
+```bash
+bash scripts/release.sh 2.0.0
+```
+
+The helper checks local and remote `master`, existing tags, and CI before tagging. Versions come from the tag; do not commit manifest version bumps.
+
+npm and PyPI have separate publication jobs. Retry a failed job from its workflow run; already published package versions are preserved. Docker recovery verifies the requested archive against its release manifest. Versioned images are preserved, and mutable variant tags follow only the newest published stable release.
+
+To use GitHub-hosted runners for an existing tag:
 
 ```bash
 gh workflow run release.yml --ref master \
   -f tag=v1.4.2 -f use_github_runners=true
 ```
 
-The workflow checks out the tag and derives every package version from it. It does not move the tag.
+A full retry rejects rebuilt assets that differ from the publication. Retry only the failed package job or use `docker.yml` when the binary assets are already complete.
+
+Rehearse all six binary targets and package builds without publication, using an exact source commit and an existing tag for version stamping:
+
+```bash
+gh workflow run release.yml --ref master \
+  -f tag=v1.4.2 -f publish=false -f revision=<commit-sha>
+```
+
+The workflow never moves an existing tag.

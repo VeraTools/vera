@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,14 @@ version = "1.4.0"
 description = "Bootstrap installer and wrapper for the Vera CLI"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "VeraTools" }]
 keywords = ["vera", "cli", "code-search", "agents"]
 
 [project.urls]
-Homepage = "https://github.com/VeraTools/Vera#readme"
-Repository = "https://github.com/VeraTools/Vera"
-Issues = "https://github.com/VeraTools/Vera/issues"
+Homepage = "https://github.com/VeraTools/vera#readme"
+Repository = "https://github.com/VeraTools/vera"
+Issues = "https://github.com/VeraTools/vera/issues"
 
 [project.scripts]
 vera-ai = "vera_ai_wrapper.__main__:main"

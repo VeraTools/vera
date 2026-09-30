@@ -6,21 +6,10 @@
 //! metadata store. Finds semantically related code even when query terms
 //! don't appear literally in results (e.g., "memory allocation" finds `alloc`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::debug;
-
-static LAST_HYDRATION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-pub fn last_hydration_count() -> usize {
-    LAST_HYDRATION_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn reset_last_hydration_count() {
-    LAST_HYDRATION_COUNT.store(0, Ordering::Relaxed);
-}
 
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::storage::metadata::MetadataStore;
@@ -193,7 +182,8 @@ fn search_vector_from_embedding(
         .iter()
         .map(|vr| vr.chunk_id.clone())
         .collect();
-    LAST_HYDRATION_COUNT.store(ids.len(), Ordering::Relaxed);
+    #[cfg(test)]
+    metadata_store.hydration_count.set(ids.len());
     let mut chunk_by_id = metadata_store.get_chunks_by_ids(&ids).map_err(|e| {
         VectorSearchError::StorageError(e.context("failed to batch-fetch chunk metadata"))
     })?;
@@ -264,7 +254,14 @@ pub(crate) async fn search_vector_with_cached_stores_filtered_timed(
     query_elig: &crate::storage::eligibility::QueryEligibility,
 ) -> Result<(Vec<SearchResult>, Duration), VectorSearchError> {
     if limit == 0 || query_elig.is_empty() {
-        LAST_HYDRATION_COUNT.store(0, Ordering::Relaxed);
+        #[cfg(test)]
+        metadata_store
+            .lock()
+            .map_err(|_| {
+                VectorSearchError::StorageError(anyhow::anyhow!("metadata store lock poisoned"))
+            })?
+            .hydration_count
+            .set(0);
         return Ok((Vec::new(), Duration::ZERO));
     }
     let stored_dim = vector_store
@@ -310,7 +307,8 @@ pub(crate) async fn search_vector_with_stores_filtered_timed(
     query_elig: &crate::storage::eligibility::QueryEligibility,
 ) -> Result<(Vec<SearchResult>, Duration), VectorSearchError> {
     if limit == 0 || query_elig.is_empty() {
-        LAST_HYDRATION_COUNT.store(0, Ordering::Relaxed);
+        #[cfg(test)]
+        metadata_store.hydration_count.set(0);
         return Ok((Vec::new(), Duration::ZERO));
     }
     let stored_dim = vector_store.dim();
@@ -339,7 +337,8 @@ pub(crate) fn search_vector_from_embedding_filtered(
     query_elig: &crate::storage::eligibility::QueryEligibility,
 ) -> Result<Vec<SearchResult>, VectorSearchError> {
     if query_elig.is_empty() {
-        LAST_HYDRATION_COUNT.store(0, Ordering::Relaxed);
+        #[cfg(test)]
+        metadata_store.hydration_count.set(0);
         return Ok(Vec::new());
     }
     let index_count = vector_store.count().unwrap_or(usize::MAX as u64) as usize;
@@ -372,7 +371,8 @@ pub(crate) fn search_vector_from_embedding_filtered(
         .iter()
         .map(|vr| vr.chunk_id.clone())
         .collect();
-    LAST_HYDRATION_COUNT.store(ids.len(), Ordering::Relaxed);
+    #[cfg(test)]
+    metadata_store.hydration_count.set(ids.len());
     let mut chunk_by_id = metadata_store.get_chunks_by_ids(&ids).map_err(|e| {
         VectorSearchError::StorageError(e.context("failed to batch-fetch chunk metadata"))
     })?;

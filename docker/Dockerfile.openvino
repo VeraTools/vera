@@ -7,8 +7,8 @@
 
 # Ubuntu 24.04, not debian:trixie-slim like the cpu image: intel-opencl-icd
 # (Intel GPU compute runtime) is not published in Debian trixie at all, but
-# is in Ubuntu noble universe. Noble's glibc 2.39 matches the CI-built binary.
-FROM ubuntu:24.04
+# is in Ubuntu noble universe. Noble's glibc 2.39 supports the binary's glibc 2.28 baseline.
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \

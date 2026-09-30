@@ -8,12 +8,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 /// Serializes every test that can move the process-global counters
-/// (`ELIGIBILITY_BUILD_COUNT` and `LAST_HYDRATION_COUNT`). Any test that
-/// builds a map, reads a counter, or runs a search (which hydrates) must
-/// hold this guard — the two counters share the same global state and the
-/// same `ELIGIBILITY_SERIAL` history showed that an allow-list of "which
-/// test touches which counter" fails twice. One lock for all counter
-/// tests is structural, not maintained.
+/// (`ELIGIBILITY_BUILD_COUNT`). Tests that build maps or read this counter
+/// hold the guard. Hydration counts belong to each metadata store.
 fn eligibility_guard() -> std::sync::MutexGuard<'static, ()> {
     crate::test_serial::counter_guard()
 }
@@ -21,7 +17,6 @@ fn eligibility_guard() -> std::sync::MutexGuard<'static, ()> {
 use crate::config::VeraConfig;
 use crate::embedding::test_helpers::MockProvider;
 use crate::retrieval::hybrid::{SearchStores, search_hybrid_with_stores_and_flag};
-use crate::retrieval::vector::{last_hydration_count, reset_last_hydration_count};
 use crate::storage::bm25::{Bm25Document, Bm25Index};
 use crate::storage::eligibility::{
     EligibilityError, EligibilityMap, eligibility_build_count, is_map_evaluable,
@@ -291,7 +286,6 @@ fn val_002_metadata_agreement_and_globmatcher() {
 #[allow(clippy::await_holding_lock)]
 async fn val_010_filter_before_hydration() {
     let _guard = eligibility_guard();
-    reset_last_hydration_count();
     reset_eligibility_build_count();
     let dir = tempdir().unwrap();
     let dim = 8;
@@ -353,7 +347,7 @@ async fn val_010_filter_before_hydration() {
     }
     // Hydration count should be limited to filtered top-K, not whole index (10)
     // Whole-index would hydrate 10+, filtered should hydrate <= vector_candidates (5-10)
-    let hydrated = last_hydration_count();
+    let hydrated = stores.vector_metadata.lock().unwrap().hydration_count.get();
     assert!(
         hydrated <= 20,
         "filtered hydration must be 1-2 batches (<=20), got {hydrated}"
@@ -365,7 +359,6 @@ async fn val_010_filter_before_hydration() {
     // For legacy whole-index, hydration would be whole index count (10)
     // Verify that optimized hydrates less than whole-index would
     // We can compare by forcing legacy: run same query with flag false
-    reset_last_hydration_count();
     let (legacy_results, _) = search_hybrid_with_stores_and_flag(
         dir.path(),
         &provider,
@@ -381,7 +374,7 @@ async fn val_010_filter_before_hydration() {
     )
     .await
     .unwrap();
-    let legacy_hydrated = last_hydration_count();
+    let legacy_hydrated = stores.vector_metadata.lock().unwrap().hydration_count.get();
     // Legacy filtered flat hydrates whole index (count)
     assert!(
         legacy_hydrated >= 10,

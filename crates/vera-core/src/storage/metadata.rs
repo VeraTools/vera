@@ -179,6 +179,9 @@ use crate::storage::{SQL_PARAMETER_BATCH, sql_placeholders};
 /// SQLite-backed metadata store for chunk attributes.
 pub struct MetadataStore {
     conn: Connection,
+    // Each search store records its own hydration work; parallel tests use other stores.
+    #[cfg(test)]
+    pub(crate) hydration_count: std::cell::Cell<usize>,
 }
 
 impl MetadataStore {
@@ -186,7 +189,11 @@ impl MetadataStore {
     pub fn open(db_path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(db_path)
             .with_context(|| format!("failed to open metadata db: {}", db_path.display()))?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            #[cfg(test)]
+            hydration_count: std::cell::Cell::new(0),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -207,7 +214,11 @@ impl MetadataStore {
         }
         let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("failed to open metadata db: {}", db_path.display()))?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            #[cfg(test)]
+            hydration_count: std::cell::Cell::new(0),
+        };
         store.validate_schema()?;
         Ok(store)
     }
@@ -236,7 +247,11 @@ impl MetadataStore {
     /// Create an in-memory metadata store (useful for testing).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory metadata db")?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            #[cfg(test)]
+            hydration_count: std::cell::Cell::new(0),
+        };
         store.init_schema()?;
         Ok(store)
     }
