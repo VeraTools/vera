@@ -64,7 +64,10 @@ pub(crate) fn api_err(error: impl std::fmt::Display) -> EmbeddingError {
 ///
 /// Implementations must be able to embed a batch of text inputs and return
 /// one vector per input. Vectors must have consistent dimensionality.
-#[allow(async_fn_in_trait)]
+#[allow(
+    async_fn_in_trait,
+    reason = "Provider futures retain the existing static-dispatch trait contract; callers await them in their current task."
+)]
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a batch of text inputs, returning one vector per input.
     ///

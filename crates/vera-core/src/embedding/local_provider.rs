@@ -424,7 +424,10 @@ impl LocalEmbeddingProvider {
         Ok(results)
     }
 
-    #[allow(clippy::needless_range_loop)]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "Token IDs and attention masks fill corresponding columns of two dense ONNX input tensors."
+    )]
     fn do_embed_once(&self, encodings: &[Encoding]) -> Result<Vec<Vec<f32>>> {
         let batch_size = encodings.len();
         let mut max_len = batch_max_len(encodings);

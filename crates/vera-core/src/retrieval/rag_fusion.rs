@@ -78,7 +78,10 @@ pub async fn execute_deep_search_with_context(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The completion client and search inputs remain explicit for each deep-search invocation."
+)]
 async fn execute_rag_fusion_with_context(
     context: &SearchContext,
     index_dir: &Path,

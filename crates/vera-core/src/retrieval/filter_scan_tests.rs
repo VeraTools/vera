@@ -283,7 +283,10 @@ fn val_002_metadata_agreement_and_globmatcher() {
 
 // ── VAL-197-010 ──
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 async fn val_010_filter_before_hydration() {
     let _guard = eligibility_guard();
     reset_eligibility_build_count();
@@ -394,7 +397,10 @@ async fn val_010_filter_before_hydration() {
 
 // ── VAL-197-011 (mini) ──
 // Test differential across small synthetic cases; overcap fixture is tested separately in next test.
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_011_differential_small() {
     let _guard = eligibility_guard();
@@ -482,7 +488,10 @@ async fn val_011_differential_small() {
 }
 
 // ── VAL-197-013 tombstone ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_013_tombstone_exclusion() {
     let _guard = eligibility_guard();
@@ -538,7 +547,10 @@ async fn val_013_tombstone_exclusion() {
 
 // ── VAL-197-014 staleness ──
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 async fn val_014_staleness_invalidation() {
     let _guard = eligibility_guard();
     reset_eligibility_build_count();
@@ -618,7 +630,10 @@ async fn val_014_staleness_invalidation() {
 }
 
 // ── VAL-197-015 missing/stale fallback ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_015_missing_stale_fallback() {
     let _guard = eligibility_guard();
@@ -710,7 +725,10 @@ fn overcap_path() -> Option<std::path::PathBuf> {
     }
 }
 
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_011_overcap_differential_matrix() {
     let _guard = eligibility_guard();
@@ -856,7 +874,10 @@ async fn val_011_overcap_differential_matrix() {
 }
 
 // ── VAL-197-008 honest empty ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_008_honest_empty() {
     let _guard = eligibility_guard();
@@ -917,7 +938,10 @@ async fn val_008_honest_empty() {
 }
 
 // ── VAL-197-012 unfiltered byte-identical ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_012_unfiltered_byte_identical() {
     let _guard = eligibility_guard();
@@ -1029,7 +1053,10 @@ async fn val_012_unfiltered_byte_identical() {
 }
 
 // ── VAL-197-016 scope fallback ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_016_scope_fallback() {
     let _guard = eligibility_guard();
@@ -1092,7 +1119,10 @@ async fn val_016_scope_fallback() {
 }
 
 // ── VAL-197-017 include_generated fallback ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_017_include_generated_fallback() {
     let _guard = eligibility_guard();
@@ -1148,7 +1178,10 @@ async fn val_017_include_generated_fallback() {
 }
 
 // ── VAL-197-018 mixed fallback ──
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 #[tokio::test]
 async fn val_018_mixed_fallback() {
     let _guard = eligibility_guard();
@@ -1282,7 +1315,10 @@ fn val_019_vec0_probe() {
 
 // ── VAL-197-015 fallback on corrupted map (any-doubt) ──
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 async fn val_015_corrupted_map_fallback() {
     let _guard = eligibility_guard();
     reset_eligibility_build_count();
@@ -1365,7 +1401,10 @@ async fn val_015_corrupted_map_fallback() {
 
 // ── VAL-197-015 fallback on IO error (any-doubt) ──
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "Serialize test-only eligibility build counters for the entire async search."
+)]
 async fn val_015_io_error_fallback() {
     let _guard = eligibility_guard();
     reset_eligibility_build_count();

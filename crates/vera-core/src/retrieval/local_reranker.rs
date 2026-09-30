@@ -120,7 +120,10 @@ impl LocalReranker {
         run_probe_inference(&mut session, &tokenizer)
     }
 
-    #[allow(clippy::needless_range_loop)]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "Token IDs and attention masks fill corresponding columns of two dense ONNX input tensors."
+    )]
     fn do_rerank_batch(&self, candidates: &[TokenizedCandidate]) -> Result<Vec<RerankScore>> {
         let batch_size = candidates.len();
         let mut max_len = candidates

@@ -71,7 +71,10 @@ pub enum RerankerError {
 /// Implementations take a query and a set of document texts, returning
 /// relevance scores for each document. The scores are used to reorder
 /// search results after initial retrieval.
-#[allow(async_fn_in_trait)]
+#[allow(
+    async_fn_in_trait,
+    reason = "Reranker futures retain the existing static-dispatch trait contract used by DynamicReranker."
+)]
 pub trait Reranker: Send + Sync {
     /// Score each document against the query.
     ///
@@ -204,9 +207,6 @@ pub struct ApiReranker {
     task_instruction: Option<String>,
     task_field: Option<String>,
     return_documents: Option<bool>,
-    /// Legacy `is_voyage` view for backward compat tests; kept in sync with `protocol`.
-    #[allow(dead_code)]
-    pub(crate) is_voyage: bool,
 }
 
 impl ApiReranker {
@@ -266,7 +266,6 @@ impl ApiReranker {
             .context("failed to create HTTP client for reranker")?;
 
         let protocol = resolve_protocol(retrieval, &config.base_url);
-        let is_voyage = protocol == RerankerProtocol::Voyage;
 
         Ok(Self {
             client,
@@ -278,7 +277,6 @@ impl ApiReranker {
             task_instruction: retrieval.reranker_task_instruction.clone(),
             task_field: retrieval.reranker_task_field.clone(),
             return_documents: retrieval.reranker_return_documents,
-            is_voyage,
         })
     }
 
@@ -887,11 +885,7 @@ struct RerankResult {
     index: usize,
     #[serde(default, alias = "score")]
     relevance_score: Option<f64>,
-    // Echoed document field tolerated (string or object, per provider)
-    #[serde(default)]
-    #[allow(dead_code)]
-    document: Option<serde_json::Value>,
-    // Tolerate extra provider fields like id, etc.
+    // Serde ignores echoed documents and other extra provider fields.
 }
 
 // ── Test helpers ─────────────────────────────────────────────────────

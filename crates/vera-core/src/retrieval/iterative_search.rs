@@ -19,7 +19,10 @@ use super::search_service::{SearchContext, SearchTimings};
 /// 2. Extract unique symbol names from the top results.
 /// 3. Run follow-up searches for each extracted symbol.
 /// 4. Merge and deduplicate, preserving the original result order first.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the public search inputs with independent result and hop limits."
+)]
 pub async fn execute_iterative_search_with_context(
     context: &SearchContext,
     index_dir: &Path,
