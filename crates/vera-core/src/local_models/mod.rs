@@ -957,6 +957,7 @@ pub fn normalize_huggingface_repo(value: &str) -> Result<String> {
 
 pub(crate) mod assets;
 pub(crate) mod cuda;
+pub(crate) mod inference;
 pub(crate) mod ort;
 
 #[cfg(test)]

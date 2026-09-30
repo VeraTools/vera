@@ -64,7 +64,10 @@ pub(crate) fn api_err(error: impl std::fmt::Display) -> EmbeddingError {
 ///
 /// Implementations must be able to embed a batch of text inputs and return
 /// one vector per input. Vectors must have consistent dimensionality.
-#[allow(async_fn_in_trait)]
+#[allow(
+    async_fn_in_trait,
+    reason = "Provider futures retain the existing static-dispatch trait contract; callers await them in their current task."
+)]
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a batch of text inputs, returning one vector per input.
     ///
@@ -122,7 +125,7 @@ pub trait EmbeddingProvider: Send + Sync {
 /// Configuration for an OpenAI-compatible embedding provider.
 #[derive(Clone)]
 pub struct EmbeddingProviderConfig {
-    /// Base URL for the API (e.g. "https://api.openai.com/v1").
+    /// Base URL for the API (e.g. <https://api.openai.com/v1>).
     pub base_url: String,
     /// Model identifier (e.g. "Qwen/Qwen3-Embedding-8B").
     pub model_id: String,

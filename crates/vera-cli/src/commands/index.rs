@@ -15,7 +15,10 @@ use crate::helpers::{
 use crate::state;
 
 /// Run the `vera index <path>` command.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Index commands retain their existing CLI dispatch interface and independent options"
+)]
 pub fn run(
     path: &str,
     json_output: bool,
@@ -50,7 +53,10 @@ pub fn run(
 }
 
 /// Index a repository and return the resulting summary.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Index commands retain their existing CLI dispatch interface and independent options"
+)]
 pub fn execute(
     path: &str,
     json_output: bool,

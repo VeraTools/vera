@@ -1,4 +1,5 @@
 [package]
+publish.workspace = true
 name = "vera-mcp"
 description = "MCP server interface for Vera code indexing and retrieval"
 version.workspace = true
@@ -19,3 +20,6 @@ notify-debouncer-mini = "0.6"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

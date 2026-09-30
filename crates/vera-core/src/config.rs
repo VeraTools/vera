@@ -1464,19 +1464,20 @@ card0, 1073741824, 4294967296\n";
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn retrieval_config_serialization_round_trips_all_reranker_keys() {
-        let mut cfg = RetrievalConfig::default();
-        cfg.reranker_protocol = Some(RerankerProtocol::Voyage);
-        cfg.reranker_endpoint_path = Some("/v1/reranking".to_string());
-        cfg.reranker_task_instruction = Some("rank by relevance".to_string());
-        cfg.reranker_task_field = Some("instruction".to_string());
-        cfg.reranker_max_doc_chars = 1234;
-        cfg.reranker_timeout_secs = 42;
-        cfg.reranker_max_retries = 5;
-        cfg.reranker_rate_limit_wait_secs = Some(15);
-        cfg.reranker_return_documents = Some(true);
-        cfg.max_rerank_batch = 8;
+        let cfg = RetrievalConfig {
+            reranker_protocol: Some(RerankerProtocol::Voyage),
+            reranker_endpoint_path: Some("/v1/reranking".to_string()),
+            reranker_task_instruction: Some("rank by relevance".to_string()),
+            reranker_task_field: Some("instruction".to_string()),
+            reranker_max_doc_chars: 1234,
+            reranker_timeout_secs: 42,
+            reranker_max_retries: 5,
+            reranker_rate_limit_wait_secs: Some(15),
+            reranker_return_documents: Some(true),
+            max_rerank_batch: 8,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RetrievalConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reranker_protocol, cfg.reranker_protocol);
@@ -1688,38 +1689,41 @@ card0, 1073741824, 4294967296\n";
 
     // ——— Issue #196 signals: toggleable ranking flags ———
 
-    static ENV_BOOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn env_bool_parses_variants() {
-        let _guard = ENV_BOOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let key = "VERA_TEST_BOOL_VARIANTS";
-        let check = |value: &str, default: bool, expected: bool| {
-            unsafe { std::env::set_var(key, value) };
-            let got = env_bool(key, default);
-            unsafe { std::env::remove_var(key) };
-            assert_eq!(
-                got, expected,
-                "env_bool({value:?}, default={default}) expected {expected}"
+        for value in [
+            "1", "0", "true", "TRUE", "false", "FALSE", "yes", "no", "on", "off", "maybe",
+        ] {
+            run_env_test(
+                "config::tests::env_bool_parses_variants_probe",
+                &[("VERA_TEST_BOOL_VARIANTS", Some(value))],
             );
-        };
-        check("1", false, true);
-        check("1", true, true);
-        check("0", true, false);
-        check("true", false, true);
-        check("TRUE", false, true);
-        check("false", true, false);
-        check("FALSE", true, false);
-        check("yes", false, true);
-        check("no", true, false);
-        check("on", false, true);
-        check("off", true, false);
-        check("maybe", true, true);
-        check("maybe", false, false);
-        // unset falls back to default
-        unsafe { std::env::remove_var(key) };
-        assert!(env_bool(key, true));
-        assert!(!env_bool(key, false));
+        }
+        run_env_test(
+            "config::tests::env_bool_parses_variants_probe",
+            &[("VERA_TEST_BOOL_VARIANTS", None)],
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by env_bool_parses_variants"]
+    fn env_bool_parses_variants_probe() {
+        let key = "VERA_TEST_BOOL_VARIANTS";
+        match std::env::var(key).as_deref() {
+            Ok("1" | "true" | "TRUE" | "yes" | "on") => {
+                assert!(env_bool(key, false));
+                assert!(env_bool(key, true));
+            }
+            Ok("0" | "false" | "FALSE" | "no" | "off") => {
+                assert!(!env_bool(key, false));
+                assert!(!env_bool(key, true));
+            }
+            Ok("maybe") | Err(_) => {
+                assert!(env_bool(key, true));
+                assert!(!env_bool(key, false));
+            }
+            Ok(value) => panic!("unexpected boolean test value: {value}"),
+        }
     }
 
     #[test]
@@ -1751,12 +1755,13 @@ card0, 1073741824, 4294967296\n";
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn retrieval_config_new_flags_round_trip() {
-        let mut cfg = RetrievalConfig::default();
-        cfg.ranking_filename_stem_boost = false;
-        cfg.ranking_definition_boost = false;
-        cfg.ranking_recall_pool_expansion = false;
+        let cfg = RetrievalConfig {
+            ranking_filename_stem_boost: false,
+            ranking_definition_boost: false,
+            ranking_recall_pool_expansion: false,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RetrievalConfig = serde_json::from_str(&json).unwrap();
         assert!(!back.ranking_filename_stem_boost);
@@ -1767,8 +1772,10 @@ card0, 1073741824, 4294967296\n";
         assert!(!back.ranking_recall_pool_expansion_enabled());
 
         // true round-trip
-        let mut cfg2 = RetrievalConfig::default();
-        cfg2.ranking_filename_stem_boost = true;
+        let cfg2 = RetrievalConfig {
+            ranking_filename_stem_boost: true,
+            ..Default::default()
+        };
         let json2 = serde_json::to_string(&cfg2).unwrap();
         let back2: RetrievalConfig = serde_json::from_str(&json2).unwrap();
         assert!(back2.ranking_filename_stem_boost);

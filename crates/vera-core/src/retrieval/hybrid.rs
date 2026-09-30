@@ -447,7 +447,10 @@ pub struct HybridTimings {
 /// database connections while vector search (embedding + nearest-neighbor)
 /// runs on the async runtime. If vector search fails (e.g., embedding API
 /// unavailable), falls back to BM25-only results with a warning.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 pub async fn search_hybrid(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -480,7 +483,10 @@ pub async fn search_hybrid(
 
 /// Perform hybrid search using stores + explicit filter-during-scan flag.
 /// SearchContext uses this to respect file-config + env precedence.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 pub(crate) async fn search_hybrid_with_stores_and_flag(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -510,7 +516,10 @@ pub(crate) async fn search_hybrid_with_stores_and_flag(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 async fn search_hybrid_inner(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -640,7 +649,10 @@ async fn search_hybrid_inner(
     // falls back to the legacy whole-index fetch below.
     let mut optimized_outcome: Option<Result<(Vec<SearchResult>, Duration), VectorSearchError>> =
         None;
-    #[allow(clippy::collapsible_if)]
+    #[allow(
+        clippy::collapsible_if,
+        reason = "Keep cached-store availability separate from filter eligibility so fallback cases remain explicit."
+    )]
     if filter_during_scan_enabled && !filters.is_empty() && is_flat && is_map_evaluable(filters) {
         if let Some(stores_arc) = &stores {
             // Eligibility map is per-store+generation, lazily built on first
@@ -888,7 +900,10 @@ async fn search_hybrid_inner(
 /// - `stored_dim` — Dimensionality of stored vectors
 /// - `rerank_candidates` — Number of candidates to send to the reranker
 /// - `vector_candidates` — Number of vector candidates to fetch (query-type-aware)
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 pub async fn search_hybrid_reranked(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -925,7 +940,10 @@ pub async fn search_hybrid_reranked(
 }
 
 /// Reranked search with retained stores and an explicit filter-scan setting.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 pub(crate) async fn search_hybrid_reranked_with_stores_and_flag(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,
@@ -961,7 +979,10 @@ pub(crate) async fn search_hybrid_reranked_with_stores_and_flag(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the hybrid search contract with explicit providers, candidate limits, and retained-store options."
+)]
 async fn search_hybrid_reranked_inner(
     index_dir: &Path,
     provider: &impl EmbeddingProvider,

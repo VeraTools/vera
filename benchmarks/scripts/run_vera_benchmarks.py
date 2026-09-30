@@ -18,21 +18,14 @@ Requires:
 """
 
 from bench_common import (
-    TASKS_DIR,
     binary_version,
     compute_task_metrics,
     git_sha,
-    is_match,
     load_secrets,
     load_tasks,
     task_set_identity,
     environment_summary,
-    matched_relevances,
-    mrr,
-    ndcg_at_k,
     percentile,
-    precision_at_k,
-    recall_at_k,
 )
 
 import argparse
@@ -42,7 +35,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 VERA_BIN = REPO_ROOT / "target" / "release" / "vera"
@@ -674,7 +666,7 @@ def main():
     baselines = load_baselines()
 
     # Print comparison
-    report_text = print_comparison(vera_results, baselines)
+    print_comparison(vera_results, baselines)
 
     # Verify assertions
     print("\n" + "=" * 60)

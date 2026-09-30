@@ -224,8 +224,8 @@ where
     .await
 }
 
-/// Test seam for running the full-index pipeline with a smaller chunk window.
-#[allow(clippy::too_many_arguments)]
+/// Run the full-index pipeline with an explicit chunk-window target.
+/// Production uses `WINDOW_CHUNK_TARGET`; tests lower it to exercise staging windows.
 pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_target<P, F>(
     repo_path: &Path,
     provider: &P,
@@ -799,7 +799,10 @@ fn store_worker(
 /// are collected and flattened. Files that fail parsing are recorded as
 /// errors but do not abort the pipeline. Also computes content hashes
 /// for incremental indexing support.
-#[allow(clippy::type_complexity)]
+#[allow(
+    clippy::type_complexity,
+    reason = "One parse window returns aligned chunks, errors, hashes, references, relations, and file states."
+)]
 fn parse_discovered_files_parallel(
     discovery: &DiscoveryResult,
     files: &[discovery::DiscoveredFile],

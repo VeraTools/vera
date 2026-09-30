@@ -736,6 +736,9 @@ fn set_env(key: &str, value: Option<&str>) {
 }
 
 fn set_env_os(key: &str, value: Option<&OsString>) {
+    // SAFETY: The sequential lane runner applies settings before constructing its
+    // runtime/provider and restores them after dropping it. Tests mutate only
+    // in a single-test child process with no active native model session.
     unsafe {
         match value {
             Some(value) => std::env::set_var(key, value),
@@ -820,6 +823,19 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
 
+    fn env_probe(name: &str) -> bool {
+        if std::env::var("VERA_EVAL_ENV_PROBE").as_deref() == Ok(name) {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1"])
+            .env("VERA_EVAL_ENV_PROBE", name)
+            .status()
+            .unwrap();
+        assert!(status.success(), "environment probe {name} failed");
+        false
+    }
+
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct RevisionEnvGuard {
@@ -833,6 +849,8 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var_os(LOCAL_EMBEDDING_REVISION_ENV);
+            // SAFETY: This environment fixture runs alone in a child process and
+            // neither initializes native models nor mutates while a runtime exists.
             unsafe {
                 match value {
                     Some(value) => std::env::set_var(LOCAL_EMBEDDING_REVISION_ENV, value),
@@ -848,6 +866,8 @@ mod tests {
 
     impl Drop for RevisionEnvGuard {
         fn drop(&mut self) {
+            // SAFETY: This environment fixture runs alone in a child process and
+            // neither initializes native models nor mutates while a runtime exists.
             unsafe {
                 match &self.previous {
                     Some(value) => std::env::set_var(LOCAL_EMBEDDING_REVISION_ENV, value),
@@ -922,6 +942,11 @@ mod tests {
 
     #[test]
     fn apply_environment_sets_and_restores_revision_for_custom_and_preset_onnx() {
+        if !env_probe(
+            "lanes::tests::apply_environment_sets_and_restores_revision_for_custom_and_preset_onnx",
+        ) {
+            return;
+        }
         let _env = RevisionEnvGuard::set(Some("ambient"));
         let custom = resolve(LaneSpec {
             name: "custom-pinned".to_string(),
@@ -965,6 +990,9 @@ mod tests {
 
     #[test]
     fn provenance_reports_pinned_and_main_revisions() {
+        if !env_probe("lanes::tests::provenance_reports_pinned_and_main_revisions") {
+            return;
+        }
         let _env = RevisionEnvGuard::set(None);
         let pinned = resolve(LaneSpec {
             name: "custom-pinned".to_string(),
@@ -1222,6 +1250,11 @@ microcode\t: 0xb404038
 
     #[test]
     fn environment_block_records_ranking_overrides_with_effective_values() {
+        if !env_probe(
+            "lanes::tests::environment_block_records_ranking_overrides_with_effective_values",
+        ) {
+            return;
+        }
         // Guard the three ranking env keys **** the host key via the shared ENV_LOCK.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Remember prior values to restore deterministically.
@@ -1238,6 +1271,8 @@ microcode\t: 0xb404038
 
         // Case 1: when set to 0, the environment block records "0".
         for k in keys {
+            // SAFETY: This environment fixture runs alone in a child process and
+            // neither initializes native models nor mutates while a runtime exists.
             unsafe { std::env::set_var(k, "0") };
         }
         let lane = resolve(preset("vera-potion").unwrap()).unwrap();
@@ -1258,6 +1293,8 @@ microcode\t: 0xb404038
 
         // Case 2: when unset, the block records "<unset>" (existing pattern).
         for k in keys {
+            // SAFETY: This environment fixture runs alone in a child process and
+            // neither initializes native models nor mutates while a runtime exists.
             unsafe { std::env::remove_var(k) };
         }
         let env2 = environment_summary(&lane, &host_cpu);
@@ -1275,6 +1312,8 @@ microcode\t: 0xb404038
 
         // Restore.
         for (k, v) in prev {
+            // SAFETY: This environment fixture runs alone in a child process and
+            // neither initializes native models nor mutates while a runtime exists.
             unsafe {
                 match v {
                     Some(val) => std::env::set_var(&k, val),

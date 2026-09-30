@@ -119,7 +119,7 @@ def generate_corpus_toml(repos: list[dict], output_path: Path, task_count: int, 
         lines.append(f'url = "{repo["url"]}"')
         lines.append(f'commit = "{repo["revision"]}"')
         lines.append(f'language = "{repo["language"]}"')
-        lines.append(f'description = "semble benchmark repo"')
+        lines.append('description = "semble benchmark repo"')
         if repo.get("benchmark_root"):
             lines.append(f'benchmark_root = "{repo["benchmark_root"]}"')
         lines.append('')

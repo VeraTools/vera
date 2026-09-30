@@ -44,19 +44,31 @@ pub fn tree_sitter_grammar(lang: Language) -> Option<TsLanguage> {
         Language::Haskell => tree_sitter_haskell::LANGUAGE.into(),
         Language::Elixir => tree_sitter_elixir::LANGUAGE.into(),
         Language::Dart => tree_sitter_dart::LANGUAGE.into(),
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Sql => unsafe { std::mem::transmute::<*const (), TsLanguage>(tree_sitter_sql()) },
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Hcl => unsafe { std::mem::transmute::<*const (), TsLanguage>(tree_sitter_hcl()) },
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Protobuf => unsafe {
             std::mem::transmute::<*const (), TsLanguage>(tree_sitter_proto())
         },
         Language::Html => tree_sitter_html::LANGUAGE.into(),
         Language::Css => tree_sitter_css::LANGUAGE.into(),
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Scss => unsafe {
             std::mem::transmute::<*const (), TsLanguage>(tree_sitter_scss())
         },
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Vue => unsafe { std::mem::transmute::<*const (), TsLanguage>(tree_sitter_vue()) },
         Language::GraphQl => tree_sitter_graphql::LANGUAGE.into(),
         Language::CMake => tree_sitter_cmake::LANGUAGE.into(),
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Dockerfile => unsafe {
             std::mem::transmute::<*const (), TsLanguage>(tree_sitter_dockerfile())
         },
@@ -88,6 +100,8 @@ pub fn tree_sitter_grammar(lang: Language) -> Option<TsLanguage> {
         Language::Hlsl => tree_sitter_hlsl::LANGUAGE_HLSL.into(),
         // Tier 2B structural/config/frontend languages
         Language::Svelte => tree_sitter_svelte_next::LANGUAGE.into(),
+        // SAFETY: this linked grammar returns a process-lifetime TSLanguage descriptor.
+        // TsLanguage is repr(transparent) over that same descriptor pointer.
         Language::Astro => unsafe {
             std::mem::transmute::<*const (), TsLanguage>(tree_sitter_astro())
         },

@@ -145,9 +145,15 @@ impl IndexLock {
             .truncate(false)
             .write(true)
             .open(lock_path)
-            .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
-        // `flock` is blocking; if in-process slot was claimed, this will
-        // block on inter-process contention.
+            .with_context(|| format!("failed to open lock file {}", lock_path.display()));
+        let file = match file {
+            Ok(file) => file,
+            Err(err) => {
+                release_in_process(lock_path);
+                return Err(err);
+            }
+        };
+        // The platform lock blocks on inter-process contention.
         let result = lock_exclusive_blocking(&file)
             .with_context(|| format!("failed to lock {}", lock_path.display()));
         if result.is_err() {
@@ -205,6 +211,8 @@ impl Drop for IndexLock {
 #[cfg(unix)]
 fn try_lock_exclusive(file: &File) -> Result<bool> {
     use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a live descriptor throughout this call; flock does
+    // not take ownership of it or retain a pointer into Rust memory.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if ret == 0 {
         Ok(true)
@@ -221,6 +229,8 @@ fn try_lock_exclusive(file: &File) -> Result<bool> {
 #[cfg(unix)]
 fn lock_exclusive_blocking(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a live descriptor throughout this blocking call;
+    // flock does not take ownership of it or retain Rust memory.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if ret == 0 {
         Ok(())
@@ -232,6 +242,7 @@ fn lock_exclusive_blocking(file: &File) -> Result<()> {
 #[cfg(unix)]
 fn unlock(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` still owns the descriptor on which the lock was acquired.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
     if ret == 0 {
         Ok(())
@@ -240,18 +251,208 @@ fn unlock(file: &File) -> Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn lock_exclusive_windows(file: &File, nonblocking: bool) -> Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    let flags = LOCKFILE_EXCLUSIVE_LOCK
+        | if nonblocking {
+            LOCKFILE_FAIL_IMMEDIATELY
+        } else {
+            0
+        };
+    // SAFETY: our lock files have live writable handles opened without
+    // FILE_FLAG_OVERLAPPED, so the call completes synchronously. The zeroed
+    // OVERLAPPED specifies offset zero and no event, and remains valid until
+    // the call returns. Locking one byte beyond an empty file's EOF is valid.
+    let ret = unsafe { LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut overlapped) };
+    if ret != 0 {
+        Ok(true)
+    } else {
+        let err = std::io::Error::last_os_error();
+        if nonblocking && err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+            Ok(false)
+        } else {
+            Err(err).context("LockFileEx failed")
+        }
+    }
+}
+
+#[cfg(windows)]
+fn try_lock_exclusive(file: &File) -> Result<bool> {
+    lock_exclusive_windows(file, true)
+}
+
+#[cfg(windows)]
+fn lock_exclusive_blocking(file: &File) -> Result<()> {
+    lock_exclusive_windows(file, false).map(|_| ())
+}
+
+#[cfg(windows)]
+fn unlock(file: &File) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    // SAFETY: `file` still owns the synchronous handle used to lock byte zero.
+    // This requests the exact same one-byte range, and the zeroed OVERLAPPED
+    // (offset zero, no event) lives until this synchronous call returns.
+    let ret = unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) };
+    if ret != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("UnlockFileEx failed")
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn try_lock_exclusive(_file: &File) -> Result<bool> {
     // No advisory flock on this platform – treat as unlocked.
     Ok(true)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn lock_exclusive_blocking(_file: &File) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn unlock(_file: &File) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn index_lock_excludes_other_processes_and_releases() {
+        let repo = tempfile::tempdir().unwrap();
+        let index_dir = super::super::pipeline::index_dir(repo.path());
+        let guard = IndexLock::acquire_blocking_for_index_dir(&index_dir).unwrap();
+        let probe = "indexing::lock::tests::index_lock_contention_probe";
+        crate::test_env::run_env_test(
+            probe,
+            &[
+                ("VERA_LOCK_TEST_REPO", Some(repo.path().to_str().unwrap())),
+                ("VERA_LOCK_TEST_EXPECTED", Some("locked")),
+            ],
+        );
+        drop(guard);
+        crate::test_env::run_env_test(
+            probe,
+            &[
+                ("VERA_LOCK_TEST_REPO", Some(repo.path().to_str().unwrap())),
+                ("VERA_LOCK_TEST_EXPECTED", Some("unlocked")),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by index_lock_excludes_other_processes_and_releases"]
+    fn index_lock_contention_probe() {
+        let repo = PathBuf::from(std::env::var_os("VERA_LOCK_TEST_REPO").unwrap());
+        let expected_locked = std::env::var("VERA_LOCK_TEST_EXPECTED").unwrap() == "locked";
+        assert_eq!(IndexLock::is_locked_for_repo(&repo), expected_locked);
+        assert_eq!(
+            IndexLock::try_acquire_for_repo(&repo).unwrap().is_none(),
+            expected_locked,
+        );
+    }
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn blocking_acquisition_waits_for_other_process_to_release() {
+        let repo = tempfile::tempdir().unwrap();
+        let guard = IndexLock::acquire_blocking_for_repo(repo.path()).unwrap();
+        let ready = repo.path().join("ready");
+        let acquired = repo.path().join("acquired");
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "indexing::lock::tests::index_lock_blocking_probe",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("VERA_LOCK_TEST_REPO", repo.path())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(child.0.try_wait().unwrap().is_none(), "child exited early");
+            assert!(Instant::now() < deadline, "child did not reach the lock");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !acquired.exists(),
+            "child acquired a lock held by its parent"
+        );
+        assert!(child.0.try_wait().unwrap().is_none(), "child did not block");
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "child failed after lock release: {status}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child stayed blocked after release"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(acquired.exists());
+        assert!(
+            IndexLock::try_acquire_for_repo(repo.path())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by blocking_acquisition_waits_for_other_process_to_release"]
+    fn index_lock_blocking_probe() {
+        let repo = PathBuf::from(std::env::var_os("VERA_LOCK_TEST_REPO").unwrap());
+        std::fs::write(repo.join("ready"), "ready").unwrap();
+        let _guard = IndexLock::acquire_blocking_for_repo(&repo).unwrap();
+        std::fs::write(repo.join("acquired"), "acquired").unwrap();
+    }
+
+    #[test]
+    fn blocking_open_error_releases_in_process_slot() {
+        let repo = tempfile::tempdir().unwrap();
+        let lock_path = lock_path_for_repo(repo.path());
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(IndexLock::acquire_blocking(&lock_path).is_err());
+        assert!(!is_in_process_locked(&lock_path));
+        std::fs::remove_dir(&lock_path).unwrap();
+        let guard = IndexLock::acquire_blocking(&lock_path).unwrap();
+        assert!(is_in_process_locked(&lock_path));
+        drop(guard);
+        assert!(!is_in_process_locked(&lock_path));
+    }
 }

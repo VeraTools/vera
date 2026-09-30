@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags};
@@ -34,13 +35,16 @@ pub enum EligibilityError {
     Resolution(String),
 }
 
+#[cfg(test)]
 static BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub fn eligibility_build_count() -> usize {
+#[cfg(test)]
+pub(crate) fn eligibility_build_count() -> usize {
     BUILD_COUNT.load(Ordering::Relaxed)
 }
 
-pub fn reset_eligibility_build_count() {
+#[cfg(test)]
+pub(crate) fn reset_eligibility_build_count() {
     BUILD_COUNT.store(0, Ordering::Relaxed);
 }
 
@@ -119,79 +123,6 @@ pub(crate) fn language_to_compact(lang: Language) -> u16 {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn compact_to_language(id: u16) -> Language {
-    match id {
-        0 => Language::Rust,
-        1 => Language::TypeScript,
-        2 => Language::JavaScript,
-        3 => Language::Python,
-        4 => Language::Go,
-        5 => Language::Java,
-        6 => Language::C,
-        7 => Language::Cpp,
-        8 => Language::Ruby,
-        9 => Language::Swift,
-        10 => Language::Kotlin,
-        11 => Language::Scala,
-        12 => Language::Zig,
-        13 => Language::Lua,
-        14 => Language::Bash,
-        15 => Language::CSharp,
-        16 => Language::Php,
-        17 => Language::Haskell,
-        18 => Language::Elixir,
-        19 => Language::Dart,
-        20 => Language::Sql,
-        21 => Language::Hcl,
-        22 => Language::Protobuf,
-        23 => Language::Html,
-        24 => Language::Css,
-        25 => Language::Scss,
-        26 => Language::Vue,
-        27 => Language::GraphQl,
-        28 => Language::CMake,
-        29 => Language::Dockerfile,
-        30 => Language::Xml,
-        31 => Language::ObjectiveC,
-        32 => Language::Perl,
-        33 => Language::Julia,
-        34 => Language::Nix,
-        35 => Language::OCaml,
-        36 => Language::Groovy,
-        37 => Language::Clojure,
-        38 => Language::CommonLisp,
-        39 => Language::Erlang,
-        40 => Language::FSharp,
-        41 => Language::Fortran,
-        42 => Language::PowerShell,
-        43 => Language::R,
-        44 => Language::Matlab,
-        45 => Language::DLang,
-        46 => Language::Fish,
-        47 => Language::Zsh,
-        48 => Language::Luau,
-        49 => Language::Scheme,
-        50 => Language::Racket,
-        51 => Language::Elm,
-        52 => Language::Glsl,
-        53 => Language::Hlsl,
-        54 => Language::Svelte,
-        55 => Language::Astro,
-        56 => Language::Makefile,
-        57 => Language::Ini,
-        58 => Language::Nginx,
-        59 => Language::Prisma,
-        60 => Language::Rst,
-        61 => Language::Toml,
-        62 => Language::Yaml,
-        63 => Language::Json,
-        64 => Language::Markdown,
-        65 => Language::Unknown,
-        _ => Language::Unknown,
-    }
-}
-
 pub(crate) fn parse_language_compact(s: &str) -> Option<u16> {
     // Language Display is lower-case; parsing is case-insensitive via eq_ignore_ascii_case in matches_file.
     // Try FromStr after lowercasing; it expects lower-case wire names.
@@ -240,6 +171,7 @@ impl EligibilityMap {
         metadata_path: &Path,
         vector_path: &Path,
     ) -> std::result::Result<Self, EligibilityError> {
+        #[cfg(test)]
         BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
         // Open metadata read-only.
         let conn = Connection::open_with_flags(metadata_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -649,11 +581,12 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn is_map_evaluable_rejects_unsupported() {
         assert!(!is_map_evaluable(&SearchFilters::default()));
-        let mut f = SearchFilters::default();
-        f.language = Some("rust".to_string());
+        let mut f = SearchFilters {
+            language: Some("rust".to_string()),
+            ..Default::default()
+        };
         assert!(is_map_evaluable(&f));
         f.scope = Some(crate::types::SearchScope::Source);
         assert!(!is_map_evaluable(&f));

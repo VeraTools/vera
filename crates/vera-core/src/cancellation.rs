@@ -2,7 +2,7 @@ use tokio_util::sync::CancellationToken as AsyncCancellationToken;
 
 /// Typed cancellation marker.
 ///
-/// Produced by [`CancellationToken::check`] and by embedding cancellation.
+/// Produced by `CancellationToken::check` and by embedding cancellation.
 /// Using a typed error lets callers distinguish cancellation from other
 /// failures without brittle substring checks on the error message.
 #[derive(Debug, Clone, thiserror::Error)]

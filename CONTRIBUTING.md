@@ -5,25 +5,43 @@
 Rust 1.88+ required (see `Cargo.toml` `rust-version` for exact MSRV).
 
 ```bash
-git clone https://github.com/VeraTools/Vera.git
-cd Vera
+git clone https://github.com/VeraTools/vera.git
+cd vera
 bash scripts/bootstrap-vendored-grammars.sh  # Downloads the vendored tree-sitter grammars used by CI.
-cargo build
+cargo build --locked
 ```
 
 ## Run Tests
 
 ```bash
-cargo test --workspace       # all tests
-cargo test -p vera-core      # core crate only
+cargo test --locked --workspace       # all tests
+cargo test --locked -p vera-core      # core crate only
 ```
 
 ## Lint & Format
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+Workspace lints deny debugging macros, unfinished implementations, unsafe operations without explicit blocks, undocumented unsafe blocks, and unexplained lint suppressions. Keep each necessary suppression narrow and include a specific `reason`. Document the safety invariant at each unsafe operation.
+
+CI also checks public rustdoc, workflows with Actionlint and ShellCheck, first-party shell scripts, conservative Ruff rules, and npm JavaScript syntax. CodeQL default setup scans the detected Rust, Actions, Python, JavaScript and grammar C/C++ sources.
+
+```bash
+cargo metadata --locked --format-version=1 > /dev/null
+cargo check --locked --workspace --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+cargo deny --locked check
+cargo audit
+cargo machete
+actionlint
+shellcheck eval/*.sh scripts/*.sh
+ruff check --select E4,E7,E9,F benchmarks eval scripts packages/python-cli
+```
+
+The supported distributions are GitHub binaries, npm, PyPI and Docker. Workspace crates are private and versioned together from release tags. Release automation and its fixtures use Python 3.11; the installed Python wrapper supports Python 3.9.
 
 ## Project Layout
 
@@ -60,8 +78,8 @@ See [docs/architecture.md](docs/architecture.md#adding-a-new-language) for the s
 
 ```bash
 bash eval/setup-semble-corpus.sh                    # clone the pinned Semble corpus
-cargo build --release
-cargo run --release --bin vera-eval -- run \
+cargo build --locked --release
+cargo run --locked --release --bin vera-eval -- run \
   --tool vera-potion \
   --tasks-dir eval/tasks/semble \
   --corpus eval/semble-corpus.toml \

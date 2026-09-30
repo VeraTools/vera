@@ -30,7 +30,6 @@ pub struct ReportProvenance {
 ///
 /// Each retrieval tool (Vera, ripgrep, grepai, etc.) implements this trait
 /// to integrate with the benchmark runner.
-#[allow(dead_code)]
 pub trait ToolAdapter {
     /// Tool name for reporting.
     fn name(&self) -> &str;

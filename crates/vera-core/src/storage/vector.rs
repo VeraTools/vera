@@ -1835,11 +1835,17 @@ fn register_sqlite_vec() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        type ExtensionEntry = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::ffi::c_int;
+        // SAFETY: the linked C sqlite3_vec_init has SQLite's three-argument
+        // extension ABI, though sqlite-vec declares it without arguments.
+        // Its code lives for the process lifetime, and Once registers it once.
         unsafe {
-            // sqlite-vec requires registering via auto_extension with a transmute
-            // from the C-style init function pointer to the sqlite3 extension type.
-            #[allow(clippy::missing_transmute_annotations)]
-            let func = std::mem::transmute(sqlite3_vec_init as *const ());
+            let func =
+                std::mem::transmute::<*const (), ExtensionEntry>(sqlite3_vec_init as *const ());
             sqlite3_auto_extension(Some(func));
         }
     });

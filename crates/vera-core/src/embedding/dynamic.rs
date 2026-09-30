@@ -25,7 +25,10 @@ pub enum DynamicProvider {
     // The stub stays crate-private; the variant exists only under cfg(test),
     // so the visibility mismatch cannot leak into the public API.
     #[cfg(test)]
-    #[allow(private_interfaces)]
+    #[allow(
+        private_interfaces,
+        reason = "This variant and its private provider exist only in unit-test builds, so no production API exposes the stub."
+    )]
     Stub(tests::StubProvider),
 }
 

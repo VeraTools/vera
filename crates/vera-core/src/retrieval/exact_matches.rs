@@ -44,24 +44,9 @@ pub(crate) fn augment_exact_match_candidates(
             query, results, stage, filters,
         ));
     };
-    augment_exact_match_candidates_with_store(&store, &files, query, results, stage, filters)
-}
-
-/// Maximum definition chunks one concept-matched file may contribute.
-const CONCEPT_CHUNKS_PER_FILE: usize = 4;
-
-#[allow(dead_code)]
-pub(crate) fn augment_exact_match_candidates_with_store(
-    store: &MetadataStore,
-    indexed_files: &[String],
-    query: &str,
-    results: Vec<SearchResult>,
-    stage: RankingStage,
-    filters: &SearchFilters,
-) -> Result<Vec<SearchResult>> {
     augment_exact_match_candidates_with_store_and_config(
-        store,
-        indexed_files,
+        &store,
+        &files,
         query,
         results,
         stage,
@@ -69,6 +54,9 @@ pub(crate) fn augment_exact_match_candidates_with_store(
         &VeraConfig::default(),
     )
 }
+
+/// Maximum definition chunks one concept-matched file may contribute.
+const CONCEPT_CHUNKS_PER_FILE: usize = 4;
 
 pub(crate) fn augment_exact_match_candidates_with_store_and_config(
     store: &MetadataStore,
@@ -173,69 +161,6 @@ pub fn augment_multi_query_exact_matches(
         RankingStage::Initial,
         filters,
         &VeraConfig::default(),
-    );
-    Ok(apply_filters(ranked, filters, result_limit))
-}
-
-#[allow(dead_code)]
-pub fn augment_multi_query_exact_matches_with_config(
-    index_dir: &Path,
-    queries: &[String],
-    results: Vec<SearchResult>,
-    filters: &SearchFilters,
-    result_limit: usize,
-    config: &VeraConfig,
-) -> Result<Vec<SearchResult>> {
-    if queries.is_empty() {
-        return Ok(apply_filters(results, filters, result_limit));
-    }
-
-    let metadata_path = index_dir.join("metadata.db");
-    let Ok(store) = crate::storage::metadata::MetadataStore::open(&metadata_path) else {
-        return Ok(apply_filters(results, filters, result_limit));
-    };
-    let indexed_files = store.indexed_files()?;
-
-    let mut per_query: Vec<std::vec::IntoIter<SearchResult>> = Vec::with_capacity(queries.len());
-    let mut concept_candidates = Vec::new();
-    for (query_index, query) in queries.iter().enumerate() {
-        let exact = collect_exact_match_candidates(&store, &indexed_files, query, query_index)?;
-        if exact.is_empty() {
-            concept_candidates.extend(
-                collect_concept_matched_files(&store, &indexed_files, query)?
-                    .into_iter()
-                    .map(|chunk| chunk.into_search_result(0.0)),
-            );
-        }
-        per_query.push(exact.into_iter());
-    }
-
-    let mut supplemental = Vec::new();
-    loop {
-        let mut progressed = false;
-        for candidates in &mut per_query {
-            if let Some(candidate) = candidates.next() {
-                supplemental.push(candidate);
-                progressed = true;
-            }
-        }
-        if !progressed {
-            break;
-        }
-    }
-
-    if supplemental.is_empty() && concept_candidates.is_empty() {
-        return Ok(apply_filters(results, filters, result_limit));
-    }
-
-    let mut merged = merge_exact_matches(supplemental, results);
-    append_new_candidates(&mut merged, concept_candidates);
-    let ranked = apply_query_ranking_multi_query_with_config(
-        queries,
-        merged,
-        RankingStage::Initial,
-        filters,
-        config,
     );
     Ok(apply_filters(ranked, filters, result_limit))
 }
