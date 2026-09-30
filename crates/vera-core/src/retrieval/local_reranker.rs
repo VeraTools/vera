@@ -163,29 +163,17 @@ impl LocalReranker {
             "attention_mask" => attention_mask_tensor,
         ];
 
-        let mut session = self.session.lock().unwrap();
+        let mut session = crate::local_models::inference::lock_session(&self.session)?;
         let outputs = session.run(inputs)?;
 
-        let output_value = outputs.values().next().unwrap();
-        let (shape, data) = output_value.try_extract_tensor::<f32>()?;
-        let ndim = shape.len();
-
-        let mut results = if ndim == 2 {
-            let dim = shape[1] as usize;
-            map_scores_to_original_indices(candidates, (0..batch_size).map(|i| data[i * dim]))
-        } else if ndim == 1 {
-            map_scores_to_original_indices(candidates, (0..batch_size).map(|i| data[i]))
-        } else {
-            anyhow::bail!("Unexpected tensor shape for reranker: {:?}", shape);
-        };
-
-        results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        Ok(results)
+        let output_value = outputs
+            .values()
+            .next()
+            .context("reranker model produced no outputs")?;
+        let (shape, data) = output_value
+            .try_extract_tensor::<f32>()
+            .context("reranker output must be a float32 tensor")?;
+        rerank_scores_from_tensor(candidates, shape, data)
     }
 
     fn do_rerank_cancellable(
@@ -235,6 +223,33 @@ impl LocalReranker {
         });
         Ok(combined)
     }
+}
+
+fn rerank_scores_from_tensor(
+    candidates: &[TokenizedCandidate],
+    shape: &[i64],
+    data: &[f32],
+) -> Result<Vec<RerankScore>> {
+    let batch_size = candidates.len();
+    crate::local_models::inference::validate_batch_tensor(shape, data.len(), batch_size)?;
+    let ndim = shape.len();
+
+    let mut results = if ndim == 2 {
+        let dim = shape[1] as usize;
+        map_scores_to_original_indices(candidates, (0..batch_size).map(|i| data[i * dim]))
+    } else if ndim == 1 {
+        map_scores_to_original_indices(candidates, (0..batch_size).map(|i| data[i]))
+    } else {
+        anyhow::bail!("Unexpected tensor shape for reranker: {:?}", shape);
+    };
+
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(results)
 }
 
 fn map_scores_to_original_indices(
@@ -418,6 +433,41 @@ fn should_acquire_ort_library(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_reranker_tensors_return_errors() {
+        let candidates = [candidate(4, 2), candidate(2, 2)];
+        for (shape, len) in [
+            (vec![], 0),
+            (vec![1], 1),
+            (vec![2, 0], 0),
+            (vec![2, -1], 0),
+            (vec![2, 2], 3),
+            (vec![2, 1, 1], 2),
+            (vec![2, i64::MAX], 1),
+        ] {
+            let result = rerank_scores_from_tensor(&candidates, &shape, &vec![1.0; len]);
+            assert!(result.is_err(), "shape {shape:?} must return an error");
+        }
+    }
+
+    #[test]
+    fn valid_reranker_tensors_preserve_scores_and_original_indices() {
+        let candidates = [candidate(4, 2), candidate(2, 2)];
+        for (shape, data) in [
+            (vec![2], vec![3.0, 4.0]),
+            (vec![2, 2], vec![3.0, 100.0, 4.0, 0.0]),
+        ] {
+            let scores = rerank_scores_from_tensor(&candidates, &shape, &data).unwrap();
+            assert_eq!(
+                scores
+                    .iter()
+                    .map(|score| (score.index, score.relevance_score))
+                    .collect::<Vec<_>>(),
+                vec![(2, 4.0), (4, 3.0)]
+            );
+        }
+    }
 
     fn candidate(index: usize, token_count: usize) -> TokenizedCandidate {
         TokenizedCandidate {

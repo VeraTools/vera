@@ -459,7 +459,7 @@ impl LocalEmbeddingProvider {
         ];
 
         let t0 = std::time::Instant::now();
-        let mut session = self.session.lock().unwrap();
+        let mut session = crate::local_models::inference::lock_session(&self.session)?;
         let outputs = session.run(inputs)?;
         tracing::debug!(
             batch_size,
@@ -468,61 +468,14 @@ impl LocalEmbeddingProvider {
             "ort session.run"
         );
 
-        let output_value = outputs.values().next().unwrap();
-        let (shape, data) = output_value.try_extract_tensor::<f32>()?;
-        let ndim = shape.len();
-
-        let mut result = Vec::with_capacity(batch_size);
-
-        if ndim == 2 {
-            let dim = shape[1] as usize;
-            for i in 0..batch_size {
-                let start = i * dim;
-                let mut emb = data[start..start + dim].to_vec();
-                normalize_embedding(&mut emb);
-                result.push(emb);
-            }
-        } else if ndim == 3 {
-            let seq_len = shape[1] as usize;
-            let dim = shape[2] as usize;
-            for i in 0..batch_size {
-                let emb = match self.config.pooling {
-                    LocalEmbeddingPooling::Cls => {
-                        data[i * seq_len * dim..(i * seq_len + 1) * dim].to_vec()
-                    }
-                    LocalEmbeddingPooling::Mean => {
-                        let mut emb = vec![0.0; dim];
-                        let mut valid_tokens = 0.0;
-                        for j in 0..max_len {
-                            if attention_mask[[i, j]] == 1 {
-                                valid_tokens += 1.0;
-                                for d in 0..dim {
-                                    emb[d] += data[i * seq_len * dim + j * dim + d];
-                                }
-                            }
-                        }
-                        if valid_tokens > 0.0 {
-                            for value in &mut emb {
-                                *value /= valid_tokens;
-                            }
-                        }
-                        emb
-                    }
-                    LocalEmbeddingPooling::LastToken => {
-                        let last = last_unpadded_index(&attention_mask, i, max_len);
-                        let start = i * seq_len * dim + last * dim;
-                        data[start..start + dim].to_vec()
-                    }
-                };
-                let mut emb = emb;
-                normalize_embedding(&mut emb);
-                result.push(emb);
-            }
-        } else {
-            anyhow::bail!("Unexpected tensor shape: {:?}", shape);
-        }
-
-        Ok(result)
+        let output_value = outputs
+            .values()
+            .next()
+            .context("embedding model produced no outputs")?;
+        let (shape, data) = output_value
+            .try_extract_tensor::<f32>()
+            .context("embedding output must be a float32 tensor")?;
+        embeddings_from_tensor(shape, data, &attention_mask, self.config.pooling)
     }
 
     fn tokenize_texts(&self, texts: &[String]) -> Result<Vec<Encoding>> {
@@ -881,6 +834,78 @@ fn load_tokenizer(tokenizer_path: std::path::PathBuf, max_length: usize) -> Resu
     Ok(tokenizer)
 }
 
+fn embeddings_from_tensor(
+    shape: &[i64],
+    data: &[f32],
+    attention_mask: &ndarray::Array2<i64>,
+    pooling: LocalEmbeddingPooling,
+) -> Result<Vec<Vec<f32>>> {
+    let batch_size = attention_mask.nrows();
+    let max_len = attention_mask.ncols();
+    crate::local_models::inference::validate_batch_tensor(shape, data.len(), batch_size)?;
+    let ndim = shape.len();
+    let mut result = Vec::with_capacity(batch_size);
+
+    if ndim == 2 {
+        let dim = shape[1] as usize;
+        for i in 0..batch_size {
+            let start = i * dim;
+            let mut emb = data[start..start + dim].to_vec();
+            normalize_embedding(&mut emb);
+            result.push(emb);
+        }
+    } else if ndim == 3 {
+        let seq_len = shape[1] as usize;
+        let dim = shape[2] as usize;
+        anyhow::ensure!(
+            pooling == LocalEmbeddingPooling::Cls
+                || seq_len >= max_len
+                || attention_mask
+                    .rows()
+                    .into_iter()
+                    .all(|row| row.iter().skip(seq_len).all(|mask| *mask != 1)),
+            "embedding output has fewer token positions than the attention mask"
+        );
+        for i in 0..batch_size {
+            let emb = match pooling {
+                LocalEmbeddingPooling::Cls => {
+                    data[i * seq_len * dim..(i * seq_len + 1) * dim].to_vec()
+                }
+                LocalEmbeddingPooling::Mean => {
+                    let mut emb = vec![0.0; dim];
+                    let mut valid_tokens = 0.0;
+                    for j in 0..max_len {
+                        if attention_mask[[i, j]] == 1 {
+                            valid_tokens += 1.0;
+                            for d in 0..dim {
+                                emb[d] += data[i * seq_len * dim + j * dim + d];
+                            }
+                        }
+                    }
+                    if valid_tokens > 0.0 {
+                        for value in &mut emb {
+                            *value /= valid_tokens;
+                        }
+                    }
+                    emb
+                }
+                LocalEmbeddingPooling::LastToken => {
+                    let last = last_unpadded_index(attention_mask, i, max_len);
+                    let start = i * seq_len * dim + last * dim;
+                    data[start..start + dim].to_vec()
+                }
+            };
+            let mut emb = emb;
+            normalize_embedding(&mut emb);
+            result.push(emb);
+        }
+    } else {
+        anyhow::bail!("Unexpected tensor shape: {:?}", shape);
+    }
+
+    Ok(result)
+}
+
 /// Index of the final unpadded token in row `row` of `attention_mask`.
 ///
 /// Scanning for the highest set position rather than counting ones keeps this
@@ -1084,6 +1109,83 @@ fn register_execution_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_embedding_tensors_return_errors() {
+        let mask = ndarray::arr2(&[[1i64, 1], [1, 0]]);
+        for (shape, len) in [
+            (vec![], 0),
+            (vec![1, 2], 2),
+            (vec![2, 0], 0),
+            (vec![2, -1], 0),
+            (vec![2, 2], 3),
+            (vec![2], 2),
+            (vec![2, i64::MAX, i64::MAX], 1),
+        ] {
+            let result =
+                embeddings_from_tensor(&shape, &vec![1.0; len], &mask, LocalEmbeddingPooling::Mean);
+            assert!(result.is_err(), "shape {shape:?} must return an error");
+        }
+        for pooling in [
+            LocalEmbeddingPooling::Mean,
+            LocalEmbeddingPooling::LastToken,
+        ] {
+            assert!(
+                embeddings_from_tensor(&[2, 1, 2], &[3.0, 4.0, 0.0, 2.0], &mask, pooling).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn embedding_tensor_pooling_preserves_valid_outputs() {
+        let mask = ndarray::arr2(&[[1i64, 1], [1, 0]]);
+        let rows = embeddings_from_tensor(
+            &[2, 2],
+            &[3.0, 4.0, 0.0, 2.0],
+            &mask,
+            LocalEmbeddingPooling::Mean,
+        )
+        .unwrap();
+        assert_eq!(rows, vec![vec![0.6, 0.8], vec![0.0, 1.0]]);
+        let data = [3.0, 0.0, 0.0, 3.0, 0.0, 2.0, 0.0, 100.0];
+        let cls =
+            embeddings_from_tensor(&[2, 2, 2], &data, &mask, LocalEmbeddingPooling::Cls).unwrap();
+        assert_eq!(cls, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        let last =
+            embeddings_from_tensor(&[2, 2, 2], &data, &mask, LocalEmbeddingPooling::LastToken)
+                .unwrap();
+        assert_eq!(last, vec![vec![0.0, 1.0], vec![0.0, 1.0]]);
+        let mean =
+            embeddings_from_tensor(&[2, 2, 2], &data, &mask, LocalEmbeddingPooling::Mean).unwrap();
+        for value in &mean[0] {
+            assert!((*value - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        }
+        assert_eq!(mean[1], vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn shortened_token_outputs_allow_only_referenced_token_positions() {
+        let mask = ndarray::arr2(&[[1i64, 0], [1, 0]]);
+        let data = [3.0, 4.0, 0.0, 2.0];
+        for pooling in [
+            LocalEmbeddingPooling::Mean,
+            LocalEmbeddingPooling::LastToken,
+        ] {
+            let rows = embeddings_from_tensor(&[2, 1, 2], &data, &mask, pooling).unwrap();
+            assert_eq!(rows, vec![vec![0.6, 0.8], vec![0.0, 1.0]]);
+        }
+        let fully_attended = ndarray::arr2(&[[1i64, 1], [1, 1]]);
+        assert!(
+            embeddings_from_tensor(
+                &[2, 1, 2],
+                &data,
+                &fully_attended,
+                LocalEmbeddingPooling::Cls
+            )
+            .is_ok()
+        );
+    }
+
     use tempfile::tempdir;
 
     /// Right padding: the model's real final token sits before the pad run.
