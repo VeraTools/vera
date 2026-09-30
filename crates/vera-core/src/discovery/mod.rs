@@ -288,7 +288,7 @@ pub(crate) fn open_root_dir(root: &Path) -> Result<Arc<Dir>> {
 
 /// The directory exclusions discovery applies, reusable without walking a tree.
 ///
-/// Built from the same [`build_overrides`] patterns `discover_files` installs on
+/// Built from the same `build_overrides` patterns `discover_files` installs on
 /// its walker, so a caller that has to classify a single path (the MCP file
 /// watcher deciding whether an event is worth an update cycle) cannot drift from
 /// what indexing actually skips.

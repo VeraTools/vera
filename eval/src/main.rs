@@ -100,7 +100,10 @@ fn main() -> Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The CLI passes independent lane, corpus and task selection arguments to orchestration"
+)]
 fn cmd_run(
     tasks_dir: &Path,
     corpus_path: &Path,

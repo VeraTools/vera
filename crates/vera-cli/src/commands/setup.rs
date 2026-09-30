@@ -98,7 +98,7 @@ pub(crate) const API_PRESETS: &[ApiPreset] = &[
     },
 ];
 
-#[allow(dead_code)] // exercised by the preset-identity round-trip test
+#[cfg(test)]
 pub(crate) fn preset_by_id(id: ApiPresetId) -> &'static ApiPreset {
     API_PRESETS
         .iter()
@@ -613,6 +613,8 @@ type D3d12CreateDevice = unsafe extern "system" fn(
 /// is `S_FALSE` (1), not `S_OK` (0)**, so the verdict is the sign bit of the
 /// `HRESULT` and never an equality against zero.
 fn d3d12_device_can_be_created(create_device: D3d12CreateDevice) -> bool {
+    // SAFETY: The resolved function has the D3D12CreateDevice system ABI.
+    // The IID is live and aligned; null adapter/device pointers request a probe.
     let hresult = unsafe {
         create_device(
             std::ptr::null_mut(),
@@ -654,6 +656,8 @@ fn has_directx12_adapter() -> bool {
         // inside whatever project the user is standing in. `d3d12.dll` is not
         // reliably a KnownDLL, so a copy checked into a repository would
         // otherwise load ahead of the system one and run its `DllMain` here.
+        // SAFETY: The DLL name is a static NUL-terminated string; no file handle
+        // is supplied and SYSTEM32 confines the load to the trusted system DLL.
         let module = unsafe {
             LoadLibraryExA(
                 c"d3d12.dll".as_ptr().cast(),
@@ -665,12 +669,16 @@ fn has_directx12_adapter() -> bool {
             tracing::debug!("d3d12.dll not present in System32; no DirectX 12 adapter");
             return false;
         }
+        // SAFETY: module is a live, non-null loaded module retained for the
+        // process lifetime; the export name is static and NUL-terminated.
         let Some(symbol) =
             (unsafe { GetProcAddress(module, c"D3D12CreateDevice".as_ptr().cast()) })
         else {
             tracing::debug!("d3d12.dll exports no D3D12CreateDevice; no DirectX 12 adapter");
             return false;
         };
+        // SAFETY: This named system export implements exactly the documented
+        // D3D12CreateDevice ABI, including the repr(C) IID and system convention.
         let create_device: D3d12CreateDevice = unsafe { std::mem::transmute(symbol) };
         d3d12_device_can_be_created(create_device)
     }
@@ -1339,6 +1347,8 @@ mod tests {
             riid: *const Iid,
             device: *mut *mut std::ffi::c_void,
         ) -> i32 {
+            // SAFETY: The tested probe passes a reference to its live, aligned
+            // IID constant, and this callback reads it only during that call.
             let riid = unsafe { *riid };
             SEEN.with(|seen| seen.set((feature_level, riid, device.is_null(), adapter.is_null())));
             1
@@ -1383,6 +1393,8 @@ mod tests {
             GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExA,
         };
 
+        // SAFETY: The DLL name is a static NUL-terminated string; no file handle
+        // is supplied and SYSTEM32 confines the load to the trusted system DLL.
         let module = unsafe {
             LoadLibraryExA(
                 c"d3d12.dll".as_ptr().cast(),
@@ -1394,9 +1406,15 @@ mod tests {
             !module.is_null(),
             "d3d12.dll ships with every supported Windows"
         );
+        // SAFETY: module is a live system DLL retained through the call; the
+        // export name is a valid static NUL-terminated string.
         let symbol = unsafe { GetProcAddress(module, c"D3D12CreateDevice".as_ptr().cast()) }
             .expect("d3d12.dll exports D3D12CreateDevice");
+        // SAFETY: This named system export implements exactly the documented
+        // D3D12CreateDevice ABI, including the repr(C) IID and system convention.
         let create_device: D3d12CreateDevice = unsafe { std::mem::transmute(symbol) };
+        // SAFETY: The export ABI is verified above. The IID reference remains
+        // live, and null output/adapter pointers use the documented probe mode.
         let hresult = unsafe {
             create_device(
                 std::ptr::null_mut(),

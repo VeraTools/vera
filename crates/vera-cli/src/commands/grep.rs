@@ -7,7 +7,10 @@ use crate::helpers::{output_results, prepare_indexed_search};
 use crate::state;
 
 /// Run the `vera grep <pattern>` command.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Regex search retains the existing CLI filters and output dispatch interface"
+)]
 pub fn run(
     pattern: &str,
     limit: Option<usize>,

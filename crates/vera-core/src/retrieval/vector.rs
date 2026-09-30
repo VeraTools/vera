@@ -63,7 +63,7 @@ pub async fn search_vector_with_stores(
 ///
 /// The embedding call is nested inside the vector search, so a caller that
 /// reports per-stage timings cannot otherwise separate model cost from storage
-/// cost. The returned duration covers only [`generate_query_embedding`]; it is
+/// cost. The returned duration covers only query embedding generation; it is
 /// [`Duration::ZERO`] when `limit` is 0 and no embedding is generated.
 pub async fn search_vector_with_stores_timed(
     vector_store: &VectorStore,

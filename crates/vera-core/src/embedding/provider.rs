@@ -122,7 +122,7 @@ pub trait EmbeddingProvider: Send + Sync {
 /// Configuration for an OpenAI-compatible embedding provider.
 #[derive(Clone)]
 pub struct EmbeddingProviderConfig {
-    /// Base URL for the API (e.g. "https://api.openai.com/v1").
+    /// Base URL for the API (e.g. <https://api.openai.com/v1>).
     pub base_url: String,
     /// Model identifier (e.g. "Qwen/Qwen3-Embedding-8B").
     pub model_id: String,

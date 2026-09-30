@@ -6,7 +6,10 @@ use crate::helpers::{apply_git_scope, output_results, prepare_indexed_repo};
 use crate::state;
 
 /// Run the `vera references <symbol>` command.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "References accepts the existing command dispatch parameters for filters and output"
+)]
 pub fn run(
     symbol: &str,
     callees: bool,

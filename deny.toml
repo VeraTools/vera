@@ -9,7 +9,7 @@ ignore = [
     # number_prefix is unmaintained but pulled in transitively by model2vec-rs via hf-hub/indicatif.
     # Keep this scoped to the Potion backend dependency until upstream removes the edge.
     "RUSTSEC-2025-0119",
-    # lru 0.16.4 via tantivy 0.26.1. The soundness hole needs LruCache::pop()
+    # lru 0.16.4 via tantivy 0.26.2. The soundness hole needs LruCache::pop()
     # to unwind through a panicking key/value destructor. Tantivy's only use
     # is BlockCache (store/reader.rs): LruCache<usize, OwnedBytes>, neither
     # type has a panicking Drop, and tantivy never calls pop(). Not reachable
@@ -43,10 +43,20 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
+# Workspace-only path crates are stamped together from the release tag.
+allow-wildcard-paths = true
+
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+    { name = "hyper-tls" },
+]
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "allow"
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/tree-sitter-grammars/tree-sitter-hcl"]
+required-git-spec = "rev"

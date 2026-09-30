@@ -1688,38 +1688,41 @@ card0, 1073741824, 4294967296\n";
 
     // ——— Issue #196 signals: toggleable ranking flags ———
 
-    static ENV_BOOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn env_bool_parses_variants() {
-        let _guard = ENV_BOOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let key = "VERA_TEST_BOOL_VARIANTS";
-        let check = |value: &str, default: bool, expected: bool| {
-            unsafe { std::env::set_var(key, value) };
-            let got = env_bool(key, default);
-            unsafe { std::env::remove_var(key) };
-            assert_eq!(
-                got, expected,
-                "env_bool({value:?}, default={default}) expected {expected}"
+        for value in [
+            "1", "0", "true", "TRUE", "false", "FALSE", "yes", "no", "on", "off", "maybe",
+        ] {
+            run_env_test(
+                "config::tests::env_bool_parses_variants_probe",
+                &[("VERA_TEST_BOOL_VARIANTS", Some(value))],
             );
-        };
-        check("1", false, true);
-        check("1", true, true);
-        check("0", true, false);
-        check("true", false, true);
-        check("TRUE", false, true);
-        check("false", true, false);
-        check("FALSE", true, false);
-        check("yes", false, true);
-        check("no", true, false);
-        check("on", false, true);
-        check("off", true, false);
-        check("maybe", true, true);
-        check("maybe", false, false);
-        // unset falls back to default
-        unsafe { std::env::remove_var(key) };
-        assert!(env_bool(key, true));
-        assert!(!env_bool(key, false));
+        }
+        run_env_test(
+            "config::tests::env_bool_parses_variants_probe",
+            &[("VERA_TEST_BOOL_VARIANTS", None)],
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by env_bool_parses_variants"]
+    fn env_bool_parses_variants_probe() {
+        let key = "VERA_TEST_BOOL_VARIANTS";
+        match std::env::var(key).as_deref() {
+            Ok("1" | "true" | "TRUE" | "yes" | "on") => {
+                assert!(env_bool(key, false));
+                assert!(env_bool(key, true));
+            }
+            Ok("0" | "false" | "FALSE" | "no" | "off") => {
+                assert!(!env_bool(key, false));
+                assert!(!env_bool(key, true));
+            }
+            Ok("maybe") | Err(_) => {
+                assert!(env_bool(key, true));
+                assert!(!env_bool(key, false));
+            }
+            Ok(value) => panic!("unexpected boolean test value: {value}"),
+        }
     }
 
     #[test]
