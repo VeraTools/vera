@@ -795,13 +795,13 @@ def main() -> int:
     vo_mrr = get_agg_metric(baselines.get("vector-only", {}), "mrr")
     norerank_mrr = get_agg_metric(final["modes"]["hybrid-norerank"], "mrr")
 
-    print(f"\n  MRR@10 Comparisons:")
+    print("\n  MRR@10 Comparisons:")
     print(f"    Hybrid:        {fmt(hybrid_mrr, 3)}")
     print(f"    BM25-only:     {fmt(bm25_mrr, 3)}  (Δ {pct_change(bm25_mrr, hybrid_mrr)})")
     print(f"    Vector-only:   {fmt(vo_mrr, 3)}  (Δ {pct_change(vo_mrr, hybrid_mrr)})")
     print(f"    No reranker:   {fmt(norerank_mrr, 3)}  (Δ {pct_change(norerank_mrr, hybrid_mrr)})")
 
-    print(f"\n  Embedding Model Rankings (MRR@10):")
+    print("\n  Embedding Model Rankings (MRR@10):")
     for m in sorted(
         embedding_results.keys(),
         key=lambda x: get_agg_metric(embedding_results[x], "mrr") or 0,

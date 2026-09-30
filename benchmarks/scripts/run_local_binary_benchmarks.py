@@ -22,12 +22,9 @@ from statistics import median
 from typing import Any
 
 from bench_common import (
-    TASKS_DIR,
     binary_version,
     git_sha,
-    is_match,
     load_tasks,
-    matched_relevances,
     mrr,
     ndcg_at_k,
     recall_at_k,

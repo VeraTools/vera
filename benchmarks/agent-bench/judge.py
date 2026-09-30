@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Grade agent-bench answers against the answer key with agy opus, blind to arm."""
-import json, re, subprocess, sys, random
+import json
+import re
+import subprocess
+import sys
+import random
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -54,9 +58,11 @@ def main():
     for arm, qn in jobs:
         entry = results["questions"].get(f"q{qn:02d}", {}).get(arm)
         if not entry or not entry.get("answer"):
-            print(f"skip {arm} q{qn}: no answer"); continue
+            print(f"skip {arm} q{qn}: no answer")
+            continue
         if entry.get("failed"):
-            print(f"skip {arm} q{qn}: failed run"); continue
+            print(f"skip {arm} q{qn}: failed run")
+            continue
         out_file = judge_dir / f"{arm}-q{qn:02d}.txt"
         # Resume: a prior judge pass may have graded this cell (crash recovery,
         # or a re-run after fill-in cells refreshed the results file). Reuse the

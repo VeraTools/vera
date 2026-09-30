@@ -329,7 +329,7 @@ class CocoindexAdapter:
                 timeout=30
             )
             # Then index
-            result = subprocess.run(
+            subprocess.run(
                 ["ccc", "index"],
                 cwd=repo_path,
                 capture_output=True, text=True,
