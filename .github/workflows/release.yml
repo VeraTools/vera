@@ -162,7 +162,8 @@ jobs:
           echo "CARGO_ZIGBUILD_PYTHON_PATH=$VENV/bin/python" >> "$GITHUB_ENV"
           # Fail fast in this step if zig is unreachable, not at build time.
           "$VENV/bin/python" -m ziglang version
-          PATH="$VENV/bin:$PATH" cargo zigbuild --version
+          "$VENV/bin/python" -c 'from importlib.metadata import version; print("cargo-zigbuild", version("cargo-zigbuild"))'
+          PATH="$VENV/bin:$PATH" cargo zigbuild --help >/dev/null
           # sqlite-vec uses BSD u_int8_t/u_int16_t/u_int64_t types unavailable in musl.
           echo "CFLAGS_x86_64_unknown_linux_musl=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t" >> "$GITHUB_ENV"
 
