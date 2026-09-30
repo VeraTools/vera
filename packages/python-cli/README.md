@@ -2,7 +2,7 @@
 
 Code search for AI agents. Vera indexes your codebase using tree-sitter parsing and hybrid search (BM25 + vector similarity + optional cross-encoder reranking), then returns ranked code snippets as Markdown codeblocks by default, or JSON with `--json`.
 
-This package downloads and wraps the native Vera binary for your platform. On musl-based Linux (Alpine, NixOS), the correct static binary is selected automatically. Set `VERA_TARGET` to override target detection (e.g., `VERA_TARGET=x86_64-unknown-linux-musl uvx vera-ai install`).
+This package downloads and wraps the native Vera binary for your platform. It downloads the exact package version, checks the release archive size and SHA-256, and stores a completed binary cache. Later runs use that cache without network access. Older caches are downloaded and verified once before they can be reused offline. On musl-based Linux (Alpine, NixOS), the correct static binary is selected automatically. Set `VERA_TARGET` to override target detection (e.g., `VERA_TARGET=x86_64-unknown-linux-musl uvx vera-ai install`).
 
 The default local embedding model is `minishlab/potion-code-16M-v2`; it runs locally on CPU on any supported machine, no GPU or ONNX Runtime needed. In the current Semble comparison, Vera v1.4.0 scored `0.8437` nDCG@10 versus Semble 0.5.5 at `0.8514` on Semble's own tuning corpus, and leads on the independent contamination set (`0.7674` vs `0.7655`) and on recall@5; Vera's index is 6.8x smaller (4.7 GB vs 32 GB). For the highest measured search quality, use the Qwen preset through OpenRouter. Full details live in the main repo docs.
 

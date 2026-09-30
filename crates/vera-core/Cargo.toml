@@ -54,7 +54,7 @@ tree-sitter-php = "0.24.2"
 tree-sitter-haskell = "0.23.1"
 tree-sitter-elixir = "0.3.5"
 tree-sitter-dart = "0.1.0"
-tree-sitter-hcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-hcl", version = "1.2.0" }
+tree-sitter-hcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-hcl", rev = "64ad62785d442eb4d45df3a1764962dafd5bc98b", version = "1.2.0" }
 tree-sitter-html = "0.23.2"
 tree-sitter-css = "0.25.0"
 # SCSS: vendored C source in crates/tree-sitter-scss/ (crates.io 1.0.0 passes GCC flags that break MSVC)

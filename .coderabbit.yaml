@@ -23,7 +23,7 @@ reviews:
         Docs must follow the repo's documentation rules: no em-dashes in user-facing docs, no hedging or banned words (comprehensive, robust, seamless, leverage, utilize, facilitate, empower, cutting-edge, state-of-the-art, holistic), one fact in exactly one place, and docs must be updated in the same PR as the behavior they describe. Flag stale claims (test counts, version numbers) that contradict code.
     - path: ".github/workflows/**"
       instructions: |
-        This repo runs CI on Blacksmith runners (blacksmith-* labels; see .github/actionlint.yaml). Do not flag blacksmith-* runner labels as unknown. Release workflows must preserve the 6 Rust targets and archive names vera-<target>.(tar.gz|zip).
+        Ordinary CI runs on GitHub-hosted runners. Releases normally use Blacksmith runners (blacksmith-* labels; see .github/actionlint.yaml), with an explicit GitHub-hosted recovery option. Do not flag blacksmith-* runner labels as unknown. Release workflows must preserve the 6 Rust targets and archive names vera-<target>.(tar.gz|zip).
     - path: "eval/**"
       instructions: |
         Benchmark harness changes must not weaken integrity: no hardcoded expected answers, no silent skipping of failed tasks, metrics math must stay consistent across scripts (see benchmarks/scripts/bench_common.py).
