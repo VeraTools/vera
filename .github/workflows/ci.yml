@@ -170,9 +170,23 @@ jobs:
         with:
           node-version: '18'
           package-manager-cache: false
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
-        with:
-          tool: actionlint@1.7.12,shellcheck@0.11.0
+      - name: Install pinned workflow and shell tools
+        run: |
+          ANALYSIS_TOOLS="$RUNNER_TEMP/vera-analysis-tools"
+          mkdir -p "$ANALYSIS_TOOLS"
+          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            -o "$ANALYSIS_TOOLS/actionlint.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            -o "$ANALYSIS_TOOLS/shellcheck.tar.xz"
+          printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$ANALYSIS_TOOLS/actionlint.tar.gz" | sha256sum -c -
+          printf '%s  %s\n' 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 "$ANALYSIS_TOOLS/shellcheck.tar.xz" | sha256sum -c -
+          tar -xzf "$ANALYSIS_TOOLS/actionlint.tar.gz" -C "$ANALYSIS_TOOLS" actionlint
+          tar -xJf "$ANALYSIS_TOOLS/shellcheck.tar.xz" -C "$ANALYSIS_TOOLS" --strip-components=1 shellcheck-v0.11.0/shellcheck
+          echo "$ANALYSIS_TOOLS" >> "$GITHUB_PATH"
+          "$ANALYSIS_TOOLS/actionlint" -version
+          "$ANALYSIS_TOOLS/shellcheck" --version
       - run: python -m pip install ruff==0.16.9
       - name: Check workflows and shell scripts
         run: |
