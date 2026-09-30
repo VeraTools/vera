@@ -281,7 +281,15 @@ async function extractArchive(archivePath, destination, target) {
         if ($matches.Count -ne 1 -or $matches[0].Length -le 0) { throw 'Release archive must contain exactly one Vera binary' }
         $source = $matches[0].Open()
         $output = [System.IO.File]::Open($env:VERA_INSTALL_BINARY, [System.IO.FileMode]::CreateNew)
-        try { $source.CopyTo($output) } finally { $source.Dispose(); $output.Dispose() }
+        try {
+          $buffer = New-Object byte[] 65536
+          $copied = 0
+          while (($count = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $copied += $count
+            if ($copied -gt $matches[0].Length -or $copied -gt ${MAX_BINARY_BYTES}) { throw 'Release binary exceeds its size limit' }
+            $output.Write($buffer, 0, $count)
+          }
+        } finally { $source.Dispose(); $output.Dispose() }
         if ((Get-Item -LiteralPath $env:VERA_INSTALL_BINARY).Length -ne $matches[0].Length) { throw 'Incomplete release binary' }
       } finally { $archive.Dispose() }
     `;

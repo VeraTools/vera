@@ -240,6 +240,15 @@ test("Windows ZIP extraction validates entries and writes only the expected bina
   const output = path.join(f.temp, "valid.exe");
   await wrapper.extractArchive(archive, output, windowsTarget);
   assert.equal(await fsp.readFile(output, "utf8"), "verified binary");
+  makeZip([{ name: expected, contents: "expands beyond declared size" }]);
+  const forged = await fsp.readFile(archive);
+  const directory = forged.indexOf(Buffer.from("504b0102", "hex"));
+  assert.ok(directory >= 0);
+  forged.writeUInt32LE(1, directory + 24);
+  await fsp.writeFile(archive, forged);
+  const bounded = path.join(f.temp, "bounded.exe");
+  await assert.rejects(wrapper.extractArchive(archive, bounded, windowsTarget));
+  assert.ok(!fs.existsSync(bounded) || (await fsp.stat(bounded)).size === 0);
   assert.equal(fs.existsSync(path.join(path.dirname(f.temp), "outside")), false);
 });
 
