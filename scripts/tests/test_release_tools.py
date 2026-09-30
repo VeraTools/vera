@@ -142,6 +142,36 @@ class ReleaseToolsTests(unittest.TestCase):
         self.assertEqual(newest_stable(releases), 'v10.0.0')
         self.assertIsNone(newest_stable([]))
 
+    def test_retry_downloads_assets_without_digests_and_compares_published_manifest(self):
+        manifest = self.manifest()
+        (self.root / 'release-manifest.json').write_text(json.dumps(manifest))
+        asset = next(iter(manifest['assets'].values()))
+        published = {'assets': [{'name': asset['archive'], 'size': asset['size']},
+                                {'name': 'release-manifest.json'}]}
+        contents = {asset['archive']: b'archive', 'release-manifest.json': json.dumps(manifest).encode()}
+        downloads = []
+
+        def run(command, **kwargs):
+            if command[1] == 'api':
+                return subprocess.CompletedProcess(command, 0, json.dumps(published), '')
+            name = command[command.index('--pattern') + 1]
+            directory = Path(command[command.index('--dir') + 1])
+            (directory / name).write_bytes(contents[name])
+            downloads.append(name)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch('preserve_release_assets.subprocess.run', side_effect=run):
+            preserve_assets(self.root, 'v2.0.0', 'VeraTools/vera')
+            self.assertEqual(downloads, [asset['archive'], 'release-manifest.json'])
+            contents[asset['archive']] = b'changed'
+            with self.assertRaisesRegex(ValueError, 'published asset differs'):
+                preserve_assets(self.root, 'v2.0.0', 'VeraTools/vera')
+            contents[asset['archive']] = b'archive'
+            manifest['assets'][next(iter(manifest['assets']))]['sha256'] = '0' * 64
+            contents['release-manifest.json'] = json.dumps(manifest).encode()
+            with self.assertRaisesRegex(ValueError, 'published manifest differs'):
+                preserve_assets(self.root, 'v2.0.0', 'VeraTools/vera')
+
     def test_registry_missing_is_distinct_from_auth_and_network_failure(self):
         for error in ['ERROR: image: not found', 'manifest unknown']:
             result = subprocess.CompletedProcess([], 1, '', error)

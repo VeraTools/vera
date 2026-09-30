@@ -417,6 +417,7 @@ jobs:
         run: |
           VERSION="${RELEASE_TAG#v}"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" packages/python-cli/pyproject.toml
+          printf '%s\n' "$VERSION" > packages/python-cli/src/vera_ai_wrapper/release-version.txt
           python -m pip install build==1.6.1 twine==7.0.0 setuptools==84.0.0 wheel==0.48.0
           python -m build --no-isolation packages/python-cli
           python -m twine check packages/python-cli/dist/*

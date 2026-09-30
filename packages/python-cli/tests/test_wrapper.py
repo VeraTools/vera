@@ -104,12 +104,25 @@ class Fixture(unittest.TestCase):
         self.assertEqual(len(self.seen), 2)
 
     def test_requested_version_never_falls_back_to_latest(self):
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
             wrapper.ensure_binary_installed()
         self.assertEqual(self.seen, ["/releases/download/v1.4.0/release-manifest.json"])
         self.serve(self.archive(), "9.8.7")
         with self.assertRaisesRegex(RuntimeError, "requested Vera"):
             wrapper.ensure_binary_installed()
+
+    def test_prerelease_download_retains_exact_tag_after_pypi_normalization(self):
+        self.version.stop()
+        (self.root / "release-version.txt").write_text("1.4.0-rc.1\n")
+        with patch.object(wrapper, "__file__", str(self.root / "__main__.py")), \
+                patch.object(wrapper, "version", return_value="1.4.0rc1"):
+            self.assertEqual(wrapper.package_version(), "1.4.0-rc.1")
+            self.serve(self.archive(), "1.4.0-rc.1")
+            binary, value = wrapper.ensure_binary_installed()
+            self.assertEqual(value, "1.4.0-rc.1")
+            self.assertEqual(binary.read_bytes(), b"complete binary")
+            self.assertEqual(self.seen[0], "/releases/download/v1.4.0-rc.1/release-manifest.json")
+        self.version.start()
 
     def test_corrupt_and_incomplete_caches_are_repaired(self):
         self.serve(self.archive())
@@ -166,7 +179,7 @@ class Fixture(unittest.TestCase):
                     handler.wfile.write(b"short")
 
         self.respond = respond
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
             wrapper.read_json(f"{self.base}/redirect")
         with self.assertRaises(RuntimeError):
             wrapper.read_json(f"{self.base}/unsafe")
@@ -194,7 +207,7 @@ class Fixture(unittest.TestCase):
         archive = self.root / "archive.tar.gz"
         for index, entries in enumerate(cases):
             archive.write_bytes(tar(entries))
-            with self.subTest(entries=entries), self.assertRaises(Exception):
+            with self.subTest(entries=entries), self.assertRaises(RuntimeError):
                 wrapper.extract_archive(archive, self.root / f"output-{index}", TARGET)
         self.assertFalse((self.root.parent / "outside").exists())
         archive.write_bytes(tar([(f"vera-{TARGET}/", b"", tarfile.DIRTYPE), (MEMBER, b"binary", tarfile.REGTYPE)]))

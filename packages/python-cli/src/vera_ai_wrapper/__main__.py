@@ -30,6 +30,10 @@ MAX_BINARY_BYTES = 512 * 1024 * 1024
 
 
 def package_version() -> str:
+    # Release builds retain the exact tag; PyPI normalizes prerelease versions.
+    release_version = Path(__file__).with_name("release-version.txt")
+    if release_version.is_file():
+        return release_version.read_text(encoding="utf-8").strip()
     try:
         return version("vera-ai")
     except PackageNotFoundError:

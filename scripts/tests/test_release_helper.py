@@ -39,9 +39,10 @@ class ReleaseHelperTests(unittest.TestCase):
         return subprocess.run(['bash', str(SCRIPT), version], cwd=self.repo, env=self.env,
                               text=True, capture_output=True, timeout=30)
 
-    def assert_rejected(self):
+    def assert_rejected(self, message):
         result = self.release()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(message, result.stdout + result.stderr)
         tags = subprocess.check_output(['git', '--git-dir', str(self.origin), 'tag'], text=True)
         self.assertNotIn('v2.0.0', tags)
         return result
@@ -61,32 +62,35 @@ class ReleaseHelperTests(unittest.TestCase):
 
     def test_dirty_wrong_branch_and_failed_ci_do_not_tag(self):
         (self.repo / 'source').write_text('dirty')
-        self.assert_rejected()
+        self.assert_rejected('uncommitted changes')
         self.git('checkout', '--', 'source')
         self.git('checkout', '-b', 'feature')
-        self.assert_rejected()
+        self.assert_rejected('release from master')
         self.git('checkout', 'master')
         self.env['FIXTURE_CI_GREEN'] = 'false'
-        self.assert_rejected()
+        self.assert_rejected('CI must pass')
 
     def test_local_ahead_and_remote_ahead_do_not_tag(self):
         (self.repo / 'source').write_text('ahead')
         self.git('commit', '-am', 'ahead')
-        self.assert_rejected()
+        self.assert_rejected('local master must match')
         self.git('push', 'origin', 'master')
         self.git('reset', '--hard', self.commit)
-        self.assert_rejected()
+        self.assert_rejected('local master must match')
 
     def test_detached_invalid_version_and_remote_tag_do_not_tag(self):
         self.git('checkout', '--detach')
-        self.assert_rejected()
+        self.assert_rejected('release from master')
         self.git('checkout', 'master')
-        self.assertNotEqual(self.release('bad-version').returncode, 0)
+        invalid = self.release('bad-version')
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn('not a valid semver version', invalid.stdout)
         self.git('tag', 'v2.0.0')
         self.git('push', 'origin', 'refs/tags/v2.0.0')
         self.git('tag', '-d', 'v2.0.0')
         result = self.release()
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('tag v2.0.0 already exists', result.stdout)
         self.assertEqual(self.git('rev-parse', 'refs/tags/v2.0.0').stdout.strip(), self.commit)
 
 
