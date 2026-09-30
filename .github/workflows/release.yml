@@ -98,9 +98,12 @@ jobs:
       - name: Verify release tag
         shell: bash
         run: |
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
           if [[ "$PUBLISH" == true ]]; then
             test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+              test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+            fi
           else
             [[ "$BUILD_REF" == refs/tags/* || "$BUILD_REF" =~ ^[0-9a-f]{40}$ ]]
             test "$(git rev-parse HEAD)" = "$(git rev-parse "$BUILD_REF^{commit}")"
@@ -485,7 +488,7 @@ jobs:
         run: |
           python3 .release-tools/scripts/verify_release_archive.py \
             artifacts/release-manifest.json artifacts/vera-x86_64-unknown-linux-gnu.tar.gz \
-            "$RELEASE_TAG" "${{ github.repository }}" dist/vera
+            "$RELEASE_TAG" "${{ github.repository }}" .release-tools/dist/vera
 
       - name: Lowercase image name
         run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
@@ -519,8 +522,8 @@ jobs:
         continue-on-error: true
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
-          file: ${{ matrix.dockerfile }}
+          context: .release-tools
+          file: .release-tools/${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.versioned.outputs.image }}
 
@@ -543,7 +546,7 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME_LC}"
-          docker build -f "$DOCKERFILE" -t "$IMAGE:${VERSION#v}-$TAG_SUFFIX" .
+          docker build -f ".release-tools/$DOCKERFILE" -t "$IMAGE:${VERSION#v}-$TAG_SUFFIX" .release-tools
           docker push "$IMAGE:${VERSION#v}-$TAG_SUFFIX"
 
       - name: Promote newest stable release

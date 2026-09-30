@@ -66,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
           gh release download "$TAG" --pattern 'vera-x86_64-unknown-linux-gnu.tar.gz' \
             --pattern release-manifest.json --dir artifacts --clobber
           python3 scripts/verify_release_archive.py artifacts/release-manifest.json \

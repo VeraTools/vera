@@ -54,6 +54,11 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertEqual(tagged, self.commit)
         self.assertNotEqual(self.release().returncode, 0)
 
+    def test_hyphenated_prerelease_tag(self):
+        result = self.release('2.0.0-rc-1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('rev-parse', 'v2.0.0-rc-1').stdout.strip(), self.commit)
+
     def test_dirty_wrong_branch_and_failed_ci_do_not_tag(self):
         (self.repo / 'source').write_text('dirty')
         self.assert_rejected()

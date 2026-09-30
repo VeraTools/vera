@@ -30,7 +30,7 @@ def image_digest(image: str) -> str | None:
 
 def main() -> None:
     mode, repo, tag, image, variant = sys.argv[1:]
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.]+)?", tag):
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?", tag):
         raise ValueError("invalid release tag")
     if variant not in ("cpu", "cuda", "rocm", "openvino"):
         raise ValueError("unsupported Docker variant")

@@ -9,7 +9,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Validate semver format
-if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
   echo "Error: '$VERSION' is not a valid semver version"
   exit 1
 fi
