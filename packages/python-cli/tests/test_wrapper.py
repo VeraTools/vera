@@ -272,9 +272,10 @@ class Fixture(unittest.TestCase):
         binary = self.root / "space %USERPROFILE% ! literal.exe"
         shutil.copyfile(os.environ.get("COMSPEC", "C:/Windows/System32/cmd.exe"), binary)
         shim = wrapper.create_shim(binary)
+        command = os.environ.get("COMSPEC", "cmd.exe")
         result = subprocess.run(
-            [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", f'""{shim}" /d /c echo shim-works"'],
-            capture_output=True, text=True,
+            f'"{command}" /d /s /c ""{shim}" /d /c echo shim-works"',
+            executable=command, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "shim-works")

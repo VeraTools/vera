@@ -257,7 +257,7 @@ test("Windows shim preserves spaces and literal percent and exclamation marks", 
   const binary = path.join(f.temp, "space %USERPROFILE% ! literal.exe");
   await fsp.copyFile(process.execPath, binary);
   const shim = await wrapper.createShim(binary);
-  const result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `""${shim}" --version"`], { encoding: "utf8" });
+  const result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `""${shim}" --version"`], { encoding: "utf8", windowsVerbatimArguments: true });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), process.version);
 });
