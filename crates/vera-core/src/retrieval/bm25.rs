@@ -34,11 +34,8 @@ const BM25_HYDRATION_PAGE_MAX: usize = 900;
 /// A vector of `SearchResult` with full chunk metadata, sorted by score descending.
 pub fn search_bm25(index_dir: &Path, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let bm25_dir = index_dir.join("bm25");
-    let metadata_path = index_dir.join("metadata.db");
-
     let bm25_index = Bm25Index::open(&bm25_dir).context("failed to open BM25 index for search")?;
-    let metadata_store =
-        MetadataStore::open(&metadata_path).context("failed to open metadata store for search")?;
+    let metadata_store = super::open_search_metadata(index_dir)?;
 
     search_bm25_with_stores(&bm25_index, &metadata_store, query, limit)
 }
@@ -97,6 +94,7 @@ fn search_bm25_with_stores_inner(
     raw_limit: usize,
     filters: Option<&SearchFilters>,
 ) -> Result<Vec<SearchResult>> {
+    crate::indexing::freshness::ensure_index_chunking_compatible(metadata_store, Path::new("."))?;
     if limit == 0 {
         return Ok(Vec::new());
     }

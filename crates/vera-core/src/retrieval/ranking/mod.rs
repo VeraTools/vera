@@ -65,26 +65,8 @@ pub(crate) fn apply_query_ranking_with_filters_and_config(
     finish_ranking(results, scores, wants_diversity)
 }
 
-/// Multi-query ranking: each subquery carries its own identifier or filename
-/// target, so score the pool under every subquery's features and keep each
-/// result's best score. A single joined query would promote only the first
-/// subquery's exact match and crowd out the rest (issue #121).
-#[allow(dead_code)]
-pub(crate) fn apply_query_ranking_multi_query(
-    queries: &[String],
-    results: Vec<SearchResult>,
-    stage: RankingStage,
-    filters: &SearchFilters,
-) -> Vec<SearchResult> {
-    apply_query_ranking_multi_query_with_config(
-        queries,
-        results,
-        stage,
-        filters,
-        &VeraConfig::default(),
-    )
-}
-
+/// Score under each subquery's features and keep each result's best score.
+/// Joining queries would promote only the first target and crowd out the rest.
 pub(crate) fn apply_query_ranking_multi_query_with_config(
     queries: &[String],
     results: Vec<SearchResult>,
@@ -110,19 +92,8 @@ pub(crate) fn apply_query_ranking_multi_query_with_config(
     finish_ranking(results, scores, wants_diversity)
 }
 
-/// Score every pool entry under one query's features: retrieval position
-/// (base rank), additive priors, then pool-relative boosts scaled by the
-/// pool's best combined score so signal strength tracks retrieval confidence.
-#[allow(dead_code)]
-fn score_pool(
-    features: &QueryFeatures,
-    stage: RankingStage,
-    filters: &SearchFilters,
-    results: &[SearchResult],
-) -> Vec<f64> {
-    score_pool_with_config(features, stage, filters, results, &VeraConfig::default())
-}
-
+/// Combine retrieval position and additive priors, then apply pool-relative
+/// boosts in their established order so signal strength tracks confidence.
 fn score_pool_with_config(
     features: &QueryFeatures,
     stage: RankingStage,
@@ -149,9 +120,6 @@ fn score_pool_with_config(
     }
     if retrieval.ranking_definition_boost_enabled() {
         apply_content_symbol_boost(features, &mut scores, results, max_score);
-    }
-    if retrieval.ranking_multiplicative_path_penalty_enabled() {
-        apply_multiplicative_path_penalty(features, &mut scores, results);
     }
 
     scores

@@ -2,6 +2,20 @@
 
 Historical benchmark snapshots, ablations, and comparisons moved from the current results page. See [Benchmarks](benchmarks.md#current-results) for the maintained comparison.
 
+## Rejected Ranking and Chunking Hypotheses (2026-09-01)
+
+Measured at `6e01956fb644b9cce2d96d7e799b0b0798855c46` on the full 1,251-task Semble v0.5.5 suite (`921849164e2632dd4f0e1c1370f82cfe15ed6d6c`), local Potion Code v2 revision `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`, no reranker, AMD Ryzen 7 9800X3D. Each arm rebuilt its indexes. The 320-task subset and 180-task independent set were also measured. [The measurement report](https://github.com/VeraTools/vera/issues/196#issuecomment-5486933078) contains those pairs and provenance.
+
+| Hypothesis | Full nDCG without | Full nDCG with | Relative delta | Index time without → with | Storage without → with | Decision |
+|---|---:|---:|---:|---:|---:|---|
+| Multiplicative 0.3× path penalty | 0.843879 | 0.841765 | -0.251% | 110.37 s → 111.95 s | 4.69 GB → 4.69 GB | Rejected: regresses |
+| Uniform 5× candidate pool | 0.843480 | 0.846349 | +0.340% | 106.74 s → 106.64 s | 4.69 GB → 4.69 GB | Rejected: below 0.5% bar |
+| 750-character chunks | 0.843937 | 0.841982 | -0.232% | 105.74 s → 154.28 s | 4.69 GB → 6.55 GB | Rejected: regresses with higher cost |
+
+The character-cap arm also increased full-suite p50 from 11.37 ms to 18.96 ms and p95 from 128 ms to 287 ms. Earlier chunk-size experiments had also failed: a 2048-token Jina window regressed nDCG by 0.23% for 88% more indexing time; a 2048-byte Potion cap regressed full nDCG by 0.21% for 24% more indexing time and 15% more storage.
+
+The three controls stayed off after measurement and were removed in v2.0.0. [ADR 007](adr/007-ranking-hypotheses.md) records the mechanisms and compatibility decision. These historical measurements do not claim a new quality improvement from removing dormant code.
+
 ## Historical v1.0 Full-Pipeline Benchmark
 
 The v1.0.0-rc run used the full Semble v0.5.5 task set on the `vera-cuda` lane: hybrid BM25+vector retrieval, RRF fusion, and a local ONNX cross-encoder reranker on CUDA, measured 2026-08-16 against the v1.0.0 release candidate. The older "BM25 scoped filters" full-suite row (`nDCG@10` 0.7267, measured in May 2026) was a BM25-only lane using an older harness. Cross-date comparisons are approximate.
@@ -124,7 +138,7 @@ All ablations were measured on the full 1,251-task suite against the stated base
 |----------|-----------------|------------|-----------|----------------|----------|
 | C1: rerank no-surplus skip | Skip reranking when the fused pool has no surplus over the requested limit | -0.0002 | +0.0000 | -2.4 ms mean | Shipped |
 | C2: rerank path-glob searches | Always rerank path-scoped searches (removes the old skip heuristic) | +0.0113 | +0.0132 | scoped queries now pay rerank cost | Shipped |
-| GA: structural graph augmentation | Append bounded caller/implementation chunks into the rerank pool (`VERA_GRAPH_AUGMENT=1`) | +0.0047 | +0.0080 | +2018 ms mean (reranks the expanded pool) | Merged off by default: gain too small for the latency, R@5 did not move |
+| GA: structural graph augmentation | Append bounded caller/implementation chunks into the rerank pool (`VERA_GRAPH_AUGMENT=1`) | +0.0047 | +0.0080 | +2018 ms mean (reranks the expanded pool) | Rejected: gain too small for the latency, R@5 did not move; implementation removed in v2.0.0 |
 
 Artifacts:
 

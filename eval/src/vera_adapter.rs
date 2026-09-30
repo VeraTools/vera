@@ -257,6 +257,11 @@ fn embedding_dim_matches<P: EmbeddingProvider>(store: &MetadataStore, provider: 
 }
 
 fn indexing_config_matches(store: &MetadataStore, config: &VeraConfig) -> bool {
+    if vera_core::indexing::freshness::ensure_index_chunking_compatible(store, Path::new("."))
+        .is_err()
+    {
+        return false;
+    }
     // Content-affecting indexing keys: max_chunk_lines, max_chunk_bytes,
     // max_file_size_bytes, and embedding max_length. Any mismatch forces a
     // full re-index because chunk boundaries or file inclusion change.
@@ -281,19 +286,6 @@ fn indexing_config_matches(store: &MetadataStore, config: &VeraConfig) -> bool {
     if value.get("max_chunk_bytes").and_then(|v| v.as_u64())
         != Some(config.indexing.max_chunk_bytes as u64)
     {
-        return false;
-    }
-    // Chunk char budget is content-affecting (~750-char hypothesis). Stored
-    // under "chunk_max_chars" (new) with alias "max_chunk_chars" for compat.
-    // Old indexes lack the key; treat missing as 0 (DEFAULT OFF) so
-    // byte-identical default chunking still reuses old indexes.
-    let stored_chunk_chars = value
-        .get("chunk_max_chars")
-        .or_else(|| value.get("max_chunk_chars"))
-        .or_else(|| value.get("max_chunk_characters"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if stored_chunk_chars != config.indexing.chunk_max_chars_effective() as u64 {
         return false;
     }
     if value.get("max_file_size_bytes").and_then(|v| v.as_u64())
@@ -545,6 +537,31 @@ mod tests {
     fn metadata_store(dir: &Path) -> MetadataStore {
         let path = index_dir(dir).join("metadata.db");
         MetadataStore::open(&path).unwrap()
+    }
+
+    #[test]
+    fn reuse_rejects_every_retired_character_cap_alias_but_accepts_zero() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let config = VeraConfig::default();
+        let original = serde_json::to_value(&config.indexing).unwrap();
+        store
+            .set_index_meta(INDEXING_CONFIG_KEY, &original.to_string())
+            .unwrap();
+        assert!(indexing_config_matches(&store, &config));
+        for key in ["chunk_max_chars", "max_chunk_chars", "max_chunk_characters"] {
+            let mut stored = original.clone();
+            stored["chunk_max_chars"] = serde_json::json!(0);
+            stored[key] = serde_json::json!(750);
+            store
+                .set_index_meta(INDEXING_CONFIG_KEY, &stored.to_string())
+                .unwrap();
+            assert!(!indexing_config_matches(&store, &config));
+            stored[key] = serde_json::json!(0);
+            store
+                .set_index_meta(INDEXING_CONFIG_KEY, &stored.to_string())
+                .unwrap();
+            assert!(indexing_config_matches(&store, &config));
+        }
     }
 
     #[test]

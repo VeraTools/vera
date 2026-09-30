@@ -1038,7 +1038,9 @@ pub struct SearchResult {
     pub content: String,
     /// Programming language.
     pub language: Language,
-    /// Relevance score (higher is better).
+    /// Pipeline-specific ranking value, which may be rank-normalized.
+    /// Returned ordering is authoritative. Scores are not probabilities and
+    /// are not comparable across queries.
     pub score: f64,
     /// Symbol name (`null` if the result doesn't correspond to a named symbol).
     pub symbol_name: Option<String>,

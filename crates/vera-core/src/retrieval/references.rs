@@ -10,7 +10,6 @@ use crate::path_containment::canonical_project_root;
 use crate::retrieval::file_scan::{
     allows_class, language_for_path, line_context_snippet, symbol_for_line,
 };
-use crate::storage::metadata::MetadataStore;
 use crate::types::{SearchFilters, SearchResult};
 
 /// Search exact call sites of `symbol` using the persisted call graph.
@@ -39,8 +38,7 @@ pub fn search_callers_through(
         anyhow::bail!("limit must be greater than zero");
     }
 
-    let metadata_path = index_dir.join("metadata.db");
-    let store = MetadataStore::open(&metadata_path)?;
+    let store = super::open_search_metadata(index_dir)?;
     let repo_root = canonical_project_root(index_dir)?;
     let root_dir = crate::discovery::open_root_dir(&repo_root)?;
     let max_file_size_bytes = super::configured_max_file_size_bytes(&store);

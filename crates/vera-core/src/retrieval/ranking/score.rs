@@ -1,7 +1,7 @@
 //! Prior scoring and result-shaping heuristics.
 
 use crate::chunk_text::file_name;
-use crate::config::{RetrievalConfig, VeraConfig};
+use crate::config::RetrievalConfig;
 use crate::corpus::{ContentClass, classify_content};
 use crate::retrieval::query_classifier::QueryType;
 use crate::retrieval::query_utils::{
@@ -86,22 +86,6 @@ fn content_covers_keyword(content_lower: &str, keyword: &str) -> bool {
 pub(super) const CONTENT_SYMBOL_WEIGHT_EMBEDDED: f64 = 1.5;
 /// Content-definition weight for identifier queries.
 pub(super) const CONTENT_SYMBOL_WEIGHT_IDENT: f64 = 3.0;
-
-#[allow(dead_code)]
-pub(super) fn score_prior(
-    features: &QueryFeatures,
-    result: &SearchResult,
-    stage: RankingStage,
-    filters: &SearchFilters,
-) -> f64 {
-    score_prior_with_config(
-        features,
-        result,
-        stage,
-        filters,
-        &VeraConfig::default().retrieval,
-    )
-}
 
 pub(super) fn score_prior_with_config(
     features: &QueryFeatures,
@@ -593,23 +577,6 @@ pub(super) fn apply_keyword_path_boost(
     }
 }
 
-/// Backward-compatible wrapper for tests that don't pass config (defaults preserved).
-#[allow(dead_code)]
-pub(super) fn apply_keyword_path_boost_legacy(
-    features: &QueryFeatures,
-    scores: &mut [f64],
-    results: &[SearchResult],
-    max_score: f64,
-) {
-    apply_keyword_path_boost(
-        features,
-        scores,
-        results,
-        max_score,
-        &RetrievalConfig::default(),
-    )
-}
-
 /// Pool-relative content-based symbol definition boost. A chunk whose
 /// text actually defines the queried symbol ("class Session",
 /// "CREATE TABLE sessions") is the definition site regardless of what symbol
@@ -687,14 +654,6 @@ pub(super) fn apply_content_symbol_boost(
     }
 }
 
-/// Multiplicative path penalty factor for test/compat/example directories.
-/// ~0.3× as hypothesized in #196: boilerplate / fixture / example directories
-/// are keyword-dense but rarely contain the implementation sought. Multiplying
-/// (rather than subtracting) demotes proportionally to retrieval confidence,
-/// preserving ordering among non-penalized candidates while consistently
-/// demoting penalized ones.
-pub(super) const MULTIPLICATIVE_PATH_PENALTY_FACTOR: f64 = 0.3;
-
 /// Shared directory-classification constants (single definition to prevent drift).
 const TEST_DIRS: &[&str] = &[
     "t",
@@ -720,79 +679,6 @@ const EXAMPLE_DIRS: &[&str] = &[
     "benchmark",
     "benchmarks",
 ];
-
-/// Apply the ~0.3× multiplicative penalty for test/compat/example paths.
-///
-/// Respects the existing boost-directory gating (definition boost's
-/// `wants_*` checks) so explicit requests for those paths are not penalized.
-/// A file is penalized if its path lies in `tests/`, `compat/`, or
-/// `examples/` (or is classified as `Test`/`Example`/`Bench`) and the query
-/// does not ask for that category. The penalty multiplies the score, so two
-/// equally-scoring candidates (`src/` vs `tests/`) will rank `src/` higher
-/// when the knob is on.
-pub(super) fn apply_multiplicative_path_penalty(
-    features: &QueryFeatures,
-    scores: &mut [f64],
-    results: &[SearchResult],
-) {
-    for (score, result) in scores.iter_mut().zip(results) {
-        let lower = result.file_path.to_ascii_lowercase();
-        let role = classify_content(&result.file_path, result.language, &result.content);
-        let mut penalized = false;
-
-        // Test / fixture penalization: mirrors the additive penalty's
-        // ContentClass gate plus the definition-boost directory gating so
-        // both signals respect the same explicit-request logic.
-        if !features.wants_test_paths
-            && (matches!(role, ContentClass::Test)
-                || definition_site_role_blocked_is_test(features, result))
-        {
-            penalized = true;
-        }
-        if !penalized
-            && !features.wants_example_paths
-            && (matches!(role, ContentClass::Example | ContentClass::Bench)
-                || definition_site_role_blocked_is_example(features, result))
-        {
-            penalized = true;
-        }
-        if !penalized && !features.wants_compat_paths && is_compat_path(&lower) {
-            penalized = true;
-        }
-
-        if penalized {
-            *score *= MULTIPLICATIVE_PATH_PENALTY_FACTOR;
-        }
-    }
-}
-
-fn definition_site_role_blocked_is_test(features: &QueryFeatures, result: &SearchResult) -> bool {
-    let lower = result.file_path.to_ascii_lowercase();
-    let mut parts = lower.rsplit('/');
-    let filename = parts.next().unwrap_or("");
-    let in_test_dir = parts.any(|dir| TEST_DIRS.contains(&dir));
-    if in_test_dir || is_test_filename(filename) {
-        return !features.wants_test_paths;
-    }
-    false
-}
-
-fn definition_site_role_blocked_is_example(
-    features: &QueryFeatures,
-    result: &SearchResult,
-) -> bool {
-    let lower = result.file_path.to_ascii_lowercase();
-    let mut parts = lower.rsplit('/');
-    let filename = parts.next().unwrap_or("");
-    let in_example_dir = parts.clone().any(|dir| EXAMPLE_DIRS.contains(&dir));
-    // is_test_filename part already handled in test check; example only cares about dir
-    if in_example_dir {
-        return !features.wants_example_paths;
-    }
-    // also treat example-like filenames conservatively? filename alone not penalized
-    let _ = filename;
-    false
-}
 
 /// A chunk counts as a definition site for the content-symbol boost only
 /// when its path marks it as source-like. Definitions in test, example, and

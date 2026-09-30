@@ -2,6 +2,10 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
+## v2.0.0
+
+Rejected ranking, character-cap chunking, and structural graph-augmentation experiments have been removed. Default indexes remain compatible; experimental character-capped indexes require a full rebuild. See [v2 migration](migration-v2.md) for the removed controls and score contract.
+
 ## v1.4.1
 
 ### Agent ergonomics and correctness
@@ -54,7 +58,7 @@ A four-arm sweep ran GLM-5.3 (high effort) against 10 cross-file Flask questions
 ### Ranking and retrieval
 
 - Three ranking signals for issue #196 are now toggleable with mechanism-first rationales: filename-stem boost, definition boost, and recall-pool expansion. Each has a config knob and `VERA_RANKING_*` env override, implemented separately from measurement and proven by dual-set ablations on the 320-task subset and 180-task independent set with full-suite confirmation before any quality claim.
-- Three additional hypotheses (multiplicative path penalties, candidate-pool multiplier, 750-char chunks) are implemented as default-off knobs with correct index-identity wiring. Dual-set ablations on the 320-task subset and 180-task independent set plus full 1,251-task confirmation showed each below the 0.5% full-suite aggregate bar or with regression, so all three stay default off with negative results recorded. The chunk arm cites the prior 2048 window and cap negatives and reports its own index-time and storage cost.
+- Three additional hypotheses (multiplicative path penalties, candidate-pool multiplier, 750-char chunks) are implemented as default-off knobs with correct index-identity wiring. Dual-set ablations on the 320-task subset and 180-task independent set plus full 1,251-task confirmation showed each below the 0.5% full-suite aggregate bar or with regression, so all three stayed default off. Their implementations and controls were removed in v2.0.0; the negative results remain recorded. The chunk arm cites the prior 2048 window and cap negatives and reports its own index-time and storage cost.
 - Reranker protocol now cleanly separates generic (`top_n` / `results`) from Voyage (`top_k` / `data`) with explicit config override over hostname auto-detection, and resilience covers permanent 4xx no-retry, capped `Retry-After` and `X-RateLimit-Reset` waits, cancellation, and graceful degradation.
 
 ### Setup and first-run
@@ -191,7 +195,7 @@ The gains came from a reworked default retrieval pipeline: BM25 stemming and ide
 |--------|------------------|
 | C1: rerank no-surplus skip | Shipped as a latency guard. Vera skips reranking when the fused pool has no surplus over the requested result limit, with a `-0.0002` nDCG delta and `-2.4 ms` mean latency effect. |
 | C2: rerank path-glob searches | Shipped. Path-scoped searches remain eligible for reranking, improving full-suite nDCG by `+0.0113`. |
-| Structural graph augmentation | Merged as an experimental opt-in under `VERA_GRAPH_AUGMENT=1`. It adds bounded caller and implementation chunks to the rerank pool, gaining `+0.0047` nDCG at roughly `+83%` mean latency. It is off by default because the latency cost outweighs the gain and Recall@5 did not move. |
+| Structural graph augmentation | Merged as an experimental opt-in under `VERA_GRAPH_AUGMENT=1`. It adds bounded caller and implementation chunks to the rerank pool, gaining `+0.0047` nDCG at roughly `+83%` mean latency. The latency cost outweighed the gain and Recall@5 did not move; the opt-in implementation was removed in v2.0.0. |
 
 ### Agent-level benchmark
 

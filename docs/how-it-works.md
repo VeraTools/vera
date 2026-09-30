@@ -58,6 +58,8 @@ For broad intent queries, Vera also keeps a deeper fused candidate pool before f
 
 This is also where Vera adds a small amount of query-aware candidate expansion, such as pulling in related implementation blocks or same-file structural context when the initial hit is too narrow.
 
+The `score` returned in JSON is a pipeline-specific ranking value and may be rank-normalized. Use the returned ordering. Scores are not probabilities and cannot be compared across queries.
+
 ## Reranking: Cross-Encoder
 
 Reranking is opt-in through `retrieval.reranking_enabled` and is off by default. When enabled, the top fused candidates are sent to a cross-encoder reranker. Unlike embeddings (which encode query and document separately), the cross-encoder reads the query and each candidate together as a single pair, scoring relevance jointly.

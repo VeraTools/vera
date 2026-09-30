@@ -335,6 +335,7 @@ where
     let metadata_path = idx_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
+    crate::indexing::freshness::ensure_index_chunking_compatible(&metadata_store, &repo_root)?;
 
     // Index format version must match: legacy suffixed rows (v1) are never silently reused.
     if !crate::indexing::freshness::index_format_is_current(&metadata_store) {
@@ -946,6 +947,7 @@ mod regression_tests {
         update_repository_with_options_and_progress,
     };
     use crate::storage::bm25::Bm25Index;
+    use crate::storage::metadata::MetadataStore;
     use crate::types::Language;
     use tempfile::tempdir;
 
@@ -971,6 +973,111 @@ mod regression_tests {
 
         assert_ne!(content_hash(source), update_hash);
         assert_eq!(content_hash(&preprocessed), update_hash);
+    }
+
+    #[tokio::test]
+    async fn retired_character_cap_blocks_search_and_update_without_replacing_chunks() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn old_name() {}\n").unwrap();
+        let provider = MockProvider::new(8);
+        let config = VeraConfig::default();
+        index_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        let idx = index_dir(&dir.path().canonicalize().unwrap());
+        let store = MetadataStore::open(&idx.join("metadata.db")).unwrap();
+        let bm25 = Bm25Index::open(&idx.join("bm25")).unwrap();
+        let saved = store
+            .get_index_meta(crate::indexing::freshness::INDEXING_CONFIG_KEY)
+            .unwrap()
+            .unwrap();
+        let context = crate::retrieval::search_service::SearchContext::bm25_only();
+        let filters = crate::types::SearchFilters::default();
+        assert!(
+            !context
+                .search(&idx, "old_name", None, &config, &filters, 5)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::write(dir.path().join("main.rs"), "fn new_name() {}\n").unwrap();
+        for key in ["chunk_max_chars", "max_chunk_chars", "max_chunk_characters"] {
+            let mut metadata: serde_json::Value = serde_json::from_str(&saved).unwrap();
+            metadata[key] = serde_json::json!(750);
+            store
+                .set_index_meta(
+                    crate::indexing::freshness::INDEXING_CONFIG_KEY,
+                    &metadata.to_string(),
+                )
+                .unwrap();
+            let error = context
+                .search(&idx, "old_name", None, &config, &filters, 5)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("vera index"));
+            let error = crate::retrieval::search_bm25(&idx, "old_name", 5).unwrap_err();
+            assert!(error.to_string().contains("vera index"));
+            for result in [
+                crate::retrieval::search_bm25_with_stores(&bm25, &store, "old_name", 5),
+                crate::retrieval::search_bm25_with_stores_and_filters(
+                    &bm25,
+                    &store,
+                    "old_name",
+                    &crate::types::SearchFilters {
+                        language: Some("rust".to_string()),
+                        ..Default::default()
+                    },
+                    5,
+                ),
+            ] {
+                assert!(result.unwrap_err().to_string().contains("vera index"));
+            }
+            for result in [
+                crate::retrieval::search_regex(&idx, "old_name", 5, false, 0, &filters),
+                crate::retrieval::search_structural(
+                    &idx,
+                    crate::retrieval::StructuralSearchKind::Definitions,
+                    Some("old_name"),
+                    5,
+                    &filters,
+                ),
+                crate::retrieval::search_callers(&idx, "old_name", 5, &filters),
+                crate::retrieval::type_relations::search_explicit_implementations(
+                    &idx, "old_name", 5, &filters,
+                ),
+            ] {
+                assert!(result.unwrap_err().to_string().contains("vera index"));
+            }
+            let error = crate::retrieval::search_hybrid(
+                &idx, &provider, "old_name", "old_name", &filters, 5, 60.0, 8, 50,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("vera index"));
+            let error = update_repository(dir.path(), &provider, &config, "mock-model")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("vera index"));
+            let chunks = store.get_chunks_by_file("main.rs").unwrap();
+            assert!(
+                chunks
+                    .iter()
+                    .any(|chunk| chunk.content.contains("old_name"))
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| !chunk.content.contains("new_name"))
+            );
+        }
+        store
+            .set_index_meta(crate::indexing::freshness::INDEXING_CONFIG_KEY, &saved)
+            .unwrap();
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!(summary.files_modified, 1);
     }
 
     #[tokio::test]

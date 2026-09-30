@@ -16,7 +16,7 @@ Implement three ranking signals in `crates/vera-core` behind individually toggle
 - `retrieval.ranking_definition_boost` (`VERA_RANKING_DEFINITION_BOOST`)
 - `retrieval.ranking_recall_pool_expansion` (`VERA_RANKING_RECALL_POOL_EXPANSION`)
 
-Config plumbing threads `VeraConfig` through `score_prior`, `score_pool`, `apply_query_ranking`, `compute_fetch_limit`, and exact-match augmentation. Wrappers preserve backward-compatible signatures using `VeraConfig::default()` (which already respects env overrides).
+Config plumbing threads `VeraConfig` through ranking priors, pool scoring, fetch-limit computation, and exact-match augmentation. Existing public entry points retain their signatures and defaults.
 
 ## Mechanism Rationale Per Signal
 
