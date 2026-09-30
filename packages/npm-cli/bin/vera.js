@@ -9,12 +9,21 @@ const http = require("node:http");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { pipeline } = require("node:stream/promises");
+const { Transform } = require("node:stream");
+const zlib = require("node:zlib");
 
 const { version: packageVersion } = require("../package.json");
 
 const DEFAULT_REPO = "VeraTools/Vera";
 const MAX_REDIRECTS = 5;
+const REQUEST_TIMEOUT = 30_000;
+const DOWNLOAD_TIMEOUT = 180_000;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_BINARY_BYTES = 512 * 1024 * 1024;
+const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/;
 
 function parseArgs(argv) {
   if (argv.length === 0) {
@@ -26,20 +35,16 @@ function parseArgs(argv) {
 
 function detectMusl() {
   if (process.platform !== "linux") return false;
+  const result = spawnSync("ldd", ["--version"], {
+    stdio: ["pipe", "pipe", "pipe"], timeout: 5000,
+  });
+  const output = (result.stdout || "").toString() + (result.stderr || "").toString();
+  if (/musl/i.test(output)) return true;
+  if (!result.error && /glibc|GNU libc/i.test(output)) return false;
   try {
-    const result = spawnSync("ldd", ["--version"], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const output = (result.stdout || "").toString() + (result.stderr || "").toString();
-    return /musl/i.test(output);
+    return fs.readdirSync("/lib").some((entry) => entry.startsWith("ld-musl-"));
   } catch {
-    // Fallback: check for musl dynamic linker.
-    try {
-      const entries = fs.readdirSync("/lib");
-      return entries.some((e) => e.startsWith("ld-musl-"));
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 
@@ -78,10 +83,6 @@ function manifestUrl(version) {
   return `${defaultReleaseBaseUrl()}/releases/download/v${version}/release-manifest.json`;
 }
 
-function latestManifestUrl() {
-  return `${defaultReleaseBaseUrl()}/releases/latest/download/release-manifest.json`;
-}
-
 function defaultVeraHome() {
   return process.env.VERA_HOME || path.join(os.homedir(), ".vera");
 }
@@ -102,7 +103,8 @@ function currentInstallMethod() {
 async function readInstallMetadata() {
   try {
     const raw = await fsp.readFile(installMetadataPath(), "utf8");
-    return JSON.parse(raw);
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   } catch {
     return {};
   }
@@ -117,6 +119,8 @@ async function writeInstallMetadata({ installMethod, version, binaryPath, target
     version: version ?? current.version ?? null,
     binary_path: binaryPath ?? current.binary_path ?? null,
     target: target ?? current.target ?? null,
+    manifest_url: process.env.VERA_MANIFEST_URL || null,
+    requested_version: packageVersion,
   };
   const tmpPath = `${metadataPath}.tmp.${process.pid}`;
   await fsp.writeFile(tmpPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
@@ -164,71 +168,70 @@ function shimName() {
   return process.platform === "win32" ? "vera.cmd" : "vera";
 }
 
-async function fetchText(url, redirects = 0) {
-  const client = url.startsWith("https://") ? https : http;
+function openResponse(url, timeout = REQUEST_TIMEOUT, redirects = 0, deadline = Date.now() + timeout) {
+  const parsed = new URL(url);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("release downloads require an HTTP or HTTPS URL");
+  }
   return new Promise((resolve, reject) => {
-    const request = client.get(url, (response) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return reject(new Error("release download timed out"));
+    const client = parsed.protocol === "https:" ? https : http;
+    const request = client.get(parsed, (response) => {
       const status = response.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
         if (redirects >= MAX_REDIRECTS) {
-          reject(new Error(`too many redirects fetching ${url}`));
-          return;
+          reject(new Error("too many release redirects"));
+        } else {
+          resolve(Promise.resolve().then(() => openResponse(new URL(response.headers.location, parsed).toString(), timeout, redirects + 1, deadline)));
         }
-
-        const nextUrl = new URL(response.headers.location, url).toString();
-        resolve(fetchText(nextUrl, redirects + 1));
+        response.destroy();
         return;
       }
-
       if (status < 200 || status >= 300) {
+        response.destroy();
         reject(new Error(`request failed for ${url}: ${status}`));
         return;
       }
-
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk) => {
-        body += chunk;
-      });
-      response.on("end", () => resolve(body));
+      resolve(response);
     });
-
+    const timer = setTimeout(() => request.destroy(new Error("release download timed out")), remaining);
+    request.on("close", () => clearTimeout(timer));
     request.on("error", reject);
   });
 }
 
-async function downloadFile(url, destination, redirects = 0) {
-  const client = url.startsWith("https://") ? https : http;
-  await fsp.mkdir(path.dirname(destination), { recursive: true });
+async function fetchText(url, timeout = REQUEST_TIMEOUT) {
+  const response = await openResponse(url, timeout);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response) {
+    size += chunk.length;
+    if (size > MAX_MANIFEST_BYTES) {
+      response.destroy();
+      throw new Error("release manifest exceeds its size limit");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
-  return new Promise((resolve, reject) => {
-    const request = client.get(url, (response) => {
-      const status = response.statusCode || 0;
-      if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
-        if (redirects >= MAX_REDIRECTS) {
-          reject(new Error(`too many redirects downloading ${url}`));
-          return;
-        }
-
-        const nextUrl = new URL(response.headers.location, url).toString();
-        response.resume();
-        resolve(downloadFile(nextUrl, destination, redirects + 1));
-        return;
-      }
-
-      if (status < 200 || status >= 300) {
-        reject(new Error(`download failed for ${url}: ${status}`));
-        return;
-      }
-
-      const file = fs.createWriteStream(destination);
-      response.pipe(file);
-      file.on("finish", () => file.close(resolve));
-      file.on("error", reject);
+async function downloadFile(url, destination, expectedSize, timeout = DOWNLOAD_TIMEOUT) {
+  let size = 0;
+  try {
+    const response = await openResponse(url, timeout);
+    const bound = new Transform({
+      transform(chunk, encoding, callback) {
+        size += chunk.length;
+        callback(size > expectedSize ? new Error("release archive exceeds its size limit") : null, chunk);
+      },
     });
-
-    request.on("error", reject);
-  });
+    await pipeline(response, bound, fs.createWriteStream(destination, { flags: "wx" }));
+    if (size !== expectedSize) throw new Error("release archive size mismatch");
+  } catch (error) {
+    await fsp.rm(destination, { force: true });
+    throw error;
+  }
 }
 
 async function sha256(filePath) {
@@ -242,50 +245,139 @@ async function sha256(filePath) {
   });
 }
 
-function runChecked(command, args) {
-  const result = spawnSync(command, args, { stdio: "inherit" });
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.status !== 0) {
-    throw new Error(`${command} exited with status ${result.status}`);
-  }
+function safeMember(name) {
+  return name && !name.startsWith("/") && !/[\\:\x00]/.test(name) &&
+    name.replace(/\/$/, "").split("/").every((part) => part && part !== "." && part !== "..");
 }
 
-async function extractArchive(archivePath, destination) {
-  await fsp.mkdir(destination, { recursive: true });
+async function extractArchive(archivePath, destination, target) {
+  const expected = `vera-${target}/${binaryName()}`;
   if (archivePath.endsWith(".zip")) {
-    runChecked("powershell", [
-      "-NoProfile",
-      "-Command",
-      "Import-Module Microsoft.PowerShell.Archive; Expand-Archive",
-      "-LiteralPath",
-      archivePath,
-      "-DestinationPath",
-      destination,
-      "-Force",
-    ]);
+    // .NET reads only the selected entry; archive paths never become filesystem paths.
+    const script = `
+      $ErrorActionPreference = 'Stop'
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      $archive = [System.IO.Compression.ZipFile]::OpenRead($env:VERA_INSTALL_ARCHIVE)
+      try {
+        $matches = @()
+        $total = 0
+        $names = @{}
+        if ($archive.Entries.Count -gt 1024) { throw 'Too many release archive members' }
+        foreach ($entry in $archive.Entries) {
+          $name = $entry.FullName
+          $type = ($entry.ExternalAttributes -shr 16) -band 61440
+          $parts = $name.TrimEnd('/').Split('/')
+          if ($names.ContainsKey($name) -or !$name -or $name.StartsWith('/') -or $name.Contains('\\') -or $name.Contains(':') -or
+              ($parts | Where-Object { $_ -eq '..' -or $_ -eq '.' -or $_ -eq '' }) -or
+              ($type -ne 0 -and $type -ne 32768 -and $type -ne 16384)) { throw 'Unsafe release archive member' }
+          $names[$name] = $true
+          $total += $entry.Length
+          if ($total -gt ${MAX_BINARY_BYTES}) { throw 'Release archive exceeds its size limit' }
+          if ($name -ceq $env:VERA_INSTALL_MEMBER) {
+            if ($type -eq 16384) { throw 'Release binary must be a regular file' }
+            $matches += $entry
+          }
+        }
+        if ($matches.Count -ne 1 -or $matches[0].Length -le 0) { throw 'Release archive must contain exactly one Vera binary' }
+        $source = $matches[0].Open()
+        $output = [System.IO.File]::Open($env:VERA_INSTALL_BINARY, [System.IO.FileMode]::CreateNew)
+        try { $source.CopyTo($output) } finally { $source.Dispose(); $output.Dispose() }
+        if ((Get-Item -LiteralPath $env:VERA_INSTALL_BINARY).Length -ne $matches[0].Length) { throw 'Incomplete release binary' }
+      } finally { $archive.Dispose() }
+    `;
+    const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      stdio: "inherit", timeout: 30_000,
+      env: { ...process.env, VERA_INSTALL_ARCHIVE: archivePath, VERA_INSTALL_BINARY: destination, VERA_INSTALL_MEMBER: expected },
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error("release ZIP extraction failed");
     return;
   }
 
-  runChecked("tar", ["-xzf", archivePath, "-C", destination]);
+  const output = await fsp.open(destination, "wx");
+  const input = fs.createReadStream(archivePath);
+  const gunzip = zlib.createGunzip();
+  input.on("error", (error) => gunzip.destroy(error));
+  input.pipe(gunzip);
+  let buffer = Buffer.alloc(0);
+  let remaining = 0;
+  let padding = 0;
+  let selected = false;
+  let matches = 0;
+  let expanded = 0;
+  let members = 0;
+  let ended = false;
+  const names = new Set();
+  try {
+    for await (const chunk of gunzip) {
+      expanded += chunk.length;
+      if (expanded > MAX_BINARY_BYTES + 1024 * 1024) throw new Error("release archive exceeds its size limit");
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length) {
+        if (remaining || padding) {
+          const count = Math.min(buffer.length, remaining || padding);
+          if (remaining) {
+            if (selected) await output.writeFile(buffer.subarray(0, count));
+            remaining -= count;
+          } else padding -= count;
+          buffer = buffer.subarray(count);
+          continue;
+        }
+        if (buffer.length < 512) break;
+        const header = buffer.subarray(0, 512);
+        buffer = buffer.subarray(512);
+        if (header.every((byte) => byte === 0)) { ended = true; continue; }
+        if (ended || ++members > 1024) throw new Error("invalid release tar archive");
+        const field = (start, length) => header.subarray(start, start + length).toString("utf8").split("\0")[0];
+        const octal = (start, length) => {
+          const value = field(start, length).trim();
+          if (!/^[0-7]+$/.test(value)) throw new Error("invalid release tar header");
+          return parseInt(value, 8);
+        };
+        const checksum = octal(148, 8);
+        const actual = header.reduce((sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte), 0);
+        if (actual !== checksum) throw new Error("invalid release tar checksum");
+        const prefix = field(345, 155);
+        const name = (prefix ? `${prefix}/` : "") + field(0, 100);
+        const type = String.fromCharCode(header[156]);
+        if (names.has(name) || !safeMember(name) || !["0", "\0", "5"].includes(type)) throw new Error("unsafe release archive member");
+        names.add(name);
+        remaining = octal(124, 12);
+        if (remaining > MAX_BINARY_BYTES || (type === "5" && remaining)) throw new Error("invalid release tar size");
+        padding = (512 - remaining % 512) % 512;
+        selected = name === expected && type !== "5";
+        if (selected && (++matches !== 1 || remaining === 0)) throw new Error("release archive must contain exactly one Vera binary");
+      }
+    }
+    if (remaining || padding || buffer.some((byte) => byte !== 0) || !ended || matches !== 1) {
+      throw new Error("incomplete release tar archive or missing Vera binary");
+    }
+  } finally {
+    input.destroy();
+    gunzip.destroy();
+    await output.close();
+  }
 }
 
 async function createShim(binaryPath) {
   const binDir = pickUserBinDir();
   await fsp.mkdir(binDir, { recursive: true });
   const shimPath = path.join(binDir, shimName());
-
-  if (process.platform === "win32") {
-    const contents = `@echo off\r\n"${binaryPath}" %*\r\n`;
-    await fsp.writeFile(shimPath, contents, "utf8");
-  } else {
-    const contents = `#!/bin/sh\nexec "${binaryPath}" "$@"\n`;
-    await fsp.writeFile(shimPath, contents, "utf8");
-    await fsp.chmod(shimPath, 0o755);
+  if (path.join(await fsp.realpath(binDir), shimName()) === await fsp.realpath(binaryPath)) return shimPath;
+  const staging = await fsp.mkdtemp(path.join(binDir, ".vera-shim-"));
+  const stagedShim = path.join(staging, shimName());
+  try {
+    if (process.platform === "win32") {
+      const contents = `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${binaryPath.replace(/%/g, "%%")}" %*\r\n`;
+      await fsp.writeFile(stagedShim, contents, "utf8");
+    } else {
+      const quoted = "'" + binaryPath.replace(/'/g, "'\"'\"'") + "'";
+      await fsp.writeFile(stagedShim, `#!/bin/sh\nexec ${quoted} "$@"\n`, { mode: 0o755 });
+    }
+    await fsp.rename(stagedShim, shimPath);
+  } finally {
+    await fsp.rm(staging, { recursive: true, force: true });
   }
-
   return shimPath;
 }
 
@@ -294,91 +386,101 @@ function isOnPath(dirPath) {
 }
 
 async function loadManifest() {
-  const primaryUrl = manifestUrl(packageVersion);
-  try {
-    const manifestText = await fetchText(primaryUrl);
-    return JSON.parse(manifestText);
-  } catch (error) {
-    if (process.env.VERA_MANIFEST_URL) {
-      throw error;
-    }
-
-    const fallbackText = await fetchText(latestManifestUrl());
-    return JSON.parse(fallbackText);
+  const manifest = JSON.parse(await fetchText(manifestUrl(packageVersion)));
+  if (!manifest || typeof manifest.version !== "string" || !VERSION_PATTERN.test(manifest.version)) {
+    throw new Error("invalid release version");
   }
+  if (!process.env.VERA_MANIFEST_URL && manifest.version !== packageVersion) {
+    throw new Error(`requested Vera ${packageVersion}, manifest contains ${manifest.version}`);
+  }
+  return manifest;
+}
+
+async function cachedBinary(target) {
+  let version = packageVersion;
+  if (process.env.VERA_MANIFEST_URL) {
+    const metadata = await readInstallMetadata();
+    if (metadata.manifest_url !== process.env.VERA_MANIFEST_URL || metadata.requested_version !== packageVersion) return null;
+    version = metadata.version;
+    if (typeof version !== "string" || !VERSION_PATTERN.test(version)) return null;
+  }
+  const binaryPath = path.join(defaultVeraHome(), "bin", version, target, binaryName());
+  try {
+    const receipt = JSON.parse(await fsp.readFile(`${binaryPath}.receipt.json`, "utf8"));
+    const stat = await fsp.lstat(binaryPath);
+    if (receipt && stat.isFile() && stat.size > 0 && receipt.version === version && receipt.target === target &&
+        receipt.size === stat.size && receipt.sha256 === await sha256(binaryPath)) {
+      return { binaryPath, version };
+    }
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR"].includes(error.code) && !(error instanceof SyntaxError)) throw error;
+  }
+  return null;
+}
+
+async function finishInstall(binaryPath, version, target, announce = false) {
+  const shimPath = await createShim(binaryPath);
+  if (announce && !isOnPath(path.dirname(shimPath))) {
+    console.error(`Added Vera to ${path.dirname(shimPath)}. Add that directory to PATH to run \`vera\` directly.`);
+  }
+  await writeInstallMetadata({ installMethod: currentInstallMethod(), version, binaryPath, target });
+  return { binaryPath, version };
 }
 
 async function ensureBinaryInstalled() {
-  const manifest = await loadManifest();
   const target = resolveTarget(process.platform, process.arch);
+  if (!/^[A-Za-z0-9_-]+$/.test(target)) throw new Error("invalid release target");
+  const cached = await cachedBinary(target);
+  if (cached) return finishInstall(cached.binaryPath, cached.version, target);
+  const manifest = await loadManifest();
   const asset = manifest.assets && manifest.assets[target];
-  if (!asset) {
-    throw new Error(`no release asset for target ${target}`);
+  if (!asset) throw new Error(`no release asset for target ${target}`);
+  const extension = target.endsWith("windows-msvc") ? ".zip" : ".tar.gz";
+  if (asset.archive !== `vera-${target}${extension}` || !Number.isSafeInteger(asset.size) ||
+      asset.size <= 0 || asset.size > MAX_ARCHIVE_BYTES || !/^[0-9a-f]{64}$/.test(asset.sha256)) {
+    throw new Error("invalid release archive metadata");
   }
-
   const version = manifest.version;
   const installDir = path.join(defaultVeraHome(), "bin", version, target);
   const binaryPath = path.join(installDir, binaryName());
-  if (fs.existsSync(binaryPath)) {
-    const stat = await fsp.stat(binaryPath);
-    if (stat.size > 1_000_000) {
-      await createShim(binaryPath);
-      await writeInstallMetadata({
-        installMethod: currentInstallMethod(),
-        version,
-        binaryPath,
-        target,
-      });
-      return { binaryPath, version };
-    }
-    // Stale or broken file (e.g. leftover shim from interrupted install).
-    await fsp.rm(binaryPath);
-  }
-
-  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "vera-install-"));
+  await fsp.mkdir(installDir, { recursive: true });
+  const tempRoot = await fsp.mkdtemp(path.join(installDir, ".install-"));
   try {
     const archivePath = path.join(tempRoot, asset.archive);
-    const extractDir = path.join(tempRoot, "extract");
-
+    const stagedBinary = path.join(tempRoot, binaryName());
     console.error(`Downloading Vera ${version} for ${target}...`);
-    await downloadFile(asset.download_url, archivePath);
-
-    const actualSha = await sha256(archivePath);
-    if (actualSha !== asset.sha256) {
-      throw new Error(`checksum mismatch for ${asset.archive}`);
-    }
-
-    await extractArchive(archivePath, extractDir);
-    const extractedBinary = path.join(extractDir, `vera-${target}`, binaryName());
-    await fsp.mkdir(installDir, { recursive: true });
-    await fsp.copyFile(extractedBinary, binaryPath);
-    if (process.platform !== "win32") {
-      await fsp.chmod(binaryPath, 0o755);
-    }
-
-    const shimPath = await createShim(binaryPath);
-    if (!isOnPath(path.dirname(shimPath))) {
-      console.error(`Added Vera to ${path.dirname(shimPath)}. Add that directory to PATH to run \`vera\` directly.`);
-    }
-
-    await writeInstallMetadata({
-      installMethod: currentInstallMethod(),
-      version,
-      binaryPath,
-      target,
-    });
-    return { binaryPath, version };
+    await downloadFile(asset.download_url, archivePath, asset.size);
+    if (await sha256(archivePath) !== asset.sha256) throw new Error(`checksum mismatch for ${asset.archive}`);
+    await extractArchive(archivePath, stagedBinary, target);
+    if (process.platform !== "win32") await fsp.chmod(stagedBinary, 0o755);
+    const stat = await fsp.stat(stagedBinary);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_BINARY_BYTES) throw new Error("invalid release binary");
+    const receiptPath = path.join(tempRoot, "receipt.json");
+    await fsp.writeFile(receiptPath, JSON.stringify({ version, target, size: stat.size, sha256: await sha256(stagedBinary) }));
+    await fsp.rename(stagedBinary, binaryPath);
+    await fsp.rename(receiptPath, `${binaryPath}.receipt.json`);
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
+  return finishInstall(binaryPath, version, target, true);
 }
 
-function runBinary(binaryPath, args) {
-  const result = spawnSync(binaryPath, args, { stdio: "inherit" });
-  if (result.error) {
-    throw result.error;
+async function runBinary(binaryPath, args) {
+  const child = spawn(binaryPath, args, { stdio: "inherit" });
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const forward = new Map(signals.map((signal) => [signal, () => child.kill(signal)]));
+  for (const [signal, handler] of forward) process.on(signal, handler);
+  try {
+    const result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    for (const [signal, handler] of forward) process.removeListener(signal, handler);
+    if (result.signal && process.platform !== "win32") process.kill(process.pid, result.signal);
+    else process.exitCode = result.code ?? 1;
+  } finally {
+    for (const [signal, handler] of forward) process.removeListener(signal, handler);
   }
-  process.exit(result.status ?? 0);
 }
 
 async function main() {
@@ -397,19 +499,23 @@ async function main() {
 
   if (command === "install") {
     console.error(`Vera ${version} installed.`);
-    runBinary(binaryPath, ["agent", "install", ...rest]);
+    await runBinary(binaryPath, ["agent", "install", ...rest]);
     return;
   }
 
   if (command === "help") {
-    runBinary(binaryPath, ["--help"]);
+    await runBinary(binaryPath, ["--help"]);
     return;
   }
 
-  runBinary(binaryPath, [command, ...rest]);
+  await runBinary(binaryPath, [command, ...rest]);
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { detectMusl, fetchText, downloadFile, extractArchive, ensureBinaryInstalled, createShim, runBinary };
