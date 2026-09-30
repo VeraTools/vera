@@ -43,7 +43,7 @@ Expected filenames for the curated presets:
 | CodeRankEmbed | `onnx/model_quantized.onnx`, `tokenizer.json` |
 | Jina reranker | `onnx/model_quantized.onnx`, `tokenizer.json` |
 
-If you want to keep a custom embedding model somewhere else, skip copying it into the models directory and point Vera at it directly with `vera setup --embedding-dir /path/to/model-dir`.
+If you want to keep a custom embedding model somewhere else, skip copying it into the models directory and point Vera at it directly with `vera setup --onnx-jina-cpu --embedding-dir /path/to/model-dir`.
 
 ## 3. Re-run Setup Or Repair
 

@@ -29,7 +29,7 @@
 
 **Local, symbol-aware code search for developers and AI agents.**
 
-Hybrid BM25 + vector search with optional reranking, 65 languages, one static binary. Indexes stay on your machine; results come back as symbol-bounded chunks with file paths, line ranges, and scores.
+Describe the behavior you need, then get ranked code chunks with file paths, line ranges, and symbols. Vera combines keyword and vector search across 65 languages, with optional reranking. The index stays on your machine.
 
 <sub>**V**ector **E**nhanced **R**eranking **A**gent</sub>
 
@@ -40,94 +40,54 @@ Hybrid BM25 + vector search with optional reranking, 65 languages, one static bi
 ## Quick Start
 
 **1. Install**
+
 ```bash
 bunx @vera-ai/cli install   # or: npx -y @vera-ai/cli install / uvx vera-ai install
 ```
 
 **2. Set up and index**
 
-Zero-setup local (CPU, no key, no GPU):
+Use the default local CPU model. Setup downloads its assets, then indexes the current project:
+
 ```bash
 vera setup --potion-code --index .
 ```
 
-Best measured search quality (one OpenRouter key, Qwen preset):
-```bash
-vera setup --api --index .
-```
+Or run `vera setup` for the full wizard: choose a backend, optionally install agent skills, and optionally index. Local CPU is first and selected by default. Indexing defaults to Yes for local backends and No for API mode.
 
-<details><summary>GPU and other backends</summary>
-
-```bash
-vera setup                                  # Interactive wizard, indexes this project by default
-vera setup --onnx-jina-coreml --index .     # Apple Silicon (M1/M2/M3/M4)
-vera setup --onnx-jina-cuda --index .       # NVIDIA GPU
-vera setup --onnx-jina-rocm --index .       # AMD GPU (ROCm, Linux)
-vera setup --onnx-jina-openvino --index .   # Intel GPU (OpenVINO, Linux)
-vera setup --onnx-jina-directml --index .   # DirectX 12 GPU (Windows)
-```
-
-The wizard also offers presets for OpenAI, Jina, and Voyage. The Qwen preset uses `qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b` via `https://openrouter.ai/api/v1` with a single shared key and the generic reranker protocol.
-
-</details>
+For API mode, run `vera setup --api --index .`. Qwen/OpenRouter is the recommended API preset and uses one shared key for embeddings and reranking (paid usage). See [Models](docs/models.md) for the measured tradeoffs and other API or ONNX choices.
 
 **3. Search**
+
 ```bash
 vera search "authentication logic"
 ```
 
-If the current project has no index, interactive search offers to create one. JSON and non-interactive searches still return the missing-index error.
-
-**4. Keep `.vera/` out of git**
-```bash
-echo '.vera/' >> .gitignore
-```
-The index can be large and is machine-local.
-
-See [What's New](docs/whats-new.md) for release notes.
+Add `.vera/` to `.gitignore`; the project index can be large. An interactive search offers to create a missing index. JSON and non-interactive searches return an error so scripts can handle it.
 
 ## What Sets Vera Apart
 
-| | |
+| Capability | What it gives you |
 |---|---|
-| **Token-efficient for agents** | Returns symbol-bounded chunks, not entire files. 75-95% fewer tokens on typical queries. In a blind-graded four-arm agent benchmark (GLM-5.3, high effort, 10 cross-file questions, one repository), the Qwen embedding+reranker pair consumed 48% less prompt context than a no-tool control at equal 10/10 answer quality, the only per-arm figure statistically significant at that sample size; the local Potion default consumed 27% less on the same lane, within run-to-run noise at N=10. Method and per-arm data: [Benchmark history](docs/benchmarks-history.md#agent-level-benchmark). |
-| **Single binary, 65 languages** | One static binary with 61 tree-sitter grammars compiled in. No Python, no language servers, no per-language toolchains. |
-| **Fast at query time, tiny on disk** | 6.4 ms median query latency on the 1,251-task suite (local Potion Code defaults) with a 4.7 GB index for 63 repositories (6.8x smaller than Semble's 32 GB). |
-| **Updates, not just re-indexes** | Incremental updates and watch mode keep the index current as files change. Persistent indexes survive restarts and are reused when identity checks pass. |
-| **Built-in code intelligence** | Call graph analysis, reference finding, dead code detection, and project overview, all from the same index. |
-| **Holds up off the benchmark** | Leads Semble on the independent contamination set (10 fresh repositories, locally generated ground truth) and on recall@5, while trailing by 0.008 nDCG on Semble's own 63-repo benchmark. Details in [Benchmarks](#benchmarks). |
+| **Search by behavior or identifier** | Hybrid keyword and vector retrieval finds both exact names and conceptual matches. |
+| **Relevant code chunks** | Symbol-bounded chunks with paths and line ranges let agents read relevant code without loading every matching file. |
+| **Local CPU default** | Potion Code runs on CPU. After the model download, local indexing and search work offline. |
+| **Incremental indexes** | `vera update .` and watch mode reuse the index and re-embed changed files. |
+| **Code navigation** | Structural queries, heuristic references and dead-code candidates, and project overviews use the same index. |
 
-Vera started as a fork of Pampax. When the design stopped fitting what I wanted from a code search tool, I rebuilt it from the ground up, with each choice backed by research, benchmarking, and the [ADRs](docs/adr/000-decision-summary.md) in this repo. The full [feature list](docs/features.md) covers everything Vera can do.
+Vera started as a fork of Pampax and was rebuilt around measured retrieval choices. The [ADRs](docs/adr/000-decision-summary.md) record those decisions; the [feature guide](docs/features.md) covers the command surface.
 
 ## Choosing a Backend
 
-Vera itself is always local: the index lives in `.vera/` per project, config and models in the Vera data directory (see [Installation](docs/installation.md#set-up-a-backend)). The backend choice only affects where embeddings and reranking run.
+Start with local Potion Code on CPU. API mode is the second option when you want a remote embedding or reranking service; Qwen/OpenRouter is recommended within the API presets. Jina ONNX backends support optional local GPU inference.
 
-API mode works with any OpenAI-compatible endpoint and needs no local compute. The [models guide](docs/models.md) and [installation guide](docs/installation.md) cover provider options, setup flags, Docker, and building from source.
-
-## Requirements
-
-- Linux x86_64/aarch64 (glibc or musl), macOS x86_64/arm64, or Windows x86_64.
-- No runtime dependencies; Python and Node are only needed to run the installer wrappers.
-- The default local Potion model runs on CPU.
-- `.vera/` size scales with the repository; the 63-repository benchmark used 4.7 GB.
+Indexes live in `.vera/` per project. Configuration and downloaded assets use the Vera data directory. See [Installation](docs/installation.md) for supported platforms and setup, and [Models](docs/models.md) for backend choices and dependencies.
 
 ## Privacy
 
-Local modes send nothing off-machine. API mode sends chunk text and queries to the configured endpoint. The update check contacts GitHub once a day and is disabled with `VERA_NO_UPDATE_CHECK=1`.
+Local inference keeps code and query text on your machine. Initial model downloads need network access. API mode sends chunk text and queries to the configured model endpoints. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.
 
-## Vera vs. Other Tools
-
-| | ripgrep | Language server | Hosted code search | Vera |
-|---|---|---|---|---|
-| Find code by describing what it does | No | No | Yes | Yes |
-| Exact text and regex | Yes | No | Yes | Yes (`vera grep`) |
-| Callers, references, dead code | No | Yes, per language | Yes | Yes, 65 languages from one index |
-| Works offline, nothing uploaded | Yes | Yes | No | Yes (local backends) |
-| Setup | None | One server per language | Account and indexing service | One binary, one command |
-| Built for agents (CLI, skill, MCP) | No | Partial | Varies | Yes |
-
-Vera complements ripgrep rather than replacing it: use `rg` when you know the exact string, Vera when you know what the code does but not what it is called.
+Vera complements ripgrep: use `rg` when you know the exact string, and Vera when you know what the code does but not what it is called.
 
 ## Use with AI Agents
 
@@ -165,58 +125,24 @@ Vera exposes `search_code`, `get_stats`, `get_overview`, `regex_search`, `struct
 
 ## Usage
 
-### Core Workflow
-
-```bash
-vera search "authentication logic"
-vera update .
-```
-
 ### Search Patterns
 
 ```bash
 vera search "error handling" --lang rust
 vera search "routes" --path "src/**/*.ts" --path "tests/**/*.ts"
-vera search "handler" --type function --limit 5
 vera search "OAuth token refresh" "JWT expiry handling" "auth middleware"
 vera search "config" --intent "find where database connection strings are loaded"
-vera search "config loading" --deep
-vera search "auth" --compact
 vera search "token validation" --changed
-vera search "config loading" --base origin/main
 vera structural definitions parse_config
-vera structural env DATABASE_URL
-vera structural routes --path "src/**/*.ts"
-vera structural impls Loader
-vera references parse_config --changed
+vera references parse_config
+vera update .
 ```
 
-Repeat `--path` to match any of several file path patterns. Path patterns use OR semantics; other filters still combine with AND semantics.
-
-### Common Tasks
-
-| Task | Command |
-|------|---------|
-| Regex or exact text | `vera grep "fn\s+main"` |
-| Common structural tasks | `vera structural routes` / `vera structural env DATABASE_URL` / `vera structural impls Loader` |
-| Explain why a file is missing from the index | `vera explain-path path/to/file` |
-| Inspect index health | `vera stats --json` |
-| Find callers | `vera references foo` |
-| Find callees | `vera references foo --callees` |
-| Find dead code | `vera dead-code` |
-| Get a project overview | `vera overview` |
-| Scope a search to changed files | `vera search "query" --changed` |
-| Keep the index fresh | `vera watch .` |
-| Run local HTTP inference server | `vera serve` |
-| Check your setup | `vera doctor` |
-| Repair missing local assets | `vera repair` |
-| Install agent skills | `vera agent install` |
-
-See the [query guide](docs/query-guide.md) for search tips, the [feature list](docs/features.md) for the full command surface, and `vera --help` for CLI details.
+Repeat `--path` to match any of several patterns. See the [query guide](docs/query-guide.md) for filters, deep search, and structural queries; `vera --help` lists commands.
 
 ### Output
 
-Defaults to markdown codeblocks (the most token-efficient format for AI agents):
+Defaults to Markdown codeblocks:
 
 ````
 ```src/auth/login.rs:42-68 function:authenticate
@@ -238,22 +164,11 @@ vera explain-path path/to/file
 
 ## Benchmarks
 
-Semble benchmark comparison on 1,251 tasks across 63 repositories (Vera v1.4.0 row measured 2026-09-03 on AMD Ryzen 7 9800X3D; Semble column from the 2026-08-23 comparison on the same task set and embeddings):
-
-| Tool | nDCG@10 | R@1 | R@5 | R@10 | MRR | Query p50 | Index time | Index size |
-|------|---------|------|------|-------|-----|-----------|------------|------------|
-| Vera | 0.8437 | 0.6713 | **0.9189** | 0.9502 | 0.8258 | 6.4 ms | 115 s | **4.7 GB** |
-| Semble 0.5.5, full rerank stack | **0.8514** | **0.6747** | 0.9177 | **0.9656** | **0.8348** | **2.3 ms** | **100 s** | 32 GB |
-
-Both tools used the same `minishlab/potion-code-16M-v2` embeddings, harness, graded relevance, and suffix-corrected path matching in the scorer.
-
-The full-suite gap is on Semble's own development corpus. On the 320-task tuning subset and the independent 10-repository contamination set, Vera leads (`0.8538` vs `0.8494`, `0.7674` vs `0.7655`); Recall@5 favors Vera on the full suite. See [full benchmark results](docs/benchmarks.md#current-results).
-
-The agent-context numbers in [What Sets Vera Apart](#what-sets-vera-apart) come from a blind-graded four-arm agent benchmark; methodology and per-arm results are in [Benchmark history](docs/benchmarks-history.md#agent-level-benchmark).
+The [benchmark report](docs/benchmarks.md#current-results) compares Vera and Semble on the full 1,251-task suite, with dated hardware, model, and scoring details. The [benchmark history](docs/benchmarks-history.md#agent-level-benchmark) includes the agent-context experiment and its small-sample limits. Token savings depend on the query, repository, and agent workflow.
 
 ## Status and Community
 
-Vera is at v1.x: the CLI, output formats, and MCP tool surface are stable, and changes are listed in [What's New](docs/whats-new.md). Bug reports and feature requests go to [Issues](https://github.com/VeraTools/Vera/issues).
+V2 removes rejected experiment controls while preserving ordinary default indexes and search-result fields. See [migration guidance](docs/migration-v2.md) and [What's New](docs/whats-new.md). Bug reports and feature requests go to [Issues](https://github.com/VeraTools/Vera/issues).
 
 ## Contributing
 

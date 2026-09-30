@@ -82,10 +82,10 @@ This works best when the query alone is too ambiguous to steer ranking.
 
 ## Exact Symbol Names
 
-If you already know the symbol name, search for it directly:
+If you already know the symbol name, use the structural definition lookup. Search can also find mentions or related implementations:
 
 ```bash
-vera search "parse_config"
+vera structural definitions parse_config
 vera search "AuthMiddleware"
 ```
 

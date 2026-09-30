@@ -44,4 +44,10 @@ vera config set embedding.timeout_secs 60
 
 ## Search Scores
 
-Use the returned result ordering. The JSON `score` remains a pipeline-specific ranking value that may be rank-normalized; it is neither a probability nor comparable across queries. [How it works](how-it-works.md) explains the pipeline.
+See [Search scores](how-it-works.md#search-scores) for interpreting returned ranking values.
+
+## Setup and Agent Skills
+
+Bare `vera setup` runs the full wizard for local and API backends. Local CPU is first and selected by default; API mode is second, with Qwen/OpenRouter recommended among API presets. Indexing defaults to Yes for local backends and No for API mode. Explicit backend flags keep a shorter configuration flow.
+
+The agent selector preselects installed clients and uses Space to toggle, Enter to continue. Installation adds or updates selected clients; deselecting a client leaves its installation in place. Empty selection makes no changes. Use `vera agent remove` for removal; shared directories appear as grouped choices. See [Installation](installation.md#set-up-agent-skills).

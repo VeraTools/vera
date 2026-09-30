@@ -4,12 +4,11 @@
 
 ```sh
 npx -y @vera-ai/cli install   # or: bunx @vera-ai/cli install / uvx vera-ai install
-vera setup                      # interactive backend wizard
-vera index .
+vera setup --potion-code --index . # configure local CPU and index once
 vera search "your query"
 ```
 
-Combined setup + index: `vera setup --index .`
+`vera setup` runs the full wizard: local CPU first and selected by default, API mode second, optional agent skills, and optional indexing. Indexing defaults to Yes for local backends and No for API mode. Explicit backend flags run a shorter configuration flow; add `--index .` to include indexing.
 
 ## GPU Backends
 
@@ -25,7 +24,7 @@ GPU flags download the matching ONNX Runtime build automatically.
 
 ## API Mode
 
-Point Vera at any OpenAI-compatible embedding endpoint:
+Qwen/OpenRouter is first and recommended among API presets (paid usage, one shared key for embeddings and reranking). OpenAI, Jina, Voyage, and custom OpenAI-compatible endpoints follow:
 
 ```sh
 vera setup --api
@@ -44,7 +43,7 @@ Optional reranker: enter it during interactive setup, or set `RERANKER_MODEL_BAS
 
 ## Skill Management
 
-Running `vera agent install` with no flags opens an interactive prompt where you choose the install scope (global, project, or both) and select which agents to install for from a checklist.
+Running `vera agent install` with no flags opens an interactive prompt where you choose the install scope (global, project, or both) and select agents in a paged checklist. Installed clients are preselected. Space toggles a choice; Enter continues. Empty selection changes nothing, and unselected installations remain intact. Use the explicit removal command to uninstall.
 
 ```sh
 vera agent install                              # interactive: choose scope + agents
@@ -79,6 +78,6 @@ Per-project indexes (`.vera/` in each project) are left in place.
 
 ```sh
 vera doctor   # check config, models, ORT, index health
-vera config   # show current config
+vera config show # show persisted configuration
 vera stats    # index statistics
 ```

@@ -104,7 +104,7 @@ If the active embedding model name differs from the one stored in the index, re-
 
 If you're using a reranker in non-interactive setup, its three variables (`RERANKER_MODEL_BASE_URL`, `RERANKER_MODEL_ID`, `RERANKER_MODEL_API_KEY`) must either all be set or all be absent. Partial configuration will fail.
 
-On a 429 the reranker retries briefly and then returns unreranked results, because a minute-long wait is wrong for interactive search. For batch workloads against free-tier endpoints with per-minute quotas, set `VERA_RERANK_RATE_LIMIT_WAIT_SECS` (for example `65`) to make retries wait out the provider's reset window instead of degrading.
+On a 429 the reranker retries briefly, then returns unreranked results. For batch workloads, set a positive `VERA_RERANK_RATE_LIMIT_WAIT_SECS` (for example `65`) to wait for a provider-reported quota reset, capped at that many seconds per retry. Unset or `0` keeps the short generic backoff; it does not enable unlimited waiting. See [Configuration](configuration.md#retrievalranking).
 
 If the provider returns a batch-size error such as `at most 100 requests can be in one batch`, lower the embedding batch size:
 
@@ -151,7 +151,7 @@ vera upgrade
 
 Common causes:
 
-- Models haven't been downloaded yet. Run `vera setup` for the default `minishlab/potion-code-16M-v2` static embedding model, which runs locally on CPU on any supported machine; no GPU or ONNX Runtime needed, or run `vera setup --potion-code` or the matching `--onnx-jina-*` setup command
+- ONNX assets have not been downloaded. Run the matching `vera setup --onnx-jina-*` command. To switch to the default local CPU model, run `vera setup --potion-code`; Potion Code does not use ONNX Runtime.
 - If assets are missing, corrupt, or truncated in the ONNX model cache, run `vera repair --<backend>` (such as `vera repair --onnx-jina-cuda` or `vera repair --potion-code`). `vera doctor` and embedding load errors detect damaged model files and print the matching repair command hint
 - Local ONNX Runtime auto-download failed. Check network, or set `ORT_DYLIB_PATH` to a manually installed library
 - If your network only allows browser downloads, use [manual-install.md](manual-install.md)

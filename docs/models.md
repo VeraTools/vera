@@ -1,13 +1,13 @@
 # Models and Backends
 
-Vera runs in two modes, and both start from the same setup wizard:
+Start with local CPU, or choose API mode when you want remote model calls:
 
-- **API mode with the Qwen preset (recommended)**: `qwen/qwen3-embedding-8b` plus `qwen/qwen3-reranker-8b` through OpenRouter with a single shared API key. Measured on the 320-task Semble subset, the Qwen pair with reranking scored `0.8647` nDCG@10 versus `0.8538` for local-only defaults, with recall@1 up three points: the strongest quality configuration Vera ships. Setup is one key entry and the wizard fills the rest.
-- **Local mode with Potion Code (the easy default)**: `minishlab/potion-code-16M-v2` runs locally on CPU on any supported machine, and indexes the 63-repository Semble corpus in about two minutes. It is what you get with no API key, no account, and no GPU or ONNX Runtime requirement.
+- **Local Potion Code (default)**: `minishlab/potion-code-16M-v2` runs on CPU. It needs an initial model download, then works offline without an API account or ONNX Runtime.
+- **API mode**: Qwen/OpenRouter is the recommended API preset, with one shared key for `qwen/qwen3-embedding-8b` and `qwen/qwen3-reranker-8b` (paid usage). Other OpenAI-compatible endpoints are supported.
 
-The Qwen numbers above are screening measurements on the tuning subset, not full-suite claims. API mode trades a paid endpoint and network latency for measured reranker gains, while local mode is private and runs without an API key.
+In the 320-task Semble screening subset, the Qwen pair with reranking scored `0.8647` nDCG@10 versus `0.8538` for local defaults, with recall@1 up three percentage points. These are tuning-subset measurements, not a full-suite result or a guarantee for another repository. API mode also adds network latency and provider costs.
 
-`vera setup` downloads model assets into the Vera data directory (see [Installation](installation.md#set-up-a-backend)). Jina ONNX backends also install the matching ONNX Runtime library into `lib/`.
+Local setup downloads assets into the Vera data directory (see [Installation](installation.md#set-up-a-backend)). Jina ONNX backends install the matching ONNX Runtime library into `lib/` and can need GPU drivers or Python-managed provider packages.
 
 ## Curated Embedding Options
 
@@ -50,7 +50,7 @@ In the 2026-08-23 dual-set screening, every tested cross-encoder scored below th
 | `mxbai-rerank-xsmall-v1` | 0.8497 / 0.7564 |
 | `gte-reranker-modernbert-base` | 0.8472 / 0.7525 |
 
-Reranking is off by default. Use an API reranker, including the Qwen preset, when you want optional reranking; tested local cross-encoders scored below the no-rerank baseline, with `mxbai-rerank-xsmall-v1` the closest. Configure a local model with:
+The Qwen API pair was screened separately from these local cross-encoders. Selecting a reranker during API setup enables reranking; local setup keeps it disabled. Among the tested local models, `mxbai-rerank-xsmall-v1` was closest to the no-reranker baseline. Configure a local model with:
 
 ```bash
 vera config set retrieval.reranking_enabled true
@@ -148,13 +148,23 @@ Jina ONNX on CPU is a compatibility path; use Potion Code on CPU-only machines.
 
 ## API Mode
 
-Interactive setup prompts for the endpoint URL, model ID, API key, and optional reranker. The wizard offers presets for OpenAI, Jina, Voyage, and Qwen (OpenRouter) with exact prefills; the Qwen preset uses `qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b` via `https://openrouter.ai/api/v1` with a single shared key (paid usage) and the generic rerank protocol (`top_n`/`results`) by default:
+`vera setup --api` and `vera backend --api` share the same endpoint, model, key, and optional reranker prompts. The API selector starts with Qwen/OpenRouter; the other presets and custom endpoints follow.
+
+| Provider | Setup choice | Provider information |
+|---|---|---|
+| Qwen/OpenRouter | Recommended API preset; one key for embeddings and reranking (paid usage) | [OpenRouter](https://openrouter.ai/) |
+| OpenAI | Embeddings, optional separate reranker | [OpenAI platform](https://platform.openai.com/) |
+| Jina | Embeddings and reranking | [Jina AI](https://jina.ai/) |
+| Voyage | Code embeddings and reranking | [Voyage AI](https://www.voyageai.com/) |
+| Custom | OpenAI-compatible embedding endpoint, optional generic or Voyage reranker | Your provider's documentation |
+
+Check current pricing, quotas, and model availability with the provider.
 
 ```bash
 vera setup --api
 ```
 
-The reranker step also configures the wire protocol (auto, generic, or voyage), endpoint path override, and optional task instruction; for the Qwen preset setup auto-applies the generic protocol without prompting to preserve the single-key flow. Qwen via OpenRouter relies on the generic protocol unless overridden. Custom proxies can select `generic` or `voyage` via `retrieval.reranker_protocol` without hostname spoofing.
+The reranker step also configures the wire protocol (auto, generic, or voyage), endpoint path override, and optional task instruction; for the Qwen preset setup auto-applies the generic protocol without prompting to preserve the single-key flow. Switching to Qwen clears incompatible endpoint and task overrides from the previous provider. Other presets start from their own protocol defaults; the custom choice can reuse existing settings. Custom proxies can select `generic` or `voyage` via `retrieval.reranker_protocol` without hostname spoofing.
 
 For non-interactive setup, export the API values first and add `--yes`:
 
@@ -189,7 +199,7 @@ vera setup --api --yes
 vera config set retrieval.reranker_protocol generic
 ```
 
-Only model calls leave your machine. Indexing, storage, and search remain local.
+API mode sends query and chunk text to the configured model endpoints. Index storage and retrieval run locally; the optional update check is described in [Installation](installation.md#updating).
 
 ## Model Aliases
 

@@ -1,16 +1,16 @@
 # How Vera Works
 
-Vera's search pipeline retrieves candidates, fuses results, applies deterministic ranking, and optionally reranks. Every stage was chosen based on benchmarks against real codebases, not assumptions.
+Vera's search pipeline retrieves candidates, fuses results, applies deterministic ranking, and optionally reranks. The [ADRs](adr/000-decision-summary.md) and [benchmark evidence](benchmarks.md) record the implementation choices.
 
 ## Parsing: Tree-Sitter Chunks
 
 Vera parses source files into ASTs using tree-sitter grammars compiled into the binary. Instead of splitting code into arbitrary line ranges, it extracts discrete structural units such as functions, classes, structs, traits, interfaces, methods, and `impl` blocks.
 
-For config and document-like files, Vera uses whole-file chunks instead. Module-level gaps between symbols are also kept as chunks when they carry useful retrieval context.
+Configuration formats such as JSON, YAML, and TOML use whole-file chunks; Markdown and reStructuredText use section chunks. The byte cap can split oversized chunks in either case. Module-level gaps between symbols are also kept as chunks when they carry useful retrieval context.
 
 Each chunk carries metadata: file path, line range, language, symbol name, and symbol type. This means search results map to actual code boundaries, not random slices.
 
-Large symbols are split at logical boundaries when a definition exceeds the 200-line chunk limit. The chunker splits it into multiple chunks that share the bare symbol name with a distinct part index. Storage keeps the bare name; display renders it as `name (part N)`. This preserves identity across split parts: `vera structural definitions` finds split symbols by bare name, `vera references` resolves their single call site, `vera dead-code` deduplicates parts by (symbol, file), and JSON output carries the bare name with a `part_index` field. Languages without a tree-sitter grammar fall back to sliding-window chunking. See [features.md](features.md#tree-sitter-structural-parsing) for chunking benchmarks.
+Large symbols are split at logical boundaries when a definition exceeds the 200-line chunk limit. The chunker splits it into multiple chunks that share the bare symbol name with a distinct part index. Storage keeps the bare name; display renders it as `name (part N)`. This preserves identity across split parts: `vera structural definitions` finds split symbols by bare name, `vera references` resolves their single call site, `vera dead-code` deduplicates parts by (symbol, file), and JSON output carries the bare name with a `part_index` field. Languages without a tree-sitter grammar fall back to sliding-window chunking. See [features.md](features.md#adaptive-chunking) for the byte cap and model input windows.
 
 During parsing, Vera also records file-level diagnostics such as tree-sitter error nodes, Tier 0 fallback, and outright parse failures. `vera stats` surfaces these later as index-health signals instead of silently dropping them on the floor.
 
@@ -36,7 +36,7 @@ score(d) = 1/(k + rank_bm25(d)) + 1/(k + rank_vector(d))
 
 A result that ranks high in both lists gets a high fused score. A result that ranks high in only one list still appears, but lower. The constant `k` (default: 60) controls how much weight goes to top-ranked vs. lower-ranked results.
 
-RRF is simple, parameter-light, and doesn't need training data. It consistently outperforms either retrieval path alone.
+RRF combines rankings without requiring keyword and vector scores to share a scale or a trained fusion model.
 
 ## Query-Aware Ranking
 
@@ -44,7 +44,7 @@ After fusion, Vera applies lightweight deterministic ranking logic before final 
 
 Current ranking combines BM25 and vector results with RRF (`k=60`), then applies a file-coherence boost, keyword path boost, content coverage, content-symbol definition boost, and exact-match concept pool tail injection capped at 4 definitions per file.
 
-The ranking signals are individually configurable. See [Configuration](configuration.md#retrievalranking) for the complete key and environment-variable reference. Each shipped signal survived a preregistered ablation on the full suite plus an independent set; signals that did not clear the 0.5 percent bar were recorded as negative results and not shipped.
+Filename-stem boost, definition boost, and recall-pool expansion have individual controls in [Configuration](configuration.md#retrievalranking). [ADR 006](adr/006-ranking-signals.md) and [ADR 007](adr/007-ranking-hypotheses.md) record the accepted mechanisms and rejected experiments.
 
 This stage handles cases that dense retrieval alone is bad at:
 
@@ -58,7 +58,9 @@ For broad intent queries, Vera also keeps a deeper fused candidate pool before f
 
 This is also where Vera adds a small amount of query-aware candidate expansion, such as pulling in related implementation blocks or same-file structural context when the initial hit is too narrow.
 
-The `score` returned in JSON is a pipeline-specific ranking value and may be rank-normalized. Use the returned ordering. Scores are not probabilities and cannot be compared across queries.
+## Search Scores
+
+When a response includes `score`, it is a pipeline-specific ranking value and may be rank-normalized. Compact CLI JSON omits scores. Use the returned ordering. Scores are not probabilities and cannot be compared across queries.
 
 ## Reranking: Cross-Encoder
 
@@ -70,7 +72,7 @@ With Jina ONNX local models, the reranker runs on-device via ONNX Runtime. With 
 
 Large candidate sets are batched automatically to stay within the reranker's request limits. Oversized documents are truncated at newline boundaries before scoring. See [features.md](features.md#cross-encoder-reranking) for configuration details.
 
-API rerankers use an explicit wire protocol, `retrieval.reranker_protocol`, with `generic` (`top_n`/`results` payload) and `voyage` (`top_k`/`data` payload) variants. When unset, hostname auto-detection picks a sensible default and can be overridden. Related knobs include `retrieval.reranker_task_instruction` and `retrieval.reranker_task_field` for providers that accept a task instruction, `retrieval.reranker_return_documents`, and `retrieval.reranker_rate_limit_wait_secs` (env `VERA_RERANK_RATE_LIMIT_WAIT_SECS`) which caps how long the client waits out 429 quota windows before degrading to unreranked results. Permanent 4xx errors are not retried.
+API rerankers use an explicit wire protocol, `retrieval.reranker_protocol`, with `generic` (`top_n`/`results` payload) and `voyage` (`top_k`/`data` payload) variants. When unset, hostname auto-detection picks a sensible default and can be overridden. Related knobs include `retrieval.reranker_task_instruction` and `retrieval.reranker_task_field` for providers that accept a task instruction, `retrieval.reranker_return_documents`, and `retrieval.reranker_rate_limit_wait_secs` (env `VERA_RERANK_RATE_LIMIT_WAIT_SECS`). Positive wait values enable capped quota-reset waits; unset, `null`, and `0` keep short generic retries before degrading to unreranked results. Permanent 4xx errors are not retried. See [Configuration](configuration.md#retrievalranking) for defaults and precedence.
 
 ## Storage
 

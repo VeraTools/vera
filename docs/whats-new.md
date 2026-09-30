@@ -6,6 +6,14 @@ Release highlights from v1.0 onward. For the current benchmark tables and method
 
 Rejected ranking, character-cap chunking, and structural graph-augmentation experiments have been removed. Default indexes remain compatible; experimental character-capped indexes require a full rebuild. See [v2 migration](migration-v2.md) for the removed controls and score contract.
 
+The setup wizard starts with local CPU, then API mode with Qwen/OpenRouter first among API presets. Local and API setup both offer skills and indexing; indexing defaults to Yes locally and No for API mode. Agent installation is additive, accepts empty selections, and groups shared paths for removal. API setup and backend switching persist the same protocol, endpoint, and task settings.
+
+Wrappers verify exact-version release archives and reuse completed caches offline. Interrupted downloads, unsafe archive entries, and checksum failures do not populate the executable cache.
+
+## v1.4.2
+
+Updates rustls to `0.23.45` for the [RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0285.html). Release version stamping preserves the reviewed dependency lockfile.
+
 ## v1.4.1
 
 ### Agent ergonomics and correctness
@@ -58,7 +66,7 @@ A four-arm sweep ran GLM-5.3 (high effort) against 10 cross-file Flask questions
 ### Ranking and retrieval
 
 - Three ranking signals for issue #196 are now toggleable with mechanism-first rationales: filename-stem boost, definition boost, and recall-pool expansion. Each has a config knob and `VERA_RANKING_*` env override, implemented separately from measurement and proven by dual-set ablations on the 320-task subset and 180-task independent set with full-suite confirmation before any quality claim.
-- Three additional hypotheses (multiplicative path penalties, candidate-pool multiplier, 750-char chunks) are implemented as default-off knobs with correct index-identity wiring. Dual-set ablations on the 320-task subset and 180-task independent set plus full 1,251-task confirmation showed each below the 0.5% full-suite aggregate bar or with regression, so all three stayed default off. Their implementations and controls were removed in v2.0.0; the negative results remain recorded. The chunk arm cites the prior 2048 window and cap negatives and reports its own index-time and storage cost.
+- Three additional hypotheses (multiplicative path penalties, candidate-pool multiplier, 750-char chunks) were implemented as default-off knobs with index-identity checks. Dual-set ablations on the 320-task subset and 180-task independent set plus full 1,251-task confirmation showed each below the 0.5% full-suite aggregate bar or with regression, so all three stayed default off. Their implementations and controls were removed in v2.0.0; the negative results remain recorded. The chunk arm cites the prior 2048 window and cap negatives and reports its own index-time and storage cost.
 - Reranker protocol now cleanly separates generic (`top_n` / `results`) from Voyage (`top_k` / `data`) with explicit config override over hostname auto-detection, and resilience covers permanent 4xx no-retry, capped `Retry-After` and `X-RateLimit-Reset` waits, cancellation, and graceful degradation.
 
 ### Setup and first-run
