@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 
 use super::EmbeddingStats;
 use crate::chunk_text;
+use crate::http_errors::{describe_transport_error, sanitize_error_body};
 use crate::indexing::checkpoint::EmbeddingCheckpoint;
 use crate::local_models::CODERANK_QUERY_PREFIX;
 use crate::types::Chunk;
@@ -602,15 +603,21 @@ impl OpenAiProvider {
             .map_err(|e| {
                 if e.is_timeout() {
                     EmbeddingError::TimeoutError {
-                        message: format!("request to embedding API timed out: {e}"),
+                        message: format!(
+                            "request to embedding API timed out: {}",
+                            describe_transport_error(e)
+                        ),
                     }
                 } else if e.is_connect() {
                     EmbeddingError::ConnectionError {
-                        message: format!("failed to connect to embedding API: {e}"),
+                        message: format!(
+                            "failed to connect to embedding API: {}",
+                            describe_transport_error(e)
+                        ),
                     }
                 } else {
                     EmbeddingError::ConnectionError {
-                        message: format!("request failed: {e}"),
+                        message: format!("request failed: {}", describe_transport_error(e)),
                     }
                 }
             })?;
@@ -631,7 +638,7 @@ impl OpenAiProvider {
                 read_error_response_text(response, "failed to read authentication error response")
                     .await?;
             return Err(EmbeddingError::AuthError {
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
             });
         }
 
@@ -639,7 +646,7 @@ impl OpenAiProvider {
             let text =
                 read_error_response_text(response, "failed to read rate limit response").await?;
             return Err(EmbeddingError::RateLimitError {
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
                 retry_after,
             });
         }
@@ -652,13 +659,13 @@ impl OpenAiProvider {
             // overload conditions. Treat these as rate limits so they get retried.
             if status == 400 && text.contains("Unable to process") {
                 return Err(EmbeddingError::RateLimitError {
-                    message: sanitize_error_message(&text),
+                    message: sanitize_error_body(&text),
                     retry_after: None,
                 });
             }
             return Err(EmbeddingError::ApiError {
                 status,
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
             });
         }
 
@@ -688,14 +695,12 @@ impl OpenAiProvider {
 }
 
 fn response_read_error(error: reqwest::Error, context: &str) -> EmbeddingError {
-    if error.is_timeout() {
-        EmbeddingError::TimeoutError {
-            message: format!("{context}: {error}"),
-        }
+    let timed_out = error.is_timeout();
+    let message = format!("{context}: {}", describe_transport_error(error));
+    if timed_out {
+        EmbeddingError::TimeoutError { message }
     } else {
-        EmbeddingError::ResponseError {
-            message: format!("{context}: {error}"),
-        }
+        EmbeddingError::ResponseError { message }
     }
 }
 
@@ -1551,35 +1556,6 @@ fn budget_after_prefix(max_chunk_bytes: usize, prefix_overhead: usize) -> usize 
 }
 
 // ── Sanitization ─────────────────────────────────────────────────────
-
-/// Remove any potential API key fragments from error messages.
-///
-/// API error bodies sometimes echo back parts of the request. This
-/// ensures we never propagate credential material in error messages.
-fn sanitize_error_message(msg: &str) -> String {
-    // Truncate at a safe char boundary to avoid panicking on multi-byte UTF-8.
-    let truncated = if msg.len() > 500 {
-        let end = msg
-            .char_indices()
-            .take_while(|(i, _)| *i < 500)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        &msg[..end]
-    } else {
-        msg
-    };
-    // Strip anything that looks like a bearer token or key.
-    let sanitized = truncated
-        .replace(|c: char| !c.is_ascii_graphic() && c != ' ', " ")
-        .trim()
-        .to_string();
-    if sanitized.is_empty() {
-        "no details available".to_string()
-    } else {
-        sanitized
-    }
-}
 
 // ── API request/response types ───────────────────────────────────────
 

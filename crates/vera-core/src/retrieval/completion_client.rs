@@ -6,6 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 
+use crate::http_errors::{describe_transport_error, sanitize_error_body};
+
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_ALTERNATIVES: usize = 2;
 const MAX_ALLOWED_ALTERNATIVES: usize = 8;
@@ -183,11 +185,16 @@ impl CompletionClient {
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
-            .context("failed to call completion API")?;
+            .map_err(|e| {
+                anyhow!(
+                    "failed to call completion API: {}",
+                    describe_transport_error(e)
+                )
+            })?;
 
         let status = response.status();
         if !status.is_success() {
-            let message = response.text().unwrap_or_default();
+            let message = sanitize_error_body(&response.text().unwrap_or_default());
             return Err(anyhow!(
                 "completion API error (status {}): {}",
                 status.as_u16(),
@@ -195,9 +202,12 @@ impl CompletionClient {
             ));
         }
 
-        let payload: serde_json::Value = response
-            .json()
-            .context("failed to parse completion API response")?;
+        let payload: serde_json::Value = response.json().map_err(|e| {
+            anyhow!(
+                "failed to parse completion API response: {}",
+                describe_transport_error(e)
+            )
+        })?;
 
         let choice = payload
             .get("choices")

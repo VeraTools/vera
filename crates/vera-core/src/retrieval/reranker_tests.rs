@@ -341,33 +341,6 @@ fn format_without_symbol_info() {
     assert!(!formatted.contains("Symbol type:"));
 }
 
-// ── sanitize_error_message tests ─────────────────────────────────
-
-#[test]
-fn sanitize_truncates_long_messages() {
-    let long_msg = "a".repeat(1000);
-    let sanitized = sanitize_error_message(&long_msg);
-    assert!(sanitized.len() <= 500);
-}
-
-#[test]
-fn sanitize_multibyte_utf8_boundary() {
-    // Create a string with multi-byte chars near the 500-byte boundary.
-    // Each '🦀' is 4 bytes. 125 crabs = 500 bytes exactly, but place
-    // the boundary right in the middle of a multi-byte sequence.
-    let msg = "a".repeat(499) + "🦀"; // 499 + 4 = 503 bytes
-    let sanitized = sanitize_error_message(&msg);
-    // Should truncate before the crab emoji, not panic.
-    assert!(sanitized.len() <= 500);
-    assert!(sanitized.is_char_boundary(sanitized.len()));
-}
-
-#[test]
-fn sanitize_empty_message() {
-    let sanitized = sanitize_error_message("");
-    assert_eq!(sanitized, "no details available");
-}
-
 // ── ApiReranker endpoint URL tests ───────────────────────────────
 
 #[test]

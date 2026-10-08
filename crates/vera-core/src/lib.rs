@@ -18,6 +18,7 @@ pub mod corpus;
 pub mod discovery;
 pub mod embedding;
 pub mod git_scope;
+pub(crate) mod http_errors;
 
 pub use cancellation::{CancellationToken, Cancelled, is_cancel_error};
 
