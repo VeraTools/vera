@@ -3,6 +3,31 @@
 use anyhow::Context;
 use clap::Args;
 
+/// Whether interactive prompts can run: they read stdin and draw on stderr.
+pub fn prompts_available() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Treat Escape/Ctrl-C during a prompt as a clean command cancellation.
+///
+/// Prompts return a bare `Interrupted` I/O error; failures that carry context,
+/// such as interrupted saves, still propagate.
+pub fn finish_prompt_command(result: anyhow::Result<()>, message: &str) -> anyhow::Result<()> {
+    match result {
+        Err(error)
+            if error.chain().count() == 1
+                && error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::Interrupted) =>
+        {
+            println!("{message}");
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// Install the process interrupt handler and return a future for its first event.
 #[cfg(unix)]
 pub fn wait_for_interrupt(

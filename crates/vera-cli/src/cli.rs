@@ -138,9 +138,9 @@ pub enum Commands {
                       can call `vera index`, `vera search`, `vera update`, and \
                       `vera stats` directly.\n\n\
                       `vera agent install` detects existing installs and lets you \
-                      add or remove agents in one step. Deselecting an installed \
-                      agent removes it. If stale installs are detected, the \
-                      interactive flow can refresh them in one step before \
+                      add or update selected agents. Unselected installations stay \
+                      in place; use `vera agent remove` to delete them. If stale installs \
+                      are detected, the interactive flow can refresh them in one step before \
                       opening the full selector.\n\n\
                       `vera agent sync` refreshes all stale skill installs to match \
                       the current binary version and updates managed markdown agent \
@@ -181,7 +181,7 @@ pub enum Commands {
     /// Interactive first-time setup wizard.
     #[command(long_about = "Interactive first-time setup wizard.\n\n\
                       Walks through three steps:\n  \
-                      1. Backend selection (Potion CPU, ONNX runtime + GPU, or API mode)\n  \
+                      1. Backend selection (Potion CPU, API, or ONNX runtime + GPU)\n  \
                       2. Agent skill installation (choose scope and agents)\n  \
                       3. Optional project indexing\n\n\
                       For backend-only changes, use `vera backend`. For skill-only \
@@ -189,7 +189,7 @@ pub enum Commands {
                       Pass flags to skip the interactive wizard:\n  \
                       vera setup --potion-code         # Local static embeddings (the default)\n  \
                       vera setup --onnx-jina-cuda      # NVIDIA GPU, skip wizard\n  \
-                      vera setup --api                 # API mode from env vars\n  \
+                      vera setup --api                 # Interactive API configuration\n  \
                       vera setup --yes                 # Default Potion Code backend, no prompts\n\n\
                       Examples:\n  \
                       vera setup                       # Full interactive wizard\n  \

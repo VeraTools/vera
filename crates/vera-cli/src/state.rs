@@ -1,8 +1,10 @@
 //! Persistent CLI state for agent-friendly setup and installs.
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -126,21 +128,26 @@ pub fn save_runtime_config(config: &vera_core::config::VeraConfig) -> Result<()>
     save_config(&stored)
 }
 
-pub fn save_api_setup(embedding: &ApiSetupInput, reranker: Option<&ApiSetupInput>) -> Result<()> {
+pub fn save_api_setup(
+    embedding: &ApiSetupInput,
+    reranker: Option<&ApiSetupInput>,
+    runtime: &vera_core::config::VeraConfig,
+) -> Result<()> {
     let mut config = load_saved_config()?;
+    let mut secrets = load_saved_secrets()?;
     config.backend = Some(vera_core::config::InferenceBackend::Api);
     config.local_mode = Some(false);
     config.embedding_api = Some(ApiEndpointConfig {
         base_url: embedding.base_url.clone(),
         model_id: embedding.model_id.clone(),
     });
+    config.core_config = Some(runtime.clone());
     config.reranker_api = reranker.map(|cfg| ApiEndpointConfig {
         base_url: cfg.base_url.clone(),
         model_id: cfg.model_id.clone(),
     });
     save_config(&config)?;
 
-    let mut secrets = load_saved_secrets()?;
     secrets.embedding_api_key = Some(embedding.api_key.clone());
     secrets.reranker_api_key = reranker.map(|cfg| cfg.api_key.clone());
     save_secrets(&secrets)
@@ -220,13 +227,11 @@ fn apply_saved_env_impl(force: bool) -> Result<()> {
         set_env_value("EMBEDDING_MODEL_API_KEY", api_key, force);
     }
 
-    if let Some(reranker) = config.reranker_api.as_ref() {
-        set_env_value("RERANKER_MODEL_BASE_URL", &reranker.base_url, force);
-        set_env_value("RERANKER_MODEL_ID", &reranker.model_id, force);
-    }
-    if let Some(api_key) = secrets.reranker_api_key.as_deref() {
-        set_env_value("RERANKER_MODEL_API_KEY", api_key, force);
-    }
+    apply_reranker_env(
+        config.reranker_api.as_ref(),
+        secrets.reranker_api_key.as_deref(),
+        force,
+    );
 
     // Repaired in memory on the way to the process environment; see
     // `repaired_local_embedding_model`.
@@ -312,6 +317,44 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+const RERANKER_ENV_KEYS: [&str; 3] = [
+    "RERANKER_MODEL_BASE_URL",
+    "RERANKER_MODEL_ID",
+    "RERANKER_MODEL_API_KEY",
+];
+// Remember only values Vera populated; shell overrides must survive a local switch.
+static RERANKER_ENV_FROM_STATE: Mutex<[Option<OsString>; 3]> = Mutex::new([None, None, None]);
+
+fn apply_reranker_env(endpoint: Option<&ApiEndpointConfig>, api_key: Option<&str>, force: bool) {
+    let values = [
+        endpoint.map(|value| value.base_url.as_str()),
+        endpoint.map(|value| value.model_id.as_str()),
+        api_key,
+    ];
+    let mut populated = RERANKER_ENV_FROM_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for ((key, value), remembered) in RERANKER_ENV_KEYS
+        .iter()
+        .zip(values)
+        .zip(populated.iter_mut())
+    {
+        match value {
+            Some(value) if force || std::env::var_os(key).is_none() => {
+                set_process_env(key, value);
+                *remembered = Some(OsString::from(value));
+            }
+            None if force => {
+                if remembered.is_some() && std::env::var_os(key) == *remembered {
+                    clear_process_env(key);
+                }
+                *remembered = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn set_env_value(key: &str, value: &str, force: bool) {
@@ -407,9 +450,9 @@ fn apply_local_embedding_env(
 }
 
 fn set_process_env(key: &str, value: &str) {
-    // In production this runs only during single-threaded CLI startup, before
-    // any background work or runtime threads exist, so no concurrent reader can
-    // observe the write.
+    // SAFETY: CLI startup applies saved state before background work starts.
+    // Setup/repair drop their download runtimes before applying a backend change,
+    // and apply it before initializing ONNX or starting indexing threads.
     //
     // The unit tests below break that condition: libtest runs them on several
     // threads at once. They are sound instead because every test that reads or
@@ -425,8 +468,9 @@ fn set_process_env(key: &str, value: &str) {
 }
 
 fn clear_process_env(key: &str) {
-    // SAFETY: This has the same startup and isolated-fixture invariant as
-    // set_process_env; it clears configuration before native provider use.
+    // SAFETY: This shares set_process_env's startup and setup boundaries: it
+    // clears configuration before native provider use, and test writes are
+    // serialized as described there.
     unsafe {
         std::env::remove_var(key);
     }
@@ -544,6 +588,7 @@ mod tests {
         _dir: tempfile::TempDir,
         _lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<Option<std::ffi::OsString>>,
+        previous_reranker_env: [Option<OsString>; 3],
     }
 
     impl Drop for VeraHomeGuard {
@@ -554,6 +599,7 @@ mod tests {
                     None => clear_process_env(key),
                 }
             }
+            *RERANKER_ENV_FROM_STATE.lock().unwrap() = self.previous_reranker_env.clone();
         }
     }
 
@@ -564,6 +610,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = RESTORED_ENV_KEYS.iter().map(std::env::var_os).collect();
+        let previous_reranker_env = std::mem::take(&mut *RERANKER_ENV_FROM_STATE.lock().unwrap());
         let dir = tempfile::tempdir().unwrap();
         set_process_env("VERA_HOME", dir.path().to_str().unwrap());
         fs::write(config_path().unwrap(), contents).unwrap();
@@ -571,6 +618,7 @@ mod tests {
             _dir: dir,
             _lock: lock,
             previous,
+            previous_reranker_env,
         }
     }
 
@@ -581,6 +629,52 @@ mod tests {
             .as_str()
             .expect("stored config should still carry a pooling field")
             .to_string()
+    }
+
+    #[test]
+    fn disabling_saved_reranker_clears_loaded_values_but_preserves_shell_overrides() {
+        let _guard = with_stored_config("{}");
+        for shell_override in [false, true] {
+            for key in RERANKER_ENV_KEYS {
+                clear_process_env(key);
+            }
+            let embedding = ApiSetupInput {
+                base_url: "https://embedding.example".into(),
+                model_id: "embedding".into(),
+                api_key: "embedding-key".into(),
+            };
+            let reranker = ApiSetupInput {
+                base_url: "https://reranker.example".into(),
+                model_id: "reranker".into(),
+                api_key: "reranker-key".into(),
+            };
+            save_api_setup(
+                &embedding,
+                Some(&reranker),
+                &vera_core::config::VeraConfig::default(),
+            )
+            .unwrap();
+            if shell_override {
+                for key in RERANKER_ENV_KEYS {
+                    set_process_env(key, "shell-override");
+                }
+            }
+            apply_saved_env().unwrap();
+            assert!(
+                RERANKER_ENV_KEYS
+                    .iter()
+                    .all(|key| std::env::var_os(key).is_some())
+            );
+            clear_reranker_setup().unwrap();
+            apply_saved_env_force().unwrap();
+            for key in RERANKER_ENV_KEYS {
+                assert_eq!(
+                    std::env::var_os(key),
+                    shell_override.then(|| OsString::from("shell-override")),
+                    "{key}"
+                );
+            }
+        }
     }
 
     #[test]

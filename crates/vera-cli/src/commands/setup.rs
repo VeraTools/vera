@@ -1,7 +1,5 @@
 //! `vera setup` — persist a preferred Vera mode and bootstrap first-run state.
 
-use std::io::IsTerminal;
-
 use anyhow::{Context, bail};
 use serde::Serialize;
 use vera_core::config::{InferenceBackend, OnnxExecutionProvider, RerankerProtocol};
@@ -52,6 +50,15 @@ pub(crate) struct ApiPreset {
 
 pub(crate) const API_PRESETS: &[ApiPreset] = &[
     ApiPreset {
+        id: ApiPresetId::Qwen,
+        label: "Qwen (OpenRouter, recommended)",
+        hint: "qwen3-embedding-8b + qwen3-reranker-8b via OpenRouter (paid usage)",
+        embedding_base_url: "https://openrouter.ai/api/v1",
+        embedding_model: "qwen/qwen3-embedding-8b",
+        reranker_base_url: "https://openrouter.ai/api/v1",
+        reranker_model: "qwen/qwen3-reranker-8b",
+    },
+    ApiPreset {
         id: ApiPresetId::OpenAi,
         label: "OpenAI",
         hint: "text-embedding-3-small, no built-in reranker",
@@ -77,15 +84,6 @@ pub(crate) const API_PRESETS: &[ApiPreset] = &[
         embedding_model: "voyage-code-3",
         reranker_base_url: "https://api.voyageai.com/v1",
         reranker_model: "rerank-2",
-    },
-    ApiPreset {
-        id: ApiPresetId::Qwen,
-        label: "Qwen (OpenRouter)",
-        hint: "qwen3-embedding-8b + qwen3-reranker-8b via OpenRouter (paid usage)",
-        embedding_base_url: "https://openrouter.ai/api/v1",
-        embedding_model: "qwen/qwen3-embedding-8b",
-        reranker_base_url: "https://openrouter.ai/api/v1",
-        reranker_model: "qwen/qwen3-reranker-8b",
     },
     ApiPreset {
         id: ApiPresetId::Custom,
@@ -146,9 +144,33 @@ pub fn run(
     embedding_flags: LocalEmbeddingModelFlags,
     allow_wizard: bool,
 ) -> anyhow::Result<()> {
+    let result = run_inner(
+        backend,
+        api,
+        index_path,
+        json_output,
+        yes,
+        embedding_flags,
+        allow_wizard,
+    );
+    crate::helpers::finish_prompt_command(
+        result,
+        "Setup cancelled. Any completed steps remain saved.",
+    )
+}
+
+fn run_inner(
+    backend: Option<InferenceBackend>,
+    api: bool,
+    index_path: Option<String>,
+    json_output: bool,
+    yes: bool,
+    embedding_flags: LocalEmbeddingModelFlags,
+    allow_wizard: bool,
+) -> anyhow::Result<()> {
     // Prompts need a terminal. Without one, every `cliclack` call fails with a
     // bare "not connected", so decide up front what can run unattended.
-    let interactive = std::io::stdin().is_terminal();
+    let interactive = crate::helpers::prompts_available();
 
     // If no flags at all and interactive, run the full wizard.
     let is_bare_interactive =
@@ -219,13 +241,9 @@ pub fn run(
         )
         .context("API mode needs endpoint credentials and no terminal is available for prompts")?;
     }
-    let api_setup_with_preset = (needs_api_prompt && interactive)
-        .then(prompt_api_setup)
+    let api_setup = (needs_api_prompt && interactive)
+        .then(prompt_api_configuration)
         .transpose()?;
-    // Wizard cares about preset identity (Qwen single-key + auto-Generic);
-    // the generic `run` path only needs the raw inputs, so strip the id here.
-    let api_setup =
-        api_setup_with_preset.map(|(embedding, reranker, _preset_id)| (embedding, reranker));
 
     configure_backend_with_api_setup(
         effective_backend,
@@ -249,39 +267,32 @@ fn run_wizard() -> anyhow::Result<()> {
         .is_onnx()
         .then(LocalEmbeddingModelConfig::default);
 
-    if effective_backend == InferenceBackend::Api {
-        configure_api_interactive()?;
-        // Friction: Step 2 (agent skills) and Step 3 (index now) asked two extra
-        // confirmations before the first search could run. For API first-run the
-        // preset is complete after the single key entry, so skip directly to the
-        // outro and let `vera index` / `vera search` run separately.
-        cliclack::outro(
-            "Setup complete! Run `vera index .` and `vera search \"query\"` to get started.",
-        )?;
-        return Ok(());
-    } else {
-        configure_backend(
-            effective_backend,
-            local_embedding_model,
-            None,
-            false,
-            "Backend configured.",
-        )?;
-    }
+    let api_setup = (effective_backend == InferenceBackend::Api)
+        .then(prompt_api_configuration)
+        .transpose()?;
+    configure_backend_with_api_setup(
+        effective_backend,
+        local_embedding_model,
+        None,
+        false,
+        "Backend configured.",
+        api_setup,
+        true,
+    )?;
 
-    // Step 2: Agent skill installation (local backends only)
+    // Step 2: Agent skill installation
     cliclack::log::step("Step 2: Agent skills")?;
     let install_skills: bool = cliclack::confirm("Install Vera skills for coding agents?")
         .initial_value(true)
         .interact()?;
     if install_skills {
-        commands::agent::run(commands::agent::AgentCommand::Install, None, None, false)?;
+        commands::agent::install_interactive()?;
     }
 
     // Step 3: Optional indexing
     cliclack::log::step("Step 3: Index a project")?;
     let index_now: bool = cliclack::confirm("Index a project now?")
-        .initial_value(true)
+        .initial_value(effective_backend.is_local())
         .interact()?;
     if index_now {
         let path: String = cliclack::input("Project path")
@@ -299,26 +310,12 @@ fn run_wizard() -> anyhow::Result<()> {
         )?;
     }
 
-    cliclack::outro("Setup complete! Run `vera search \"query\"` to get started.")?;
+    cliclack::outro(if index_now {
+        "Setup complete! Run `vera search \"query\"` in the indexed project."
+    } else {
+        "Setup complete! Run `vera index .`, then `vera search \"query\"`."
+    })?;
     Ok(())
-}
-
-pub(crate) fn configure_backend(
-    effective_backend: InferenceBackend,
-    local_embedding_model: Option<LocalEmbeddingModelConfig>,
-    index_path: Option<String>,
-    json_output: bool,
-    success_header: &str,
-) -> anyhow::Result<()> {
-    configure_backend_with_api_setup(
-        effective_backend,
-        local_embedding_model,
-        index_path,
-        json_output,
-        success_header,
-        None,
-        true,
-    )
 }
 
 pub(crate) fn repair_backend(
@@ -344,12 +341,12 @@ fn configure_backend_with_api_setup(
     index_path: Option<String>,
     json_output: bool,
     success_header: &str,
-    api_setup: Option<(ApiSetupInput, Option<ApiSetupInput>)>,
+    api_setup: Option<ApiConfiguration>,
     persist_state: bool,
 ) -> anyhow::Result<()> {
     let use_local = effective_backend.is_local();
     let mut models_prefetched = 0usize;
-    let onnx_runtime_ready;
+    let mut onnx_library = None;
     let mut local_embedding_summary = None;
 
     match effective_backend {
@@ -362,19 +359,12 @@ fn configure_backend_with_api_setup(
                 &local_embedding_model,
             ))?;
             models_prefetched = prefetched.len();
-            // Use the downloaded library path (first prefetched file) for the readiness check.
-            onnx_runtime_ready = Some(
-                vera_core::local_models::ensure_ort_runtime(
-                    prefetched.first().map(|p| p.as_path()),
-                )
-                .is_ok(),
-            );
+            onnx_library = prefetched.first().cloned();
             if persist_state {
                 state::save_backend(effective_backend)?;
                 state::save_local_embedding_model(&local_embedding_model)?;
                 state::clear_reranker_setup()?;
             }
-            state::apply_saved_env_force()?;
             local_embedding_summary = Some(local_embedding_model.display_name());
         }
         InferenceBackend::PotionCode => {
@@ -382,37 +372,52 @@ fn configure_backend_with_api_setup(
                 .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
             rt.block_on(vera_core::local_models::ensure_potion_code_assets())?;
             models_prefetched = vera_core::local_models::inspect_potion_code_model_files()?.len();
-            onnx_runtime_ready = None;
             if persist_state {
                 state::save_backend(effective_backend)?;
                 state::clear_reranker_setup()?;
             }
-            state::apply_saved_env_force()?;
             local_embedding_summary = Some(vera_core::local_models::potion_code_model_name());
         }
         InferenceBackend::Api => {
-            let (embedding, reranker) = match api_setup {
-                Some((embedding, reranker)) => (embedding, reranker),
-                None => (
-                    read_required_api_env(
+            let api_setup = match api_setup {
+                Some(api_setup) => api_setup,
+                None => ApiConfiguration {
+                    embedding: read_required_api_env(
                         "EMBEDDING_MODEL_BASE_URL",
                         "EMBEDDING_MODEL_ID",
                         "EMBEDDING_MODEL_API_KEY",
                     )?,
-                    read_optional_api_env(
+                    reranker: read_optional_api_env(
                         "RERANKER_MODEL_BASE_URL",
                         "RERANKER_MODEL_ID",
                         "RERANKER_MODEL_API_KEY",
                     )?,
-                ),
+                    reranker_update: None,
+                },
             };
             if persist_state {
-                state::save_api_setup(&embedding, reranker.as_ref())?;
+                let mut runtime = state::load_runtime_config()?;
+                let update = match api_setup.reranker_update {
+                    Some(update) => Some(update),
+                    None if reranker_provider_changed(api_setup.reranker.as_ref())? => {
+                        Some(default_reranker_update(ApiPresetId::Custom, true))
+                    }
+                    None => None,
+                };
+                if let Some(update) = update {
+                    apply_reranker_protocol_update(&mut runtime, update);
+                }
+                state::save_api_setup(&api_setup.embedding, api_setup.reranker.as_ref(), &runtime)?;
             }
-            state::apply_saved_env_force()?;
-            onnx_runtime_ready = None;
         }
     }
+
+    // Download runtimes have been dropped. Apply the new environment before
+    // ONNX initialization or indexing can start background readers.
+    state::apply_saved_env_force()?;
+    let onnx_runtime_ready = effective_backend
+        .is_onnx()
+        .then(|| vera_core::local_models::ensure_ort_runtime(onnx_library.as_deref()).is_ok());
 
     if persist_state
         && state::load_saved_config()?.install_method.is_none()
@@ -716,14 +721,14 @@ fn prompt_backend_select() -> anyhow::Result<InferenceBackend> {
             "static embeddings, works everywhere (default)",
         )
         .item(
+            InferenceBackend::Api,
+            "API mode",
+            "remote endpoints (paid usage)",
+        )
+        .item(
             detected,
             format!("Auto-detect ({detected_hint})"),
             "GPU ONNX backend",
-        )
-        .item(
-            InferenceBackend::Api,
-            "API mode",
-            "remote OpenAI-compatible endpoints",
         )
         .item(
             InferenceBackend::OnnxJina(OnnxExecutionProvider::Cuda),
@@ -829,59 +834,38 @@ fn confirm(
     Ok(yes)
 }
 
-/// Interactive API configuration for the setup wizard.
-/// Offers common provider presets and prompts for credentials.
-///
-/// The Qwen (OpenRouter) preset uses `qwen/qwen3-embedding-8b` +
-/// `qwen/qwen3-reranker-8b` via `https://openrouter.ai/api/v1` with a single
-/// shared API key. The reranker for this preset relies on the generic
-/// protocol (`top_n`/`results`) unless the operator overrides it in the
-/// subsequent reranker-protocol step or via `vera config set`; other presets
-/// default to auto-detect (voyage on `voyageai.com`, generic elsewhere).
-fn configure_api_interactive() -> anyhow::Result<()> {
+struct ApiConfiguration {
+    embedding: ApiSetupInput,
+    reranker: Option<ApiSetupInput>,
+    reranker_update: Option<RerankerProtocolUpdate>,
+}
+
+/// Collect all API settings before saving anything, shared by setup and backend.
+fn prompt_api_configuration() -> anyhow::Result<ApiConfiguration> {
     let (embedding, reranker, preset_id) = prompt_api_setup()?;
-    // Collect reranker protocol settings before any persistence so cancellation
-    // at any prompt leaves existing config untouched.
-    // Qwen (OpenRouter) uses the generic protocol; apply it without prompting
-    // so the preset completes with a single key entry (friction: before, three
-    // extra prompts for protocol/endpoint/task even though defaults are correct).
-    let is_qwen = preset_uses_auto_generic(preset_id);
-    let reranker_protocol_update = if reranker.is_some() {
-        if is_qwen {
-            Some(RerankerProtocolUpdate {
-                protocol: Some(RerankerProtocol::Generic),
-                endpoint_path: None,
-                task_instruction: None,
-                task_field: None,
-            })
-        } else {
-            Some(prompt_reranker_protocol_settings_for_preset(preset_id)?)
-        }
+    let reranker_update = if preset_uses_auto_generic(preset_id) || reranker.is_none() {
+        Some(default_reranker_update(preset_id, reranker.is_some()))
     } else {
-        None
+        Some(prompt_reranker_protocol_settings_for_preset(
+            preset_id,
+            reranker_provider_changed(reranker.as_ref())?,
+        )?)
     };
+    Ok(ApiConfiguration {
+        embedding,
+        reranker,
+        reranker_update,
+    })
+}
 
-    state::save_backend(InferenceBackend::Api)?;
-    state::save_api_setup(&embedding, reranker.as_ref())?;
-    if let Some(update) = reranker_protocol_update {
-        let mut runtime = state::load_runtime_config()?;
-        apply_reranker_protocol_update(&mut runtime, update);
-        state::save_runtime_config(&runtime)?;
+fn default_reranker_update(preset_id: ApiPresetId, has_reranker: bool) -> RerankerProtocolUpdate {
+    RerankerProtocolUpdate {
+        protocol: (has_reranker && preset_uses_auto_generic(preset_id))
+            .then_some(RerankerProtocol::Generic),
+        endpoint_path: None,
+        task_instruction: None,
+        task_field: None,
     }
-    state::apply_saved_env_force()?;
-
-    if state::load_saved_config()?.install_method.is_none()
-        && let Some(install_method) = crate::update_check::resolve_install_method().install_method
-    {
-        state::save_install_method(Some(&install_method))?;
-    }
-
-    cliclack::log::success("API backend configured.")?;
-    cliclack::log::info(
-        "Your credentials are saved in Vera's config directory. You can remove any \
-         EMBEDDING_MODEL_* / RERANKER_MODEL_* env vars from your shell.",
-    )?;
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -902,10 +886,28 @@ fn apply_reranker_protocol_update(
     runtime.retrieval.reranker_task_field = update.task_field;
 }
 
+/// Whether `reranker` replaces a saved reranker at a different endpoint, so the
+/// saved provider-specific protocol, path, and task settings no longer apply.
+fn reranker_provider_changed(reranker: Option<&ApiSetupInput>) -> anyhow::Result<bool> {
+    let saved = state::load_saved_config()?.reranker_api;
+    Ok(match (saved, reranker) {
+        (Some(saved), Some(new)) => {
+            saved.base_url.trim_end_matches('/') != new.base_url.trim_end_matches('/')
+        }
+        _ => false,
+    })
+}
+
 fn prompt_reranker_protocol_settings_for_preset(
     preset_id: ApiPresetId,
+    provider_changed: bool,
 ) -> anyhow::Result<RerankerProtocolUpdate> {
-    let existing = state::load_runtime_config().unwrap_or_default();
+    let existing = state::load_runtime_config()?;
+    let existing = if preset_id == ApiPresetId::Custom && !provider_changed {
+        existing
+    } else {
+        vera_core::config::VeraConfig::default()
+    };
     let existing_protocol = existing.retrieval.reranker_protocol;
     let existing_endpoint = existing.retrieval.reranker_endpoint_path.clone();
     let existing_instruction = existing.retrieval.reranker_task_instruction.clone();
@@ -1017,10 +1019,6 @@ fn prompt_reranker_protocol_settings_for_preset(
             Some(trimmed)
         }
     } else {
-        // If no instruction, keep existing field only if previously set and instruction was previously set; otherwise clear.
-        // To keep idempotency, preserve existing field when instruction is None but field was set? For simplicity, clear field when instruction is None and prompt not shown.
-        // However for idempotency we should preserve existing field only if instruction also preserved. Since instruction is None, field should be None.
-        // But to respect "changing exactly one field preserves others", we need to allow preserving field even when instruction cleared? For now, preserve existing if instruction was previously set? Simpler: if task_instruction is None and existing field is Some, keep it only if user explicitly wants? We'll clear to avoid orphan.
         None
     };
 
@@ -1206,6 +1204,151 @@ fn read_optional_api_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_preset_switch_persists_reranker_settings_without_losing_other_config() {
+        const CHILD_HOME: &str = "VERA_TEST_SETUP_HOME";
+        let Some(home) = std::env::var_os(CHILD_HOME) else {
+            let home = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "commands::setup::tests::api_preset_switch_persists_reranker_settings_without_losing_other_config", "--nocapture"])
+                .env(CHILD_HOME, home.path())
+                .env("VERA_HOME", home.path())
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        };
+        assert_eq!(state::vera_dir().unwrap(), std::path::PathBuf::from(home));
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.max_output_chars = 12345;
+        runtime.retrieval.reranker_protocol = Some(RerankerProtocol::Voyage);
+        runtime.retrieval.reranker_endpoint_path = Some("/old-provider".into());
+        runtime.retrieval.reranker_task_instruction = Some("old task".into());
+        runtime.retrieval.reranker_task_field = Some("instruction".into());
+        state::save_runtime_config(&runtime).unwrap();
+        for (preset_id, has_reranker) in [(ApiPresetId::Qwen, true), (ApiPresetId::OpenAi, false)] {
+            let preset = preset_by_id(preset_id);
+            configure_backend_with_api_setup(
+                InferenceBackend::Api,
+                None,
+                None,
+                true,
+                "configured",
+                Some(ApiConfiguration {
+                    embedding: ApiSetupInput {
+                        base_url: preset.embedding_base_url.into(),
+                        model_id: preset.embedding_model.into(),
+                        api_key: "fixture-key".into(),
+                    },
+                    reranker: has_reranker.then(|| ApiSetupInput {
+                        base_url: preset.reranker_base_url.into(),
+                        model_id: preset.reranker_model.into(),
+                        api_key: "fixture-key".into(),
+                    }),
+                    reranker_update: Some(default_reranker_update(preset_id, has_reranker)),
+                }),
+                true,
+            )
+            .unwrap();
+            let stored = state::load_saved_config().unwrap();
+            assert_eq!(
+                stored.embedding_api.unwrap().model_id,
+                preset.embedding_model
+            );
+            assert_eq!(stored.reranker_api.is_some(), has_reranker);
+            assert_eq!(
+                state::load_saved_secrets()
+                    .unwrap()
+                    .reranker_api_key
+                    .is_some(),
+                has_reranker
+            );
+            let reloaded = state::load_runtime_config().unwrap();
+            assert_eq!(reloaded.retrieval.max_output_chars, 12345);
+            assert_eq!(
+                reloaded.retrieval.reranker_protocol,
+                has_reranker.then_some(RerankerProtocol::Generic)
+            );
+            assert!(reloaded.retrieval.reranker_endpoint_path.is_none());
+            assert!(reloaded.retrieval.reranker_task_instruction.is_none());
+            assert!(reloaded.retrieval.reranker_task_field.is_none());
+            if !has_reranker {
+                for key in [
+                    "RERANKER_MODEL_BASE_URL",
+                    "RERANKER_MODEL_ID",
+                    "RERANKER_MODEL_API_KEY",
+                ] {
+                    assert!(
+                        std::env::var_os(key).is_none(),
+                        "stale runtime reranker: {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noninteractive_reranker_switch_resets_provider_settings() {
+        const CHILD_HOME: &str = "VERA_TEST_SETUP_HOME";
+        let Some(home) = std::env::var_os(CHILD_HOME) else {
+            let home = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "commands::setup::tests::noninteractive_reranker_switch_resets_provider_settings", "--nocapture"])
+                .env(CHILD_HOME, home.path())
+                .env("VERA_HOME", home.path())
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        };
+        assert_eq!(state::vera_dir().unwrap(), std::path::PathBuf::from(home));
+        let endpoint = |base_url: &str| ApiSetupInput {
+            base_url: base_url.into(),
+            model_id: "model".into(),
+            api_key: "fixture-key".into(),
+        };
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.reranker_protocol = Some(RerankerProtocol::Voyage);
+        runtime.retrieval.reranker_endpoint_path = Some("/v1/rerank".into());
+        runtime.retrieval.reranker_task_instruction = Some("old task".into());
+        let voyage = endpoint("https://api.voyageai.com/v1");
+        state::save_api_setup(&voyage, Some(&voyage), &runtime).unwrap();
+
+        for (reranker_url, keeps_settings) in [
+            ("https://api.voyageai.com/v1/", true),
+            ("https://openrouter.ai/api/v1", false),
+        ] {
+            configure_backend_with_api_setup(
+                InferenceBackend::Api,
+                None,
+                None,
+                true,
+                "configured",
+                Some(ApiConfiguration {
+                    embedding: endpoint("https://embedding.example"),
+                    reranker: Some(endpoint(reranker_url)),
+                    reranker_update: None,
+                }),
+                true,
+            )
+            .unwrap();
+            let retrieval = state::load_runtime_config().unwrap().retrieval;
+            assert_eq!(
+                retrieval.reranker_protocol,
+                keeps_settings.then_some(RerankerProtocol::Voyage),
+                "{reranker_url}"
+            );
+            assert_eq!(
+                retrieval.reranker_endpoint_path.is_some(),
+                keeps_settings,
+                "{reranker_url}"
+            );
+            assert_eq!(
+                retrieval.reranker_task_instruction.is_some(),
+                keeps_settings,
+                "{reranker_url}"
+            );
+        }
+    }
 
     #[test]
     fn setup_with_no_flags_defaults_to_potion_code() {
@@ -1482,7 +1625,7 @@ mod tests {
         // Round-trip: the canonical Qwen entry still round-trips through id.
         let qwen = preset_by_id(ApiPresetId::Qwen);
         assert_eq!(qwen.id, ApiPresetId::Qwen);
-        assert_eq!(qwen.label, "Qwen (OpenRouter)");
+        assert_eq!(qwen.label, "Qwen (OpenRouter, recommended)");
         assert_eq!(qwen.embedding_model, "qwen/qwen3-embedding-8b");
         assert_eq!(qwen.reranker_model, "qwen/qwen3-reranker-8b");
         assert!(preset_uses_single_shared_key(qwen.id));
