@@ -101,7 +101,7 @@
 | `indexing.max_chunk_lines` | 200 | Maximum lines in a chunk before splitting. |
 | `indexing.max_file_size_bytes` | 1000000 | Skips files larger than this size. |
 | `indexing.default_excludes` | built-in list | Adds default exclusions to `.gitignore` rules. |
-| `indexing.extra_excludes` | `[]` | Adds exclusion globs from CLI configuration. |
+| `indexing.extra_excludes` | `[]` | Exclusion globs; `--exclude` adds to them. |
 | `indexing.no_ignore` | `false` | Disables `.gitignore` and `.veraignore` parsing. |
 | `indexing.no_default_excludes` | `false` | Disables smart default exclusions. |
 | `indexing.max_chunk_bytes` | 24576 | Splits oversized embedding chunks at line boundaries; `0` disables this cap. |

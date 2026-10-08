@@ -69,9 +69,9 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
 
     let mut config = state::load_runtime_config()?;
     config.adjust_for_backend(backend);
-    config.indexing.extra_excludes = exclude;
-    config.indexing.no_ignore = no_ignore;
-    config.indexing.no_default_excludes = no_default_excludes;
+    config.indexing.extra_excludes.extend(exclude);
+    config.indexing.no_ignore |= no_ignore;
+    config.indexing.no_default_excludes |= no_default_excludes;
 
     let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
         &config, backend,

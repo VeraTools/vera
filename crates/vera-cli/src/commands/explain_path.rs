@@ -16,9 +16,9 @@ pub fn run(
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
 
     let mut config = state::load_runtime_config()?;
-    config.indexing.extra_excludes = exclude;
-    config.indexing.no_ignore = no_ignore;
-    config.indexing.no_default_excludes = no_default_excludes;
+    config.indexing.extra_excludes.extend(exclude);
+    config.indexing.no_ignore |= no_ignore;
+    config.indexing.no_default_excludes |= no_default_excludes;
 
     let explanation = vera_core::discovery::explain_path(&cwd, Path::new(path), &config.indexing)?;
 

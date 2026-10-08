@@ -35,6 +35,7 @@ vera config set embedding.timeout_secs 60
 ## Indexing and Search Behavior
 
 - Saved `embedding.query_prefix` and `embedding.document_prefix` values now reach API requests. Earlier versions ignored them. If you saved a prefix, rebuild with `vera index` so stored vectors match new queries.
+- Saved `indexing.no_ignore`, `indexing.no_default_excludes`, and `indexing.extra_excludes` now apply when the matching flags are absent; earlier versions reset them on every run. `--exclude` adds to saved globs instead of replacing them.
 - A failed API `vera index` leaves `<repo>/.vera.resume/` so the next run can reuse finished embeddings. Add it to `.gitignore` next to `.vera/`.
 - An index left half-written by an interrupted `vera update` is refused until `vera update` or `vera index` repairs it.
 - Index and update summaries gain request, retry, timeout, and phase-time fields. Existing fields are unchanged. Slow runs print progress lines to stderr even when it is not a terminal; `--no-progress` turns them off.

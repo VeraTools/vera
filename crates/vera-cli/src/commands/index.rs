@@ -91,9 +91,9 @@ pub fn execute(
         config.embedding.low_vram = true;
     }
     config.adjust_for_backend(backend);
-    config.indexing.extra_excludes = exclude;
-    config.indexing.no_ignore = no_ignore;
-    config.indexing.no_default_excludes = no_default_excludes;
+    config.indexing.extra_excludes.extend(exclude);
+    config.indexing.no_ignore |= no_ignore;
+    config.indexing.no_default_excludes |= no_default_excludes;
 
     let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
         &config, backend,
