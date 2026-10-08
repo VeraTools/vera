@@ -619,19 +619,10 @@ pub enum Commands {
                       configuration as a table (or JSON with --json).\n\n\
                       Use `get <key>` to read a specific value, or `set <key> <value>` \
                       to update it.\n\n\
-                      Configuration keys use dot notation:\n  \
-                      indexing.max_chunk_lines       Max lines per chunk (default: 200)\n  \
-                      indexing.max_file_size_bytes   Max file size to index (default: 1000000)\n  \
-                      retrieval.default_limit        Default result count (default: 5)\n  \
-                      retrieval.rrf_k                RRF fusion constant (default: 60)\n  \
-                      retrieval.rerank_candidates    Reranker candidate count (default: 50)\n  \
-                      retrieval.reranking_enabled    Enable reranking (default: false)\n  \
-                      retrieval.max_output_chars     Total output char budget (default: 0 = unlimited)\n  \
-                      embedding.batch_size           Embedding batch size (default: 128)\n  \
-                      embedding.max_concurrent_requests  Concurrent API requests (default: 8)\n  \
-                      embedding.timeout_secs         API timeout (default: 120)\n  \
-                      embedding.max_retries          API retry count (default: 3)\n  \
-                      embedding.max_stored_dim       Vector dimensionality (default: 1024)\n\n\
+                      Keys use dot notation (`indexing.*`, `retrieval.*`, `embedding.*`). \
+                      `vera config show` lists every key with its current value; the \
+                      reference with types, defaults, and aliases is at \
+                      https://github.com/VeraTools/Vera/blob/master/docs/configuration.md\n\n\
                       Examples:\n  \
                       vera config                                  # Show all settings\n  \
                       vera config show                             # Same as above\n  \

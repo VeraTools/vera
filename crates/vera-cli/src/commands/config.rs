@@ -104,6 +104,14 @@ fn print_human_config(config: &vera_core::config::VeraConfig) {
         "    max_chunk_bytes           {}",
         config.indexing.max_chunk_bytes
     );
+    println!(
+        "    no_ignore                 {}",
+        config.indexing.no_ignore
+    );
+    println!(
+        "    no_default_excludes       {}",
+        config.indexing.no_default_excludes
+    );
     println!();
     println!("  Retrieval:");
     println!(
@@ -163,6 +171,35 @@ fn print_human_config(config: &vera_core::config::VeraConfig) {
         "    reranker_return_documents {:?}",
         config.retrieval.reranker_return_documents
     );
+    let r = &config.retrieval;
+    for (name, value) in [
+        (
+            "ranking_filename_stem_boost",
+            r.ranking_filename_stem_boost.to_string(),
+        ),
+        (
+            "ranking_filename_stem_min_ratio",
+            r.ranking_filename_stem_min_ratio.to_string(),
+        ),
+        (
+            "ranking_filename_stem_skip_symbol_queries",
+            r.ranking_filename_stem_skip_symbol_queries.to_string(),
+        ),
+        (
+            "ranking_definition_boost",
+            r.ranking_definition_boost.to_string(),
+        ),
+        (
+            "ranking_recall_pool_expansion",
+            r.ranking_recall_pool_expansion.to_string(),
+        ),
+        (
+            "vector_filter_during_scan",
+            r.vector_filter_during_scan.to_string(),
+        ),
+    ] {
+        println!("    {name:<25} {value}");
+    }
     println!();
     println!("  Embedding:");
     println!(
@@ -227,6 +264,28 @@ pub fn get_config_value(
         "indexing.extra_excludes" => serde_json::to_value(&config.indexing.extra_excludes).ok(),
         "indexing.max_chunk_bytes" => Some(serde_json::Value::Number(
             config.indexing.max_chunk_bytes.into(),
+        )),
+        "indexing.no_ignore" => Some(serde_json::Value::Bool(config.indexing.no_ignore)),
+        "indexing.no_default_excludes" => {
+            Some(serde_json::Value::Bool(config.indexing.no_default_excludes))
+        }
+        "retrieval.ranking_filename_stem_boost" => Some(serde_json::Value::Bool(
+            config.retrieval.ranking_filename_stem_boost,
+        )),
+        "retrieval.ranking_filename_stem_min_ratio" => {
+            serde_json::to_value(config.retrieval.ranking_filename_stem_min_ratio).ok()
+        }
+        "retrieval.ranking_filename_stem_skip_symbol_queries" => Some(serde_json::Value::Bool(
+            config.retrieval.ranking_filename_stem_skip_symbol_queries,
+        )),
+        "retrieval.ranking_definition_boost" => Some(serde_json::Value::Bool(
+            config.retrieval.ranking_definition_boost,
+        )),
+        "retrieval.ranking_recall_pool_expansion" => Some(serde_json::Value::Bool(
+            config.retrieval.ranking_recall_pool_expansion,
+        )),
+        "retrieval.vector_filter_during_scan" => Some(serde_json::Value::Bool(
+            config.retrieval.vector_filter_during_scan,
         )),
         "retrieval.default_limit" => Some(serde_json::Value::Number(
             config.retrieval.default_limit.into(),
@@ -338,6 +397,32 @@ fn set_config_value(
         }
         "indexing.max_chunk_bytes" => {
             config.indexing.max_chunk_bytes = parse_value(key, value)?;
+        }
+        "indexing.no_ignore" => config.indexing.no_ignore = parse_value(key, value)?,
+        "indexing.no_default_excludes" => {
+            config.indexing.no_default_excludes = parse_value(key, value)?;
+        }
+        "retrieval.ranking_filename_stem_boost" => {
+            config.retrieval.ranking_filename_stem_boost = parse_value(key, value)?;
+        }
+        "retrieval.ranking_filename_stem_min_ratio" => {
+            let ratio: f64 = parse_value(key, value)?;
+            if !(0.0..=1.0).contains(&ratio) {
+                bail!("{key} must be between 0 and 1")
+            }
+            config.retrieval.ranking_filename_stem_min_ratio = ratio;
+        }
+        "retrieval.ranking_filename_stem_skip_symbol_queries" => {
+            config.retrieval.ranking_filename_stem_skip_symbol_queries = parse_value(key, value)?;
+        }
+        "retrieval.ranking_definition_boost" => {
+            config.retrieval.ranking_definition_boost = parse_value(key, value)?;
+        }
+        "retrieval.ranking_recall_pool_expansion" => {
+            config.retrieval.ranking_recall_pool_expansion = parse_value(key, value)?;
+        }
+        "retrieval.vector_filter_during_scan" => {
+            config.retrieval.vector_filter_during_scan = parse_value(key, value)?;
         }
         "retrieval.default_limit" => {
             config.retrieval.default_limit = parse_positive(key, value)?;
@@ -547,6 +632,69 @@ fn parse_optional_u64(key: &str, value: &str) -> anyhow::Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranking_and_ignore_fields_round_trip_through_config_set() {
+        let mut config = vera_core::config::VeraConfig::default();
+        for key in [
+            "indexing.no_ignore",
+            "indexing.no_default_excludes",
+            "retrieval.ranking_filename_stem_boost",
+            "retrieval.ranking_filename_stem_skip_symbol_queries",
+            "retrieval.ranking_definition_boost",
+            "retrieval.ranking_recall_pool_expansion",
+            "retrieval.vector_filter_during_scan",
+        ] {
+            let flipped = !get_config_value(&config, key).unwrap().as_bool().unwrap();
+            set_config_value(&mut config, key, &flipped.to_string()).unwrap();
+            assert_eq!(
+                get_config_value(&config, key),
+                Some(flipped.into()),
+                "{key}"
+            );
+        }
+        let ratio = "retrieval.ranking_filename_stem_min_ratio";
+        set_config_value(&mut config, ratio, "0.25").unwrap();
+        assert_eq!(
+            get_config_value(&config, ratio),
+            Some(serde_json::json!(0.25))
+        );
+        for invalid in ["-0.1", "1.5", "NaN"] {
+            assert!(
+                set_config_value(&mut config, ratio, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    /// Every key and alias in the configuration reference must be a real key.
+    #[test]
+    fn documented_config_keys_are_all_readable() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md"),
+        )
+        .unwrap();
+        let config = vera_core::config::VeraConfig::default();
+        let mut checked = 0;
+        for row in doc.lines().filter(|line| line.starts_with("| `")) {
+            let name_cell = row.split('|').nth(1).unwrap();
+            let mut names = name_cell.split('`').skip(1).step_by(2);
+            let key = names.next().unwrap();
+            let Some((section, _)) = key.split_once('.') else {
+                continue;
+            };
+            if key.chars().any(|c| c.is_ascii_uppercase()) {
+                continue;
+            }
+            for name in std::iter::once(key.to_string())
+                .chain(names.map(|alias| format!("{section}.{alias}")))
+            {
+                assert!(get_config_value(&config, &name).is_some(), "{name}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 40, "only {checked} documented keys found");
+    }
 
     #[test]
     fn retired_experiment_keys_are_unknown_to_get_and_set() {

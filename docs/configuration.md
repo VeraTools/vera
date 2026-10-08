@@ -55,7 +55,7 @@
 | `retrieval.default_limit` | 5 | Number of results returned by default. |
 | `retrieval.rrf_k` | 60.0 | Reciprocal Rank Fusion constant. |
 | `retrieval.rerank_candidates` | 50 | Candidates passed to the reranker. |
-| `retrieval.reranking_enabled` | `false` | Enables reranking when credentials are available. |
+| `retrieval.reranking_enabled` | `false` | Enables reranking. Uses the API reranker when `RERANKER_MODEL_*` is configured; otherwise local backends download and run the bundled local reranker, and the API backend warns that no reranker is configured. |
 | `retrieval.max_output_chars` | 0 | Total search-output character budget; `0` is unlimited. |
 | `retrieval.max_rerank_batch` | 20 | Documents per reranker request; `0` disables batching. |
 | `retrieval.reranker_protocol` (`rerank_protocol`) | auto | Selects `generic` or `voyage` wire format. |
