@@ -1,7 +1,7 @@
 //! `vera search <query>` — Search the indexed codebase.
 
 use anyhow::bail;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use vera_core::config::{InferenceBackend, VeraConfig};
@@ -44,10 +44,7 @@ pub fn run(
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
     if crate::helpers::find_index_root(&cwd).is_none()
-        && should_offer_auto_index(
-            json_output,
-            std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
-        )
+        && should_offer_auto_index(json_output, crate::helpers::prompts_available())
         && cliclack::confirm("No index found. Index the current directory now?")
             .initial_value(true)
             .interact()?

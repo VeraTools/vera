@@ -1,7 +1,5 @@
 //! `vera setup` — persist a preferred Vera mode and bootstrap first-run state.
 
-use std::io::IsTerminal;
-
 use anyhow::{Context, bail};
 use serde::Serialize;
 use vera_core::config::{InferenceBackend, OnnxExecutionProvider, RerankerProtocol};
@@ -172,7 +170,7 @@ fn run_inner(
 ) -> anyhow::Result<()> {
     // Prompts need a terminal. Without one, every `cliclack` call fails with a
     // bare "not connected", so decide up front what can run unattended.
-    let interactive = std::io::stdin().is_terminal();
+    let interactive = crate::helpers::prompts_available();
 
     // If no flags at all and interactive, run the full wizard.
     let is_bare_interactive =
@@ -399,7 +397,14 @@ fn configure_backend_with_api_setup(
             };
             if persist_state {
                 let mut runtime = state::load_runtime_config()?;
-                if let Some(update) = api_setup.reranker_update {
+                let update = match api_setup.reranker_update {
+                    Some(update) => Some(update),
+                    None if reranker_provider_changed(api_setup.reranker.as_ref())? => {
+                        Some(default_reranker_update(ApiPresetId::Custom, true))
+                    }
+                    None => None,
+                };
+                if let Some(update) = update {
                     apply_reranker_protocol_update(&mut runtime, update);
                 }
                 state::save_api_setup(&api_setup.embedding, api_setup.reranker.as_ref(), &runtime)?;
@@ -841,7 +846,10 @@ fn prompt_api_configuration() -> anyhow::Result<ApiConfiguration> {
     let reranker_update = if preset_uses_auto_generic(preset_id) || reranker.is_none() {
         Some(default_reranker_update(preset_id, reranker.is_some()))
     } else {
-        Some(prompt_reranker_protocol_settings_for_preset(preset_id)?)
+        Some(prompt_reranker_protocol_settings_for_preset(
+            preset_id,
+            reranker_provider_changed(reranker.as_ref())?,
+        )?)
     };
     Ok(ApiConfiguration {
         embedding,
@@ -878,11 +886,24 @@ fn apply_reranker_protocol_update(
     runtime.retrieval.reranker_task_field = update.task_field;
 }
 
+/// Whether `reranker` replaces a saved reranker at a different endpoint, so the
+/// saved provider-specific protocol, path, and task settings no longer apply.
+fn reranker_provider_changed(reranker: Option<&ApiSetupInput>) -> anyhow::Result<bool> {
+    let saved = state::load_saved_config()?.reranker_api;
+    Ok(match (saved, reranker) {
+        (Some(saved), Some(new)) => {
+            saved.base_url.trim_end_matches('/') != new.base_url.trim_end_matches('/')
+        }
+        _ => false,
+    })
+}
+
 fn prompt_reranker_protocol_settings_for_preset(
     preset_id: ApiPresetId,
+    provider_changed: bool,
 ) -> anyhow::Result<RerankerProtocolUpdate> {
     let existing = state::load_runtime_config()?;
-    let existing = if preset_id == ApiPresetId::Custom {
+    let existing = if preset_id == ApiPresetId::Custom && !provider_changed {
         existing
     } else {
         vera_core::config::VeraConfig::default()
@@ -1263,6 +1284,69 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn noninteractive_reranker_switch_resets_provider_settings() {
+        const CHILD_HOME: &str = "VERA_TEST_SETUP_HOME";
+        let Some(home) = std::env::var_os(CHILD_HOME) else {
+            let home = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "commands::setup::tests::noninteractive_reranker_switch_resets_provider_settings", "--nocapture"])
+                .env(CHILD_HOME, home.path())
+                .env("VERA_HOME", home.path())
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        };
+        assert_eq!(state::vera_dir().unwrap(), std::path::PathBuf::from(home));
+        let endpoint = |base_url: &str| ApiSetupInput {
+            base_url: base_url.into(),
+            model_id: "model".into(),
+            api_key: "fixture-key".into(),
+        };
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.reranker_protocol = Some(RerankerProtocol::Voyage);
+        runtime.retrieval.reranker_endpoint_path = Some("/v1/rerank".into());
+        runtime.retrieval.reranker_task_instruction = Some("old task".into());
+        let voyage = endpoint("https://api.voyageai.com/v1");
+        state::save_api_setup(&voyage, Some(&voyage), &runtime).unwrap();
+
+        for (reranker_url, keeps_settings) in [
+            ("https://api.voyageai.com/v1/", true),
+            ("https://openrouter.ai/api/v1", false),
+        ] {
+            configure_backend_with_api_setup(
+                InferenceBackend::Api,
+                None,
+                None,
+                true,
+                "configured",
+                Some(ApiConfiguration {
+                    embedding: endpoint("https://embedding.example"),
+                    reranker: Some(endpoint(reranker_url)),
+                    reranker_update: None,
+                }),
+                true,
+            )
+            .unwrap();
+            let retrieval = state::load_runtime_config().unwrap().retrieval;
+            assert_eq!(
+                retrieval.reranker_protocol,
+                keeps_settings.then_some(RerankerProtocol::Voyage),
+                "{reranker_url}"
+            );
+            assert_eq!(
+                retrieval.reranker_endpoint_path.is_some(),
+                keeps_settings,
+                "{reranker_url}"
+            );
+            assert_eq!(
+                retrieval.reranker_task_instruction.is_some(),
+                keeps_settings,
+                "{reranker_url}"
+            );
         }
     }
 

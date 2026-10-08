@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -277,7 +277,7 @@ pub fn run(
 }
 
 fn require_terminal(command: &str) -> anyhow::Result<()> {
-    if !std::io::stdin().is_terminal() {
+    if !crate::helpers::prompts_available() {
         bail!(
             "`vera agent {command}` needs a terminal for interactive selection. \
             Pass `--client <client>` and `--scope <global|project|all>`, or `--json`, \
@@ -1520,7 +1520,7 @@ fn offer_agents_md_snippet(selected_clients: &[AgentClient]) -> anyhow::Result<(
 
     if !should_offer_snippet_prompt(
         existing.iter().any(|config| config.mentions_vera),
-        std::io::stdin().is_terminal(),
+        crate::helpers::prompts_available(),
     ) {
         return Ok(());
     }
