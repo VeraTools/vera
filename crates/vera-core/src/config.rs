@@ -401,26 +401,12 @@ fn default_ranking_filename_stem_boost() -> bool {
 
 fn default_ranking_filename_stem_min_ratio() -> f64 {
     // Default 0.05 preserves pre-knob behavior. Env authoritative.
-    // Alias set and precedence match `ranking_filename_stem_min_ratio_effective`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_RANKING_FILENAME_STEM_MIN_RATIO"] {
-        if std::env::var(key).is_ok() {
-            return env_f64(key, 0.05);
-        }
-    }
-    0.05
+    env_f64("VERA_RANKING_FILENAME_STEM_MIN_RATIO", 0.05)
 }
 
 fn default_ranking_filename_stem_skip_symbol_queries() -> bool {
     // Default false preserves pre-knob behavior. Env authoritative.
-    // Alias set and precedence match `ranking_filename_stem_skip_symbol_queries_enabled`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES"] {
-        if std::env::var(key).is_ok() {
-            return env_bool(key, false);
-        }
-    }
-    false
+    env_bool("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES", false)
 }
 
 fn default_ranking_definition_boost() -> bool {
@@ -439,14 +425,7 @@ fn default_vector_filter_during_scan() -> bool {
     // (|delta| 0.0000049 <= 0.001), and absolute latency acceptance (p50
     // 6.353 ms <= 7.38, p95 65.034 ms <= 65.88 vs the 072c725 9800X3D
     // baseline 7.879/60.880). Evidence: docs/adr/008-filter-during-scan-default.md.
-    // Alias set and precedence match `vector_filter_during_scan_enabled`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_VECTOR_FILTER_DURING_SCAN"] {
-        if std::env::var(key).is_ok() {
-            return env_bool(key, true);
-        }
-    }
-    true
+    env_bool("VERA_VECTOR_FILTER_DURING_SCAN", true)
 }
 
 impl Default for RetrievalConfig {
@@ -493,26 +472,20 @@ impl RetrievalConfig {
 
     /// Minimum ratio for filename-stem boost, with env-var override.
     /// Default 0.05; env `VERA_RANKING_FILENAME_STEM_MIN_RATIO` authoritative.
-    /// Alias set and precedence identical to `default_ranking_filename_stem_min_ratio`.
     pub fn ranking_filename_stem_min_ratio_effective(&self) -> f64 {
-        for key in ["VERA_RANKING_FILENAME_STEM_MIN_RATIO"] {
-            if std::env::var(key).is_ok() {
-                return env_f64(key, self.ranking_filename_stem_min_ratio);
-            }
-        }
-        self.ranking_filename_stem_min_ratio
+        env_f64(
+            "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
+            self.ranking_filename_stem_min_ratio,
+        )
     }
 
     /// Whether to skip filename-stem boost for symbol queries, with env-var override.
     /// Default false; env `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` authoritative.
-    /// Alias set and precedence identical to `default_ranking_filename_stem_skip_symbol_queries`.
     pub fn ranking_filename_stem_skip_symbol_queries_enabled(&self) -> bool {
-        for key in ["VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES"] {
-            if std::env::var(key).is_ok() {
-                return env_bool(key, self.ranking_filename_stem_skip_symbol_queries);
-            }
-        }
-        self.ranking_filename_stem_skip_symbol_queries
+        env_bool(
+            "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
+            self.ranking_filename_stem_skip_symbol_queries,
+        )
     }
 
     /// Definition-content boost enabled, with env-var override.
@@ -542,14 +515,11 @@ impl RetrievalConfig {
     /// Filter-during-scan optimization enabled, with env-var override.
     /// Default ON since the r5 evidence-backed flip (issue #197);
     /// env `VERA_VECTOR_FILTER_DURING_SCAN` authoritative.
-    /// Alias set and precedence identical to `default_vector_filter_during_scan`.
     pub fn vector_filter_during_scan_enabled(&self) -> bool {
-        for key in ["VERA_VECTOR_FILTER_DURING_SCAN"] {
-            if std::env::var(key).is_ok() {
-                return env_bool(key, self.vector_filter_during_scan);
-            }
-        }
-        self.vector_filter_during_scan
+        env_bool(
+            "VERA_VECTOR_FILTER_DURING_SCAN",
+            self.vector_filter_during_scan,
+        )
     }
 }
 
