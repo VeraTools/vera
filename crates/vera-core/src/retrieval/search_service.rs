@@ -20,12 +20,13 @@ pub use crate::retrieval::exact_matches::augment_multi_query_exact_matches;
 use crate::retrieval::hybrid::{SearchStores, compute_vector_candidates};
 use crate::retrieval::query_classifier::{QueryType, classify_query, params_for_query_type};
 use crate::retrieval::ranking::{RankingStage, is_path_weighted_query};
-use crate::retrieval::{apply_filters, search_bm25_with_stores_and_filters};
+use crate::retrieval::{RerankOutcome, apply_filters, search_bm25_with_stores_and_filters};
 use crate::types::{SearchFilters, SearchResult};
 
 /// Timing data for each stage of the search pipeline.
 #[derive(Debug, Default)]
 pub struct SearchTimings {
+    pub rerank_outcome: RerankOutcome,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -35,9 +36,29 @@ pub struct SearchTimings {
     pub total: Option<Duration>,
 }
 
+impl SearchTimings {
+    /// Aggregate per-search stages, leaving the request's total to its caller.
+    pub fn merge(&mut self, incoming: &Self) {
+        self.rerank_outcome.merge(&incoming.rerank_outcome);
+        for (target, delta) in [
+            (&mut self.embedding, incoming.embedding),
+            (&mut self.bm25, incoming.bm25),
+            (&mut self.vector, incoming.vector),
+            (&mut self.fusion, incoming.fusion),
+            (&mut self.reranking, incoming.reranking),
+            (&mut self.augmentation, incoming.augmentation),
+        ] {
+            if let Some(delta) = delta {
+                *target = Some(target.unwrap_or_default() + delta);
+            }
+        }
+    }
+}
+
 impl From<crate::retrieval::hybrid::HybridTimings> for SearchTimings {
     fn from(t: crate::retrieval::hybrid::HybridTimings) -> Self {
         SearchTimings {
+            rerank_outcome: t.rerank_outcome,
             embedding: t.embedding,
             bm25: t.bm25,
             vector: t.vector,
@@ -72,10 +93,9 @@ pub struct SearchContext {
     stores: Mutex<Vec<(PathBuf, Arc<SearchStores>)>>,
     /// Cross-encoder session, built on first query that actually reranks.
     ///
-    /// `None` inside the cell means "unavailable": either reranking is off in
-    /// config, or construction failed. See `reranker` for why that outcome is
-    /// cached.
-    reranker: OnceCell<Option<DynamicReranker>>,
+    /// Failed construction is cached too, so every affected search can report
+    /// the reason without retrying the build.
+    reranker: OnceCell<Result<Option<DynamicReranker>, String>>,
     #[cfg(test)]
     reranker_builds: std::sync::atomic::AtomicUsize,
 }
@@ -140,9 +160,9 @@ impl SearchContext {
         has_intent: bool,
         query: &str,
         filters: &SearchFilters,
-    ) -> Option<&DynamicReranker> {
+    ) -> Result<Option<&DynamicReranker>, &str> {
         if !reranking_wanted(has_intent, query, filters) {
-            return None;
+            return Ok(None);
         }
         self.reranker(config).await
     }
@@ -168,21 +188,39 @@ impl SearchContext {
     /// into a multi-second stall on every subsequent search, and the failure
     /// causes are static for a process (absent asset, bad EP, unset API key).
     /// The cache is per context, so a new process or a rebuilt context retries.
-    async fn reranker(&self, config: &VeraConfig) -> Option<&DynamicReranker> {
+    async fn reranker(&self, config: &VeraConfig) -> Result<Option<&DynamicReranker>, &str> {
+        let reranker = self
+            .cached_reranker(crate::retrieval::create_dynamic_reranker(
+                config,
+                self.backend,
+            ))
+            .await?;
+        if reranker.is_none() && config.retrieval.reranking_enabled {
+            return Err(
+                "reranking is enabled but no reranker is configured; configure a reranker endpoint or run `vera config set retrieval.reranking_enabled false`",
+            );
+        }
+        Ok(reranker)
+    }
+
+    async fn cached_reranker(
+        &self,
+        build: impl std::future::Future<Output = Result<Option<DynamicReranker>>>,
+    ) -> Result<Option<&DynamicReranker>, &str> {
         self.reranker
             .get_or_init(|| async {
                 #[cfg(test)]
                 self.reranker_builds
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::retrieval::create_dynamic_reranker(config, self.backend)
-                    .await
-                    .unwrap_or_else(|err| {
-                        warn!("Failed to create reranker ({})", err);
-                        None
-                    })
+                build.await.map_err(|err| {
+                    warn!("Failed to create reranker ({})", err);
+                    format!("failed to create reranker: {err}")
+                })
             })
             .await
             .as_ref()
+            .map(Option::as_ref)
+            .map_err(String::as_str)
     }
 
     pub fn embedding_provider(&self) -> Option<&CachedEmbeddingProvider<DynamicProvider>> {
@@ -369,7 +407,7 @@ impl SearchContext {
         let reranker = self
             .reranker_for_query(config, has_intent, query, filters)
             .await;
-        let reranker_enabled = reranker.is_some();
+        let reranker_enabled = matches!(reranker, Ok(Some(_)));
 
         // Classify query to adapt fusion parameters.
         let query_type = classify_query(query);
@@ -386,7 +424,7 @@ impl SearchContext {
         };
 
         let filter_flag = config.retrieval.vector_filter_during_scan_enabled();
-        let (results, hybrid_timings) = if let Some(reranker) = reranker {
+        let (results, hybrid_timings) = if let Ok(Some(reranker)) = reranker {
             crate::retrieval::hybrid::search_hybrid_reranked_with_stores_and_flag(
                 index_dir,
                 provider,
@@ -422,6 +460,13 @@ impl SearchContext {
         };
 
         let mut timings = SearchTimings::from(hybrid_timings);
+        // Like the runtime path, empty or already-small candidate pools do not
+        // need reranking even when construction was unavailable.
+        if results.len() > result_limit
+            && let Err(reason) = reranker
+        {
+            timings.rerank_outcome = RerankOutcome::fallback(reason.to_string());
+        }
 
         let aug_start = Instant::now();
         let indexed_files = stores.indexed_files()?;
@@ -628,6 +673,136 @@ mod tests {
     use crate::types::Language;
     use crate::types::{Chunk, SymbolType};
     use tempfile::tempdir;
+
+    fn run_reranker_unavailability_probe(failed_build: bool) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "retrieval::search_service::tests::reranker_unavailability_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TMPDIR", std::env::temp_dir())
+            .env("EMBEDDING_MODEL_BASE_URL", "http://127.0.0.1:0/v1")
+            .env("EMBEDDING_MODEL_ID", "mock-model")
+            .env("EMBEDDING_MODEL_API_KEY", "test-key")
+            .env("VERA_TEST_FAILED_BUILD", failed_build.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches("Warning: reranker unavailable (").count(),
+            2,
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn construction_failure_warns_on_every_search_and_builds_once() {
+        run_reranker_unavailability_probe(true);
+    }
+
+    #[test]
+    fn enabled_without_reranker_falls_back_and_disabled_does_not() {
+        run_reranker_unavailability_probe(false);
+    }
+
+    #[tokio::test]
+    #[ignore = "driven by the reranker unavailability tests"]
+    async fn reranker_unavailability_probe() {
+        use crate::embedding::test_helpers::MockProvider;
+        let dir = tempdir().unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.path().join(format!("auth_{i}.rs")), format!(
+                "/// Authentication handles user requests.\npub fn authenticate_{i}() -> usize {{ {i} }}\n"
+            )).unwrap();
+        }
+        let mut config = VeraConfig::default();
+        config.embedding.max_retries = 0;
+        config.embedding.timeout_secs = 1;
+        config.retrieval.reranking_enabled = true;
+        crate::indexing::index_repository(dir.path(), &MockProvider::new(8), &config, "mock-model")
+            .await
+            .unwrap();
+        let index_dir = dir.path().join(".vera");
+        let context = SearchContext::new(&config, InferenceBackend::Api).await;
+        let failed_build = std::env::var("VERA_TEST_FAILED_BUILD").unwrap() == "true";
+        if failed_build {
+            assert_eq!(
+                context
+                    .cached_reranker(async { Err(anyhow::anyhow!("mock construction failure")) })
+                    .await
+                    .err(),
+                Some("failed to create reranker: mock construction failure"),
+            );
+        }
+        let query = "how does authentication handle user requests";
+        for _ in 0..2 {
+            let (results, timings) = context
+                .search(
+                    &index_dir,
+                    query,
+                    None,
+                    &config,
+                    &SearchFilters::default(),
+                    1,
+                )
+                .await
+                .unwrap();
+            assert!(!results.is_empty());
+            let RerankOutcome::Fallback(reason) = timings.rerank_outcome else {
+                panic!("expected fallback")
+            };
+            if failed_build {
+                assert_eq!(
+                    reason,
+                    "failed to create reranker: mock construction failure"
+                );
+            } else {
+                assert!(reason.starts_with("reranking is enabled but no reranker is configured"));
+                assert!(reason.contains("vera config set retrieval.reranking_enabled false"));
+            }
+        }
+        assert_eq!(context.reranker_build_count(), 1);
+        for (filters, limit) in [
+            (SearchFilters::default(), 100),
+            (
+                SearchFilters {
+                    path_glob: vec!["missing/**".into()],
+                    ..Default::default()
+                },
+                1,
+            ),
+        ] {
+            let (_, timings) = context
+                .search(&index_dir, query, None, &config, &filters, limit)
+                .await
+                .unwrap();
+            assert_eq!(timings.rerank_outcome, RerankOutcome::NotAttempted);
+        }
+        config.retrieval.reranking_enabled = false;
+        let disabled = SearchContext::new(&config, InferenceBackend::Api).await;
+        let (_, timings) = disabled
+            .search(
+                &index_dir,
+                query,
+                None,
+                &config,
+                &SearchFilters::default(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(timings.rerank_outcome, RerankOutcome::NotAttempted);
+    }
 
     #[test]
     fn test_dimension_mismatch_and_inference() {
@@ -996,6 +1171,7 @@ mod tests {
             context
                 .reranker_for_query(&config, false, "Bm25Index", &filters)
                 .await
+                .unwrap()
                 .is_none()
         );
         assert_eq!(
@@ -1014,6 +1190,7 @@ mod tests {
                     &filters
                 )
                 .await
+                .unwrap()
                 .is_some()
         );
         assert_eq!(context.reranker_build_count(), 1);
@@ -1024,6 +1201,7 @@ mod tests {
             context
                 .reranker_for_query(&config, false, "how does auth work", &filters)
                 .await
+                .unwrap()
                 .is_some()
         );
         assert_eq!(context.reranker_build_count(), 1);

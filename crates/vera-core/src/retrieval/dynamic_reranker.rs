@@ -13,6 +13,26 @@ enum RerankerSource {
     None,
 }
 
+impl RerankerSource {
+    fn kind(self) -> Option<&'static str> {
+        match self {
+            Self::Api => Some("api"),
+            Self::Local(_) => Some("local"),
+            Self::None => None,
+        }
+    }
+}
+
+/// Which reranker this configuration selects, without constructing a model.
+pub fn reranker_kind(config: &VeraConfig, backend: InferenceBackend) -> Option<&'static str> {
+    reranker_source(
+        backend,
+        config.retrieval.reranking_enabled,
+        RerankerConfig::from_env().is_ok(),
+    )
+    .kind()
+}
+
 pub enum DynamicReranker {
     Api(ApiReranker),
     Local(LocalReranker),
@@ -100,6 +120,24 @@ mod tests {
     use super::*;
     use crate::config::{InferenceBackend, OnnxExecutionProvider};
     use crate::test_env::run_env_test;
+
+    #[test]
+    fn reranker_kind_tracks_source_without_loading_models() {
+        for (backend, enabled, api, expected) in [
+            (InferenceBackend::Api, true, true, Some("api")),
+            (InferenceBackend::PotionCode, true, false, Some("local")),
+            (
+                InferenceBackend::OnnxJina(OnnxExecutionProvider::Cpu),
+                true,
+                false,
+                Some("local"),
+            ),
+            (InferenceBackend::Api, true, false, None),
+            (InferenceBackend::PotionCode, false, true, None),
+        ] {
+            assert_eq!(reranker_source(backend, enabled, api).kind(), expected);
+        }
+    }
 
     #[test]
     fn reranker_source_respects_potion_gating_and_api_preference() {

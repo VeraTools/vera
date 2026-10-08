@@ -228,6 +228,7 @@ Output is progressively truncated to fit a total character budget (`retrieval.ma
 |------|--------|
 | *(default)* | Markdown codeblocks with file path, line range, and symbol metadata |
 | `--json` | Compact single-line JSON |
+| `--json --rerank-status` | Search-only object with `results`, `reranked`, `reranker` (`api`, `local`, or null), and `rerank_fallback_reason` (string or null). Without `--rerank-status`, search JSON stays a bare results array. |
 | `--raw` | Verbose human-readable output for `search`, `grep`, and `references`. Works before or after the subcommand. |
 | `--timing` | Timing info to stderr (`search`: per-stage, `grep`: total). Works before or after the subcommand. |
 

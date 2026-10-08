@@ -173,6 +173,18 @@ pub fn output_results(
     compact: bool,
     budget: usize,
 ) {
+    output_search_results(results, json_output, raw, compact, budget, None);
+}
+
+/// Search-only opt-in diagnostics; the results use the unchanged serializer.
+pub fn output_search_results(
+    results: &[vera_core::types::SearchResult],
+    json_output: bool,
+    raw: bool,
+    compact: bool,
+    budget: usize,
+    rerank_status: Option<(&vera_core::retrieval::RerankOutcome, Option<&str>)>,
+) {
     use vera_core::parsing::signatures::extract_signature_for_path;
 
     // When compact mode is on, pre-compute signature-only content for each result.
@@ -197,7 +209,12 @@ pub fn output_results(
         .collect();
 
     if json_output {
-        println!("{}", json_within_budget(results, &contents, budget));
+        let json = json_within_budget(results, &contents, budget);
+        if let Some((outcome, kind)) = rerank_status {
+            println!("{}", json_with_rerank_status(&json, outcome, kind));
+        } else {
+            println!("{json}");
+        }
     } else if raw {
         if results.is_empty() {
             println!("No results found.");
@@ -223,6 +240,24 @@ pub fn output_results(
             println!("```");
         }
     }
+}
+
+fn json_with_rerank_status(
+    results_json: &str,
+    outcome: &vera_core::retrieval::RerankOutcome,
+    kind: Option<&str>,
+) -> String {
+    use vera_core::retrieval::RerankOutcome;
+    let reason = match outcome {
+        RerankOutcome::Fallback(reason) => Some(reason.as_str()),
+        _ => None,
+    };
+    format!(
+        "{{\"results\":{results_json},\"reranked\":{},\"reranker\":{},\"rerank_fallback_reason\":{}}}",
+        matches!(outcome, RerankOutcome::Reranked),
+        serde_json::json!(kind),
+        serde_json::json!(reason),
+    )
 }
 
 fn result_info_line(r: &vera_core::types::SearchResult) -> String {
@@ -443,6 +478,28 @@ pub fn print_human_summary(summary: &vera_core::indexing::IndexSummary, verbose:
 mod tests {
     use super::*;
     use vera_core::types::Language;
+
+    #[test]
+    fn rerank_envelope_preserves_the_exact_results_json() {
+        use vera_core::retrieval::RerankOutcome;
+        let results = two_results();
+        let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+        for budget in [0, 120, 300] {
+            let array = json_within_budget(&results, &contents, budget);
+            let envelope = json_with_rerank_status(
+                &array,
+                &RerankOutcome::Fallback("failure \"quoted\"\n".into()),
+                Some("api"),
+            );
+            assert!(envelope.starts_with(&format!("{{\"results\":{array},")));
+            let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+            assert_eq!(
+                parsed["results"],
+                serde_json::from_str::<serde_json::Value>(&array).unwrap()
+            );
+            assert_eq!(parsed["rerank_fallback_reason"], "failure \"quoted\"\n");
+        }
+    }
 
     /// Two results whose combined content far exceeds a small budget.
     fn two_results() -> Vec<vera_core::types::SearchResult> {

@@ -25,11 +25,12 @@ pub use hybrid::{
     search_hybrid_reranked,
 };
 pub use reranker::{
-    ApiReranker, RerankScore, Reranker, RerankerConfig, RerankerError, rerank_results,
+    ApiReranker, RerankOutcome, RerankScore, Reranker, RerankerConfig, RerankerError,
+    rerank_results,
 };
 
 pub mod dynamic_reranker;
-pub use dynamic_reranker::{DynamicReranker, create_dynamic_reranker};
+pub use dynamic_reranker::{DynamicReranker, create_dynamic_reranker, reranker_kind};
 
 pub mod completion_client;
 pub(crate) mod file_scan;

@@ -808,6 +808,10 @@ async fn search_hybrid_reranked_skips_without_surplus_and_runs_with_surplus() {
         timings.reranking.is_none(),
         "reranker should not be called when the fused pool fits the result limit"
     );
+    assert_eq!(
+        timings.rerank_outcome,
+        super::super::RerankOutcome::NotAttempted
+    );
 
     let (_, timings) = search_hybrid_reranked(
         &index_dir,
@@ -867,10 +871,65 @@ async fn search_hybrid_reranked_degrades_on_reranker_failure() {
         timings.reranking.is_some(),
         "the failing reranker must be attempted when the result limit is below the candidate pool"
     );
+    assert_eq!(
+        timings.rerank_outcome,
+        super::super::RerankOutcome::Fallback(
+            "reranker API connection failed: reranker timeout".into()
+        )
+    );
     assert!(
         !results.is_empty(),
         "should return unreranked results when reranker fails"
     );
+}
+
+#[tokio::test]
+async fn hybrid_rerank_success_cancellation_and_empty_outcomes() {
+    use crate::embedding::test_helpers::MockProvider;
+    use crate::retrieval::RerankOutcome;
+    use crate::retrieval::reranker::test_helpers::MockReranker;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (index_dir, dim) = setup_test_index(tmp.path()).await;
+    let provider = MockProvider::new(dim);
+    for (reranker, filters, expected) in [
+        (
+            MockReranker::new(),
+            SearchFilters::default(),
+            Ok(RerankOutcome::Reranked),
+        ),
+        (
+            MockReranker::failing(RerankerError::Cancelled),
+            SearchFilters::default(),
+            Err(()),
+        ),
+        (
+            MockReranker::failing(RerankerError::Cancelled),
+            SearchFilters {
+                path_glob: vec!["missing/**".into()],
+                ..Default::default()
+            },
+            Ok(RerankOutcome::NotAttempted),
+        ),
+    ] {
+        let result = search_hybrid_reranked(
+            &index_dir, &provider, &reranker, "function", "function", &filters, 10, 1, 60.0, dim,
+            10, 50,
+        )
+        .await;
+        match expected {
+            Ok(outcome) => {
+                let (results, timings) = result.unwrap();
+                if outcome == RerankOutcome::NotAttempted {
+                    assert!(results.is_empty());
+                } else {
+                    assert!(!results.is_empty());
+                }
+                assert_eq!(timings.rerank_outcome, outcome);
+            }
+            Err(()) => assert!(matches!(result, Err(HybridSearchError::Cancelled))),
+        }
+    }
 }
 
 #[tokio::test]

@@ -29,6 +29,32 @@ use crate::types::SearchResult;
 /// Cohere Rerank API `instruction` field).
 pub const RERANKER_INSTRUCTION_FIELD: &str = "instruction";
 
+/// Reranking diagnostics for one search or an aggregated request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RerankOutcome {
+    #[default]
+    NotAttempted,
+    Reranked,
+    Fallback(String),
+}
+
+impl RerankOutcome {
+    /// Keep the first fallback, otherwise any successful rerank.
+    pub fn merge(&mut self, incoming: &Self) {
+        if !matches!(self, Self::Fallback(_))
+            && (matches!(incoming, Self::Fallback(_)) || matches!(incoming, Self::Reranked))
+        {
+            *self = incoming.clone();
+        }
+    }
+
+    pub(crate) fn fallback(reason: String) -> Self {
+        warn!(error = %reason, "reranker unavailable, returning unreranked results");
+        eprintln!("Warning: reranker unavailable ({reason}), returning unreranked results.");
+        Self::Fallback(reason)
+    }
+}
+
 // ── Error types ──────────────────────────────────────────────────────
 
 /// Errors specific to the reranking pipeline.

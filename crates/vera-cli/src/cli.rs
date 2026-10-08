@@ -393,7 +393,8 @@ pub enum Commands {
                       vera search \"error handling\" --lang rust                 # Filter by language\n  \
                       vera search \"routes\" --path \"src/**/*.ts\"                # Filter by path\n  \
                       vera search \"DB queries\" --type function                 # Filter by symbol type\n  \
-                      vera search \"config\" --limit 5 --json --timing            # JSON output + timings")]
+                      vera search \"config\" --limit 5 --json --timing            # JSON output + timings\n  \
+                      vera search \"auth logic\" --json --rerank-status          # Results + reranker status")]
     Search {
         /// One or more search queries (keyword or natural language).
         ///
@@ -408,6 +409,9 @@ pub enum Commands {
         /// Maximum number of results to return (default: 5).
         #[arg(long, short = 'n')]
         limit: Option<usize>,
+        /// Wrap JSON results with reranker status (requires --json).
+        #[arg(long, requires = "json")]
+        rerank_status: bool,
         /// Search symbol type. Note: function and method are treated as aliases.
         #[command(flatten)]
         filters: crate::helpers::SearchFilterArgs,

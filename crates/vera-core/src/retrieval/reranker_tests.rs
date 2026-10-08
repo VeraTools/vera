@@ -2,6 +2,29 @@ use super::*;
 use crate::test_env::run_env_test;
 use crate::types::{Language, SymbolType};
 
+#[test]
+fn rerank_outcome_aggregation_table() {
+    use RerankOutcome::{Fallback, NotAttempted, Reranked};
+    let outcomes = [NotAttempted, Reranked, Fallback("first".into())];
+    let incoming = [NotAttempted, Reranked, Fallback("second".into())];
+    let expected = [
+        [NotAttempted, Reranked, Fallback("second".into())],
+        [Reranked, Reranked, Fallback("second".into())],
+        [
+            Fallback("first".into()),
+            Fallback("first".into()),
+            Fallback("first".into()),
+        ],
+    ];
+    for (row, outcome) in outcomes.iter().enumerate() {
+        for (column, next) in incoming.iter().enumerate() {
+            let mut merged = outcome.clone();
+            merged.merge(next);
+            assert_eq!(merged, expected[row][column]);
+        }
+    }
+}
+
 /// Helper to create a SearchResult with given parameters.
 fn make_result(
     file: &str,
