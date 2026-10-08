@@ -297,6 +297,8 @@ where
     phase_secs.discovery = rounded_secs(discovery_start.elapsed());
 
     if discovery.files.is_empty() {
+        drop(checkpoint);
+        EmbeddingCheckpoint::remove(&idx_dir);
         return Ok(IndexSummary {
             files_parsed: 0,
             chunks_created: 0,
@@ -501,6 +503,8 @@ where
     if parsed_chunk_count == 0 {
         phase_secs.parse = rounded_secs(parse_busy);
         phase_secs.store = rounded_secs(stores.abort().await);
+        drop(checkpoint);
+        EmbeddingCheckpoint::remove(&idx_dir);
         return Ok(IndexSummary {
             files_parsed: discovery.files.len() - parse_errors.len(),
             chunks_created: 0,
@@ -1398,6 +1402,35 @@ mod resume_tests {
             .await
             .unwrap();
         assert!(!resume_dir.exists());
+    }
+
+    async fn assert_empty_build_removes_stale_checkpoint(empty_source: bool) {
+        let root = tempdir().unwrap();
+        if empty_source {
+            // Discovery skips zero-byte files; whitespace reaches parsing.
+            std::fs::write(root.path().join("empty.rs"), " \n").unwrap();
+        }
+        let resume_dir = root.path().join(".vera.resume");
+        std::fs::create_dir(&resume_dir).unwrap();
+        std::fs::write(resume_dir.join("embeddings.db"), "").unwrap();
+        let summary =
+            index_repository(root.path(), &MockProvider::new(4), &config(), "local-model")
+                .await
+                .unwrap();
+        assert_eq!(summary.files_parsed, usize::from(empty_source));
+        assert_eq!(summary.chunks_created, 0);
+        assert_eq!(summary.embeddings_generated, 0);
+        assert!(!resume_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn full_build_without_files_removes_stale_api_checkpoint() {
+        assert_empty_build_removes_stale_checkpoint(false).await;
+    }
+
+    #[tokio::test]
+    async fn full_build_without_chunks_removes_stale_api_checkpoint() {
+        assert_empty_build_removes_stale_checkpoint(true).await;
     }
 
     #[tokio::test]
