@@ -10,8 +10,8 @@
 |---|---:|---|
 | `embedding.batch_size` | 4 local, 128 API | Number of inputs in an embedding request. |
 | `embedding.max_concurrent_requests` | 1 local, 8 API | Maximum concurrent embedding requests. |
-| `embedding.max_in_flight_inputs` | 16 | Bounds active embedding inputs across requests. |
-| `embedding.timeout_secs` | 60 | Embedding request timeout. |
+| `embedding.max_in_flight_inputs` | 256 | Bounds active embedding inputs across requests; with API defaults this sends two 128-input requests at a time. |
+| `embedding.timeout_secs` | 120 | Embedding request timeout. |
 | `embedding.max_retries` | 3 | Retries transient embedding errors. |
 | `embedding.max_stored_dim` | 1024 | Truncates stored vectors above this dimension; `0` stores full vectors. |
 | `embedding.gpu_mem_limit_mb` | 0 | ONNX CUDA memory limit in MB; `0` uses the runtime default. |
@@ -111,7 +111,7 @@
 | Name | Default | What it does |
 |---|---:|---|
 | `VERA_MAX_CHUNK_BYTES` | 24576 | Overrides the byte chunk cap. |
-| `VERA_MAX_IN_FLIGHT_INPUTS` | 0 | Caps the number of embedding inputs held in flight. |
+| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Default for `embedding.max_in_flight_inputs` when the config does not set it. |
 | `VERA_OVERCAP_FIXTURE` | unset | Selects the filter-scan over-cap test fixture. |
 
 ## Runtime/misc

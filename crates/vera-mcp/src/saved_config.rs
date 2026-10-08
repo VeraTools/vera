@@ -7,6 +7,8 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize)]
 struct StoredConfig {
     #[serde(default)]
+    config_format: Option<u32>,
+    #[serde(default)]
     core_config: Option<vera_core::config::VeraConfig>,
 }
 
@@ -33,7 +35,11 @@ fn load_runtime_config_from_path(config_path: &Path) -> vera_core::config::VeraC
         Ok(stored) => stored,
         Err(_) => return vera_core::config::VeraConfig::default(),
     };
-    stored.core_config.unwrap_or_default()
+    let mut config = stored.core_config.unwrap_or_default();
+    config
+        .embedding
+        .upgrade_saved_defaults(stored.config_format);
+    config
 }
 
 #[cfg(test)]
@@ -66,6 +72,29 @@ mod tests {
         assert_eq!(config.indexing.max_chunk_lines, 99);
         assert_eq!(config.indexing.max_chunk_bytes, 1800);
         assert_eq!(config.retrieval.default_limit, 17);
+    }
+
+    #[test]
+    fn load_config_upgrades_pre_v2_pinned_embedding_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = vera_core::config::VeraConfig::default();
+        cfg.embedding.max_in_flight_inputs = 16;
+        cfg.embedding.timeout_secs = 60;
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, serde_json::json!({ "core_config": cfg }).to_string()).unwrap();
+        let current = vera_core::config::EmbeddingConfig::default();
+        let upgraded = load_runtime_config_from_path(&path).embedding;
+        assert_eq!(upgraded.max_in_flight_inputs, current.max_in_flight_inputs);
+        assert_eq!(upgraded.timeout_secs, current.timeout_secs);
+
+        let format = vera_core::config::SAVED_CONFIG_FORMAT;
+        std::fs::write(
+            &path,
+            serde_json::json!({ "config_format": format, "core_config": cfg }).to_string(),
+        )
+        .unwrap();
+        let kept = load_runtime_config_from_path(&path).embedding;
+        assert_eq!((kept.max_in_flight_inputs, kept.timeout_secs), (16, 60));
     }
 
     #[test]

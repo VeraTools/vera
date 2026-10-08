@@ -23,6 +23,15 @@ vera index /path/to/repository
 
 Indexes with missing or zero character-cap metadata continue to work. Running `vera update` cannot convert an incompatible index because unchanged files would retain the old chunk boundaries.
 
+## Embedding Request Defaults
+
+API indexing now sends two 128-input requests at a time (`embedding.max_in_flight_inputs` 256, up from 16) with a 120-second timeout (up from 60). Earlier versions wrote every default into `config.json` on any save, so the first v2 load moves a saved `max_in_flight_inputs` of 16 or `timeout_secs` of 60 to the new defaults and marks the file with `config_format`. To keep the old values, set them again after upgrading:
+
+```bash
+vera config set embedding.max_in_flight_inputs 16
+vera config set embedding.timeout_secs 60
+```
+
 ## Search Scores
 
 Use the returned result ordering. The JSON `score` remains a pipeline-specific ranking value that may be rank-normalized; it is neither a probability nor comparable across queries. [How it works](how-it-works.md) explains the pipeline.
