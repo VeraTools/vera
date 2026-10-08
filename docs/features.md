@@ -8,7 +8,7 @@ Vera (Vector Enhanced Reranking Agent) is a code search tool that combines BM25 
 
 Every query runs two retrieval paths in parallel:
 
-- **BM25 keyword search** via Tantivy. Handles exact identifiers, config keys, and literal strings. Sub-millisecond latency.
+- **BM25 keyword search** via Tantivy. Handles exact identifiers, config keys, and literal strings.
 - **Vector similarity search** against the memory-mapped `.vera/vectors.f32` sidecar using SIMD L2 distance (`VERA_VECTOR_SCAN=vec0` selects sqlite-vec instead). Catches conceptual matches even when the exact words don't appear in the code.
 
 Results from both paths merge through Reciprocal Rank Fusion (RRF), so a result that scores well in both lists rises to the top. Full details: [how-it-works.md](how-it-works.md).
@@ -19,7 +19,7 @@ When a query carries path glob, exact path, or language filters, the flat vector
 
 After fusion, Vera can send the top candidates to a cross-encoder that reads query and candidate together as a single pair. Reranking is controlled by `retrieval.reranking_enabled` and is off by default; the deterministic heuristic stack ranks results when it is disabled.
 
-Vera supports local cross-encoders (Jina) and remote reranking endpoints (Jina, Cohere, or Voyage AI `rerank-2` with `RERANKER_MODEL_BASE_URL=https://api.voyageai.com/v1`). The reranker wire protocol is configured via `retrieval.reranker_protocol` (`generic` with `top_n`/`results` or `voyage` with `top_k`/`data`); Vera auto-detects the variant from the reranker hostname and `retrieval.reranker_protocol` overrides it explicitly.
+Vera supports local cross-encoders (Jina) and remote reranking endpoints (Qwen/OpenRouter, Jina, Cohere, or Voyage AI `rerank-2` with `RERANKER_MODEL_BASE_URL=https://api.voyageai.com/v1`). The reranker wire protocol is configured via `retrieval.reranker_protocol` (`generic` with `top_n`/`results` or `voyage` with `top_k`/`data`); Vera auto-detects the variant from the reranker hostname and `retrieval.reranker_protocol` overrides it explicitly.
 
 The 2026-08-23 dual-set screening found no cross-encoder improvement over the no-reranker baseline. See [models.md](models.md#reranking) for the scores and optional reranking guidance.
 
@@ -80,13 +80,13 @@ Narrow results by language (`--lang rust`), file path glob (`--path "src/**/*.rs
 
 65 languages supported, 61 with tree-sitter grammars compiled into the binary. Functions, classes, structs, traits, interfaces, methods, and `impl` blocks are extracted as discrete chunks. Results map to actual symbol boundaries, not arbitrary line ranges. The remaining 4 formats (TOML, YAML, JSON, and Markdown) use text-based chunking.
 
-Symbol-aware chunking scores 2.3x higher MRR on symbol lookup than sliding-window chunking (0.55 vs 0.24), while using 14% fewer tokens. Full list: [supported-languages.md](supported-languages.md).
+Parser support and text fallbacks: [supported-languages.md](supported-languages.md).
 
 ### Adaptive Chunking
 
 Large symbols (>200 lines) are split at logical boundaries: closing braces, semicolons, blank lines. This preserves readability instead of cutting at arbitrary line counts. Languages without a tree-sitter grammar fall back to sliding-window chunking. Module-level gaps between symbols are kept as chunks when they carry useful retrieval context.
 
-Chunks that exceed the embedding model's input limit are automatically split in a post-processing pass. API mode uses a 24KB byte budget (roughly 6K-7K tokens, safe for any modern embedding model). Local mode uses the model's own tokenizer and max_length. Override with `VERA_MAX_CHUNK_BYTES` if needed.
+A post-processing pass splits chunks at line boundaries using `indexing.max_chunk_bytes` (default 24KB, env `VERA_MAX_CHUNK_BYTES`). This retrieval chunk budget is separate from the model input window: local encoders tokenize and truncate to their configured maximum length. An API provider can reject a chunk within the byte budget when its token limit is smaller; reduce the budget for that model.
 
 ### Incremental Updates
 
@@ -140,7 +140,7 @@ This makes parser regressions and partial indexing visible instead of silent.
 
 ### Call Graph and Reference Finding
 
-`vera references foo` finds all callers of a symbol as search-style snippets. `vera references foo --callees` finds what a symbol calls. Add `--changed`, `--since`, or `--base` when you want exact call relationships limited to a diff. The call graph is built during indexing from tree-sitter AST analysis, so lookups are instant.
+`vera references foo` returns indexed caller matches as search-style snippets. `vera references foo --callees` lists calls recorded inside a definition. Add `--changed`, `--since`, or `--base` to scope the results to a diff. Reference data comes from tree-sitter AST extraction, not whole-program type resolution.
 
 Call sites are stored under the symbol's name, so definitions sharing a name share an answer. Indexing also records the receiver each call was written through, so `vera references get --receiver app` returns only `app.get(...)` calls and leaves dictionary lookups out. The output names the available receivers whenever more than one exists. See [query-guide.md](query-guide.md) for when this matters.
 
@@ -162,7 +162,7 @@ Use this as the default structural workflow. Use `vera references` for exact cal
 
 ### Dead Code Detection
 
-`vera dead-code` finds functions and methods with no callers. Excludes common entry points (`main`, `new`, `default`, etc.) to reduce noise. Useful for codebase cleanup and understanding which code is actually reachable.
+`vera dead-code` reports functions and methods with no indexed caller matches, excluding common entry points such as `main`, `new`, and `default`. Treat these as cleanup candidates: name-based reference extraction can miss dynamic dispatch, reflection, generated calls, and callers outside the index, or match unrelated symbols with the same name. Verify reachability before deleting code.
 
 ### Project Overview
 
@@ -228,7 +228,7 @@ Swap the opt-in Jina ONNX embedding model without changing the rest of that pipe
 
 ### Token-Efficient Output
 
-Default markdown codeblock format cuts ~35-40% tokens vs JSON. On a 20-query benchmark, Vera's chunk-level output averages 67% fewer tokens than loading the full files containing the same results. Most queries see 75-95% reduction.
+Markdown codeblocks return the matching chunks rather than their entire files. `--compact` further reduces output to signatures; `retrieval.max_output_chars` sets a character budget. Savings depend on the query and how the agent follows the results. The [agent benchmark](benchmarks-history.md#agent-level-benchmark) records measured context use and its sample limits.
 
 ### Response Truncation
 
@@ -255,7 +255,7 @@ Output is progressively truncated to fit a total character budget (`retrieval.ma
 | `get_overview` | Architecture overview with conventions detection and optional git-scoped filtering |
 | `regex_search` | Regex search with context lines, scope controls, and git-scoped filtering |
 | `structural_search` | Agent-oriented structural intents for definitions, env reads, routes, SQL, and explicit implementation lookups |
-| `find_references` | Exact callers or callees from the persisted call graph, with optional git-scoped filtering |
+| `find_references` | Indexed caller or callee matches, with optional git-scoped filtering |
 | `explain_path` | Explain why a file is or is not indexed |
 
 Tool descriptions include explicit WHEN TO USE / WHEN NOT TO USE guidance so AI agents route queries to the right tool automatically.
@@ -326,9 +326,9 @@ To allow switching between equivalent embedding model names without triggering a
 
 ### Cross-Platform
 
-Single static binary for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64). Install via npm (`bunx @vera-ai/cli install`), pip (`uvx vera-ai install`), prebuilt binary, Docker, or build from source.
+Native binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64). GNU Linux builds require glibc 2.28 or newer; macOS and Windows use system libraries. Install via npm (`bunx @vera-ai/cli install`), pip (`uvx vera-ai install`), prebuilt binary, Docker, or build from source.
 
-A fully static musl-linked binary (`x86_64-unknown-linux-musl`) is available for environments without standard shared libraries (NixOS, Alpine, minimal containers). It has zero runtime dependencies. The npm and pip wrappers auto-detect musl-based systems and select the correct binary. To override target selection manually, set `VERA_TARGET` (e.g., `VERA_TARGET=x86_64-unknown-linux-musl bunx @vera-ai/cli install`). The chosen target is stored in the Vera data directory (see [Installation](installation.md#install-the-binary)) so upgrades preserve it.
+A fully static musl-linked binary (`x86_64-unknown-linux-musl`) is available for environments without standard shared libraries (NixOS, Alpine, minimal containers). The default Potion Code CPU backend needs no additional inference runtime. Optional ONNX backends still load ONNX Runtime and provider dependencies. The npm and pip wrappers auto-detect musl-based systems and select the correct binary. To override target selection manually, set `VERA_TARGET` (e.g., `VERA_TARGET=x86_64-unknown-linux-musl bunx @vera-ai/cli install`). The chosen target is stored in the Vera data directory (see [Installation](installation.md#install-the-binary)) so upgrades preserve it.
 
 ## Benchmarks
 

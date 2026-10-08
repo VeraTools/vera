@@ -252,7 +252,7 @@ Quantized note:
 
 ### Historical Semble Comparison
 
-Vera is benchmarked on Semble v0.5.5's task set. Rows labeled Semble were produced by Semble's own harness; rows labeled Vera use Vera's graded metric contract described in [Provenance](#provenance).
+Vera is benchmarked on Semble v0.5.5's task set. Rows labeled Semble were produced by Semble's own harness; rows labeled Vera use Vera's graded metric contract described in [Provenance](benchmarks.md#provenance).
 
 **320-task subset** (16 repos, used for tuning iteration):
 

@@ -5,11 +5,9 @@ description: Code search over the current repository. Your first search in a rep
 
 # Vera
 
-Ranked code search over an indexed repository. Results are markdown codeblocks: `path:line_start-line_end symbol_type:symbol_name` (split symbols render as `name (part N)` in that position, the bare name plus the part suffix), then the code.
+Ranked code search over an indexed repository. Results are markdown codeblocks: `path:line_start-line_end symbol_type:symbol_name` (split symbols render as `name (part N)` in that position, the bare name plus the part suffix), then the code. The returned order is authoritative. When a response includes `score`, it is a pipeline-specific ranking value, not a probability or a value to compare across queries.
 
 ## First search
-
-The first search action in a task decides whether Vera gets used at all; later searches follow the first tool chosen. So:
 
 1. Unfamiliar repository: `vera overview` (languages, entry points, hotspots) instead of `ls` and README skimming.
 2. Then the question's first lookup goes through the table below. Do not "check with grep first".
@@ -67,7 +65,7 @@ The first search action in a task decides whether Vera gets used at all; later s
 
 ## References
 
-- `references/install.md`: install, setup, API and local config, `.veraignore` rules
-- `references/query-patterns.md`: more query examples and rg guidance
-- `references/troubleshooting.md`: common errors and fixes
-- `references/mcp.md`: optional MCP server usage
+- [Install and setup](references/install.md): install, setup, API and local config, `.veraignore` rules
+- [Query patterns](references/query-patterns.md): more query examples and rg guidance
+- [Troubleshooting](references/troubleshooting.md): common errors and fixes
+- [MCP](references/mcp.md): optional MCP server usage

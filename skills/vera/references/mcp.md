@@ -35,7 +35,7 @@ The server exposes:
 - `get_overview` (includes detected project conventions and supports git-scoped summaries)
 - `regex_search` (regex, context, scope, generated-file toggle, compact output, and git-scoped file selection)
 - `structural_search` (definitions, env reads, routes, SQL, and explicit implementation lookups; git scopes supported; auto-indexes and starts watcher on first use)
-- `find_references` (exact callers or callees, with git-scoped filtering; auto-indexes and starts watcher on first use)
+- `find_references` (indexed caller or callee matches, with git-scoped filtering; auto-indexes and starts watcher on first use)
 - `explain_path` (explains why a file is or is not indexed)
 
 ## Guidance

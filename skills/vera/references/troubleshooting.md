@@ -47,7 +47,7 @@ Common causes:
 Helpful commands:
 
 ```sh
-vera setup                        # re-download models + ORT (CPU)
+vera setup --onnx-jina-cpu       # configure ONNX CPU and download its assets
 vera setup --onnx-jina-cuda       # re-download with CUDA ORT
 vera doctor                       # basic health check
 vera doctor --probe               # deeper ONNX session check

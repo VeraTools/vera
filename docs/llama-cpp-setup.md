@@ -27,7 +27,7 @@ curl -s http://localhost:8059/v1/embeddings \
   -d '{"input": "test", "model": "coderankembed-q8_0.gguf"}' | head -c 200
 ```
 
-## 2. Start the Reranker Server (Optional, Improves Precision)
+## 2. Start the Reranker Server (Optional)
 
 ```bash
 llama-server \
@@ -91,7 +91,7 @@ vera setup --api --yes
 
 ```bash
 vera setup
-# Choose "api" backend, then enter the URLs and model IDs above.
+# Choose API mode, then Custom and enter the URLs and model IDs above.
 ```
 
 ## 5. Index and Search

@@ -11,7 +11,7 @@ MCP is the optional integration path: most agents work best with the Vera CLI an
 | `get_overview` | Summarizes languages, directories, entry points, symbol types, complexity hotspots, and project conventions. |
 | `regex_search` | Searches indexed files with a regular expression and surrounding context. |
 | `structural_search` | Runs structural intents for definitions, environment-variable reads, routes, SQL sites, and explicit implementations. |
-| `find_references` | Finds exact callers or callees through Vera's persisted call graph. |
+| `find_references` | Finds indexed caller or callee matches in Vera's persisted reference data. |
 | `explain_path` | Explains why a path is or is not indexed, including ignore, binary, size, and default-exclusion decisions. |
 
 `search_code`, `structural_search`, and `find_references` auto-index and start a file watcher on first use when the project has no index. Search, references, and overview also accept changed-file git scopes.

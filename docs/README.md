@@ -7,6 +7,7 @@ Reference pages for installing, configuring, integrating, and understanding Vera
 - [Installation](installation.md): install Vera and choose a backend.
 - [Query guide](query-guide.md): write effective semantic, regex, and structural queries.
 - [What's New](whats-new.md): user-visible release notes.
+- [V2 migration](migration-v2.md): retired experiment controls, index compatibility, and setup changes.
 
 ## Integrate
 

@@ -19,20 +19,20 @@ The installer downloads the `vera` binary for your platform, writes a shim to a 
 <summary>Other install methods</summary>
 
 **Prebuilt binaries:**
-Download from [GitHub Releases](https://github.com/VeraTools/Vera/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), or Windows (x86_64). For Alpine, NixOS, or minimal containers without glibc, use the `x86_64-unknown-linux-musl` archive (fully static, zero runtime dependencies). The npm/pip wrappers auto-detect musl systems; to force a specific target, set `VERA_TARGET=x86_64-unknown-linux-musl` before running the install command.
+Download from [GitHub Releases](https://github.com/VeraTools/Vera/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), or Windows (x86_64). For Alpine, NixOS, or minimal containers without glibc, use the `x86_64-unknown-linux-musl` archive (static binary for the default CPU backend). GNU Linux archives require glibc 2.28 or newer; macOS and Windows binaries use system libraries. Optional ONNX backends also need ONNX Runtime and provider dependencies. The npm/pip wrappers select musl when glibc is unavailable; to force a specific target, set `VERA_TARGET=x86_64-unknown-linux-musl` before running the install command.
 
 **Build from source** (Rust 1.88+):
 ```bash
 git clone https://github.com/VeraTools/Vera.git && cd Vera
 bash scripts/bootstrap-vendored-grammars.sh   # downloads the four grammars that are not tracked in git
-cargo build --release
+cargo build --locked --release
 cp target/release/vera ~/.local/bin/
 vera setup
 ```
 
 **Docker** (MCP server):
 ```bash
-docker run --rm -i -v $(pwd):/workspace ghcr.io/veratools/vera:cpu
+docker run --rm -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu
 ```
 CPU, CUDA, ROCm, and OpenVINO images available. See [docker.md](docker.md).
 
@@ -42,64 +42,11 @@ CPU, CUDA, ROCm, and OpenVINO images available. See [docker.md](docker.md).
 
 ## Set Up a Backend
 
-Vera's index and search always run locally. The "backend" only controls where embedding and reranking models run.
+Vera stores indexes and retrieves candidates locally. The "backend" only controls where embedding and reranking models run.
 
-The default embedding model is `minishlab/potion-code-16M-v2`, a static embedding model that runs locally on CPU on any supported machine. Jina ONNX and CodeRankEmbed are opt-in alternatives.
+Run `vera setup` for the full wizard: configure a backend, optionally install agent skills, and optionally index the current project. Potion Code CPU is first and selected by default; API mode is second. Indexing defaults to Yes for local backends and No for API mode. Explicit backend flags run a shorter configuration flow.
 
-### API Mode
-
-Models run on a remote server. No downloads, no GPU required, works on any hardware. You just need an API key from any OpenAI-compatible provider.
-
-```bash
-vera setup --api
-```
-
-Vera will prompt you for your endpoint URL, model ID, and API key. These get saved to Vera's config so you only enter them once. API mode is an alternative to the default local model.
-
-Many providers offer free tiers or generous trial credits. Any OpenAI-compatible embedding endpoint works. Some options:
-
-| Provider | Free tier? | Notes |
-|----------|-----------|-------|
-| [Jina AI](https://jina.ai/) | Yes (1M tokens free) | Remote embedding and reranking endpoints |
-| [OpenAI](https://platform.openai.com/) | Trial credits | `text-embedding-3-small` or `text-embedding-3-large` |
-| [Voyage AI](https://www.voyageai.com/) | Free tier available | Code-optimized models (`voyage-code-3`, `rerank-2`) |
-| [Qwen via OpenRouter](https://openrouter.ai/) | Paid usage | `qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b` via `https://openrouter.ai/api/v1` (preset in `vera setup`) |
-| [Cohere](https://cohere.com/) | Trial key | `embed-english-v3.0` |
-
-For non-interactive setup, set the environment variables directly and add `--yes`:
-
-```bash
-export EMBEDDING_MODEL_BASE_URL=https://api.jina.ai/v1
-export EMBEDDING_MODEL_ID=jina-embeddings-v3
-export EMBEDDING_MODEL_API_KEY=your-key
-
-# Optional: reranker for better precision (Jina or Voyage AI)
-export RERANKER_MODEL_BASE_URL=https://api.jina.ai/v1
-export RERANKER_MODEL_ID=jina-reranker-v2-base-multilingual
-export RERANKER_MODEL_API_KEY=your-key
-
-# Or for Voyage AI:
-# export RERANKER_MODEL_BASE_URL=https://api.voyageai.com/v1
-# export RERANKER_MODEL_ID=rerank-2
-# export RERANKER_MODEL_API_KEY=your-key
-
-# Or for Qwen via OpenRouter (paid usage, generic protocol):
-# export EMBEDDING_MODEL_BASE_URL=https://openrouter.ai/api/v1
-# export EMBEDDING_MODEL_ID=qwen/qwen3-embedding-8b
-# export EMBEDDING_MODEL_API_KEY=your-openrouter-key
-# export RERANKER_MODEL_BASE_URL=https://openrouter.ai/api/v1
-# export RERANKER_MODEL_ID=qwen/qwen3-reranker-8b
-# export RERANKER_MODEL_API_KEY=your-openrouter-key
-
-vera setup --api --yes
-# Optional reranker protocol overrides (without a TTY)
-# vera config set retrieval.reranker_protocol generic
-# vera config set retrieval.reranker_endpoint_path "/rerank"
-```
-
-Vera automatically handles Voyage AI's rerank wire format when `RERANKER_MODEL_BASE_URL` points to `https://api.voyageai.com/v1`. The Qwen preset uses the generic wire format (`top_n`/`results`) via `https://openrouter.ai/api/v1`.
-
-Only model calls leave your machine. Indexing, storage, and search remain local.
+The default embedding model is `minishlab/potion-code-16M-v2`. It runs on CPU and works offline after its assets have downloaded. Jina ONNX and CodeRankEmbed are opt-in alternatives.
 
 ### CPU Local Mode
 
@@ -111,6 +58,18 @@ vera setup --potion-code
 
 Use this when you want the default local model. It also runs on CPU-only machines, and the interactive `vera setup` wizard selects it as the default local backend.
 
+### API Mode
+
+Use an OpenAI-compatible endpoint for embedding and optional reranking calls:
+
+```bash
+vera setup --api
+```
+
+Qwen/OpenRouter is first and recommended in the API selector (paid usage, one shared key). OpenAI, Jina, Voyage, and custom endpoints are also available. Setup saves the endpoints, credentials, and reranker protocol settings together. `vera backend --api` uses the same configuration prompts.
+
+See [Models: API mode](models.md#api-mode) for provider links, non-interactive environment examples, and protocol overrides. Provider pricing and quotas can change; check the provider before indexing a large project.
+
 ### GPU Local Mode
 
 Jina ONNX is an opt-in local backend. Vera downloads the Jina embedding model and local reranker, then uses your GPU provider. No API key is needed, and the setup works offline after the download.
@@ -119,10 +78,10 @@ Jina ONNX is an opt-in local backend. Vera downloads the Jina embedding model an
 
 | You have | Command | What happens |
 |----------|---------|-------------|
-| Not sure | `vera setup` | Interactive wizard auto-detects your hardware |
+| Not sure | `vera setup` | Full wizard, with local CPU selected by default |
 | CPU only | `vera setup --potion-code` | Uses the default `minishlab/potion-code-16M-v2` model |
 | Apple Silicon (M1/M2/M3/M4) | `vera setup --onnx-jina-coreml` | Uses CoreML GPU acceleration |
-| NVIDIA GPU | `vera setup --onnx-jina-cuda` | Uses CUDA. Fastest local option |
+| NVIDIA GPU | `vera setup --onnx-jina-cuda` | Uses CUDA |
 | AMD GPU (Linux) | `vera setup --onnx-jina-rocm` | Uses ROCm |
 | Intel GPU (Linux) | `vera setup --onnx-jina-openvino` | Uses OpenVINO |
 | DirectX 12 GPU (Windows) | `vera setup --onnx-jina-directml` | Uses DirectML |
@@ -145,7 +104,7 @@ vera setup --potion-code --index .
 vera search "authentication logic"
 ```
 
-The interactive `vera setup` wizard also offers to index the current project and defaults to yes. If you skip indexing, an interactive `vera search` offers to create the missing index. JSON and non-interactive searches return the existing missing-index error instead of prompting.
+The bare wizard includes this indexing step; explicit setup flags need `--index .` to include it. If you skip indexing, an interactive `vera search` offers to create the missing index. JSON and non-interactive searches return the existing missing-index error instead of prompting.
 
 See the [query guide](query-guide.md) for tips on writing effective queries.
 
@@ -158,7 +117,9 @@ vera agent install              # interactive: choose scope + agents
 vera agent install --client all # non-interactive: all agents, global
 ```
 
-This is optional but recommended if you use AI coding agents. The interactive flow can also update your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules` file with a short Vera usage snippet.
+The selector preselects installed clients. Press Space to toggle and Enter to continue; an empty selection makes no changes. Installation adds or updates selected clients and leaves unselected installations in place. Shared skill directories are written once. Use `vera agent remove` for removal; its interactive choices group clients that share a directory.
+
+The interactive flow can also update your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules` file with a short Vera usage snippet.
 
 <details>
 <summary>Add the instructions manually</summary>
@@ -199,6 +160,8 @@ npx skills add VeraTools/Vera
 </details>
 
 ## Updating
+
+Upgrading from v1? Read the [v2 migration notes](migration-v2.md) for retired controls and experimental indexes that need rebuilding.
 
 Vera checks for new releases daily and prints a hint when one is available.
 

@@ -4,12 +4,14 @@
 
 ## Backend/API
 
+Backend selection adjusts effective embedding parameters: Potion Code uses a batch ceiling of 1024 and one worker; ONNX CPU uses 4 and one worker; GPU backends choose a ceiling from available memory. Every backend is also capped by `embedding.max_in_flight_inputs`, so Potion Code embeds at most 256 inputs at a time by default. Potion Code stores at most 256 vector dimensions. Saved values shown by `vera config show` can differ from these runtime limits.
+
 ### `vera config` keys
 
 | Name | Default | What it does |
 |---|---:|---|
-| `embedding.batch_size` | 4 local, 128 API | Number of inputs in an embedding request. |
-| `embedding.max_concurrent_requests` | 1 local, 8 API | Maximum concurrent embedding requests. |
+| `embedding.batch_size` | 128 API | Number of inputs in an embedding request. |
+| `embedding.max_concurrent_requests` | 8 API | Maximum concurrent embedding requests. |
 | `embedding.max_in_flight_inputs` | 256 | Bounds active embedding inputs across requests; with API defaults this sends two 128-input requests at a time. |
 | `embedding.timeout_secs` | 120 | Embedding request timeout. |
 | `embedding.max_retries` | 3 | Retries transient embedding errors. |
@@ -24,26 +26,26 @@
 
 | Name | Default | What it does |
 |---|---|---|
-| `VERA_BACKEND` | auto | Selects the configured backend. |
-| `VERA_LOCAL` | unset | Selects local embedding behavior where supported. |
+| `VERA_BACKEND` | saved backend, then API | Selects `potion-code-cpu`, `api`, or `onnx-jina-<provider>`; explicit CLI backend flags take precedence. |
+| `VERA_LOCAL` | unset | Legacy `1` or `true` selects ONNX CPU when no explicit or saved backend applies. |
 | `VERA_HOME` | platform default | Overrides Vera's data directory. |
-| `VERA_USER_HOME` | platform default | Overrides the user home used by the CLI. |
-| `EMBEDDING_MODEL_ID` | backend default | Selects the embedding model. |
-| `EMBEDDING_MODEL_BASE_URL` | provider default | Sets the embedding API base URL. |
-| `EMBEDDING_MODEL_API_KEY` | unset | Credentials for the embedding API. |
+| `EMBEDDING_MODEL_ID` | unset (required for API) | Selects the embedding model. |
+| `EMBEDDING_MODEL_BASE_URL` | unset (required for API) | Sets the embedding API base URL. |
+| `EMBEDDING_MODEL_API_KEY` | unset (required for API) | Credentials for the embedding API. |
 | `EMBEDDING_QUERY_PREFIX` | unset | Prefixes embedding queries. |
 | `EMBEDDING_DOCUMENT_PREFIX` | unset | Prefixes embedded documents. |
 | `VERA_EMBEDDING_QUERY_PREFIX` | unset | Vera-specific query-prefix override. |
+| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Default for `embedding.max_in_flight_inputs` when the config does not set it; values below 1 normalize to 1. |
 | `VERA_EMBEDDING_MODEL_ALIASES` | unset | Defines semicolon-separated, comma-separated embedding alias groups. |
-| `RERANKER_MODEL_ID` | backend default | Selects the reranker model. |
-| `RERANKER_MODEL_BASE_URL` | provider default | Sets the reranker API base URL. |
+| `RERANKER_MODEL_ID` | unset | Selects the reranker model. |
+| `RERANKER_MODEL_BASE_URL` | unset | Sets the reranker API base URL. |
 | `RERANKER_MODEL_API_KEY` | unset | Credentials for the reranker API. |
 | `VERA_COMPLETION_MODEL_ID` | unset | Selects the completion model used by completion features. |
-| `VERA_COMPLETION_BASE_URL` | provider default | Sets the completion API base URL. |
-| `VERA_COMPLETION_API_KEY` | unset | Credentials for the completion API. |
-| `VERA_COMPLETION_MAX_TOKENS` | backend default | Limits completion output tokens. |
-| `VERA_COMPLETION_MAX_ALTERNATIVES` | backend default | Limits completion alternatives. |
-| `VERA_COMPLETION_TIMEOUT_SECS` | backend default | Sets the completion request timeout. |
+| `VERA_COMPLETION_BASE_URL` | unset | Sets the completion API base URL. |
+| `VERA_COMPLETION_API_KEY` | `none` | Credentials for the completion API. |
+| `VERA_COMPLETION_MAX_TOKENS` | 16384 | Limits completion output tokens. |
+| `VERA_COMPLETION_MAX_ALTERNATIVES` | 2 | Limits completion alternatives. |
+| `VERA_COMPLETION_TIMEOUT_SECS` | 120 | Sets the completion request timeout. |
 | `VERA_SERVE_KEY` | unset | Authenticates requests to `vera serve`. |
 
 ## Retrieval/ranking
@@ -65,7 +67,7 @@
 | `retrieval.reranker_max_doc_chars` (`rerank_max_doc_chars`, `max_rerank_doc_chars`) | 4800 | Character budget per reranker document; `0` is unlimited. |
 | `retrieval.reranker_timeout_secs` (`rerank_timeout_secs`, `timeout_secs`) | 30 | Reranker request timeout. |
 | `retrieval.reranker_max_retries` (`rerank_max_retries`) | 2 | Retries transient reranker errors. |
-| `retrieval.reranker_rate_limit_wait_secs` (`rerank_rate_limit_wait_secs`, `rate_limit_wait_secs`) | `null` | Caps 429 wait time; `0` means no cap. |
+| `retrieval.reranker_rate_limit_wait_secs` (`rerank_rate_limit_wait_secs`, `rate_limit_wait_secs`) | `null` | Positive values cap waits for a reported 429 quota reset; `null` or `0` uses short generic retries, then unreranked results. |
 | `retrieval.reranker_return_documents` (`rerank_return_documents`, `return_documents`) | `false` | Controls whether reranker responses include document text. |
 | `retrieval.ranking_filename_stem_boost` | `true` | Boosts files whose names match query keywords. |
 | `retrieval.ranking_filename_stem_min_ratio` | 0.05 | Minimum filename-stem match ratio for that boost. |
@@ -83,7 +85,7 @@
 | `VERA_MAX_RERANK_DOC_CHARS` | 4800 | Sets the reranker document character budget. |
 | `VERA_RERANK_TIMEOUT_SECS` | 30 | Sets the reranker timeout. |
 | `VERA_RERANK_MAX_RETRIES` | 2 | Sets reranker retries. |
-| `VERA_RERANK_RATE_LIMIT_WAIT_SECS` | unset | Caps rate-limit wait time. |
+| `VERA_RERANK_RATE_LIMIT_WAIT_SECS` | unset | Positive seconds enable capped quota-reset waits; unset or `0` keeps short generic retries. |
 | `VERA_RANKING_FILENAME_STEM_BOOST` | `true` | Enables filename-stem boosting. |
 | `VERA_RANKING_FILENAME_STEM_MIN_RATIO` | 0.05 | Sets the filename-stem match ratio. |
 | `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` | `false` | Skips that boost for symbol queries. |
@@ -111,8 +113,6 @@
 | Name | Default | What it does |
 |---|---:|---|
 | `VERA_MAX_CHUNK_BYTES` | 24576 | Overrides the byte chunk cap. |
-| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Default for `embedding.max_in_flight_inputs` when the config does not set it. |
-| `VERA_OVERCAP_FIXTURE` | unset | Selects the filter-scan over-cap test fixture. |
 
 ## Runtime/misc
 
@@ -134,7 +134,6 @@
 | `VERA_LOCAL_EMBEDDING_REPO` | model default | Selects the local model repository. |
 | `VERA_LOCAL_EMBEDDING_REVISION` | model default | Selects the local model revision. |
 | `VERA_LOCAL_EMBEDDING_TOKENIZER_FILE` | model default | Overrides the local tokenizer file. |
-| `VERA_TEST_BOOL_VARIANTS` | unset | Enables boolean-variant test coverage. |
 | `LOCAL_RERANKER_REPO` | model default | Selects the local reranker repository. |
 | `LOCAL_RERANKER_REVISION` | model default | Selects the local reranker revision. |
 | `LOCAL_RERANKER_ONNX_FILE` | model default | Overrides the local reranker ONNX file. |

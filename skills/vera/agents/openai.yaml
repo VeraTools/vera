@@ -1,7 +1,7 @@
 interface:
   display_name: "Vera"
   short_description: "Semantic code search: find where logic lives, what calls a function, how features are implemented"
-  default_prompt: "Use $vera to search the repository for the most relevant code. Output is compact JSON by default."
+  default_prompt: "Use $vera to search the repository for the most relevant code. Output is Markdown codeblocks by default; use --json when structured results are needed."
 
 policy:
   allow_implicit_invocation: true

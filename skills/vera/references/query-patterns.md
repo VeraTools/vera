@@ -30,10 +30,10 @@ For structural queries about call relationships, use `references` or `dead-code`
 ```sh
 vera references parse_config            # who calls parse_config?
 vera references parse_config --callees  # what does parse_config call?
-vera dead-code                          # functions with no callers
+vera dead-code                          # candidates with no indexed caller matches
 ```
 
-These query the call graph built during indexing (direct calls only, no dynamic dispatch).
+These query name-based reference data extracted during indexing. Dynamic dispatch, reflection, generated calls, and external callers can be missed; same-name symbols can be confused. Review dead-code candidates before deletion.
 
 ## When To Use `vera grep` Instead of `rg`
 
@@ -64,7 +64,7 @@ Add one filter at a time:
 2. `--path "src/auth/**"`: restrict to a path glob; repeat it to OR multiple patterns
 3. `--type function`: restrict to symbol type
 4. `--limit 3`: fewer, higher-confidence results
-5. `--scope source`: restrict to a corpus scope (see SKILL.md for scope table)
+5. `--scope source`: restrict to application source; other scopes are `docs`, `runtime`, and `all`
 
 ## Multi-Query Search
 
