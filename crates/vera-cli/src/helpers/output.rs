@@ -9,6 +9,14 @@ use super::runtime::is_cancel_error;
 
 // ── Shared progress rendering (deduplicated for index + update) ─────────
 
+pub fn print_embedding_request_summary(requests: u64, retries: u64, timeouts: u64) {
+    if requests > 0 {
+        println!(
+            "  Embedding API:       {requests} requests, {retries} retries, {timeouts} timeouts"
+        );
+    }
+}
+
 /// Render an embed progress display into the shared spinner/bar widgets.
 ///
 /// This is the deduplicated core of `vera index` and `vera update` progress
@@ -18,19 +26,20 @@ use super::runtime::is_cancel_error;
 /// `UpdateProgressTracker`; the widget handling is identical.
 pub fn render_embed_display(
     display: Option<EmbedDisplay>,
+    message: String,
     embed_spinner: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
     embed_bar: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
     multi: &cliclack::MultiProgress,
 ) {
     match display {
-        Some(EmbedDisplay::Indeterminate { done }) => {
+        Some(EmbedDisplay::Indeterminate { .. }) => {
             let mut guard = embed_spinner.lock().unwrap();
             if guard.is_none() {
                 let w = Arc::new(multi.add(cliclack::spinner()));
-                w.start(format!("Generating embeddings ({} chunks so far)", done));
+                w.start(message);
                 *guard = Some(w);
             } else if let Some(w) = guard.as_ref() {
-                w.set_message(format!("Generating embeddings ({} chunks so far)", done));
+                w.set_message(message);
             }
         }
         Some(EmbedDisplay::Determinate { done, total }) => {
@@ -45,15 +54,28 @@ pub fn render_embed_display(
             let mut guard = embed_bar.lock().unwrap();
             if guard.is_none() {
                 let w = Arc::new(multi.add(cliclack::progress_bar(total as u64)));
-                w.start(format!("Generating embeddings ({}/{})", done, total));
+                w.start(message);
                 w.set_position(done as u64);
                 *guard = Some(w);
             } else if let Some(w) = guard.as_ref() {
                 w.set_position(done as u64);
-                w.set_message(format!("Generating embeddings ({}/{})", done, total));
+                w.set_message(message);
             }
         }
         Some(EmbedDisplay::Done { .. }) | None => {}
+    }
+}
+
+/// Refresh active embedding widgets while the provider awaits a response.
+pub fn refresh_embed_message(
+    message: String,
+    embed_spinner: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
+    embed_bar: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
+) {
+    for widget in [embed_spinner, embed_bar] {
+        if let Some(widget) = widget.lock().unwrap().as_ref() {
+            widget.set_message(message.clone());
+        }
     }
 }
 
@@ -353,6 +375,11 @@ pub fn print_human_summary(summary: &vera_core::indexing::IndexSummary, verbose:
     println!("  Chunks created:      {}", summary.chunks_created);
     println!("  Embeddings generated: {}", summary.embeddings_generated);
     println!("  Elapsed time:        {:.2}s", summary.elapsed_secs);
+    print_embedding_request_summary(
+        summary.embedding_requests,
+        summary.embedding_retries,
+        summary.embedding_timeouts,
+    );
 
     if summary.files_with_tree_sitter_errors > 0 || summary.files_using_tier0_fallback > 0 {
         println!();

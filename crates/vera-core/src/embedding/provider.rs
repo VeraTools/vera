@@ -1460,6 +1460,11 @@ where
                 .collect();
             checkpoint.store(&saved).await;
         }
+        let mut unreported_successes: usize = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(Vec::len)
+            .sum();
         for (mut batch, result) in group.into_iter().zip(results) {
             // Batch errors (real provider failures or Cancelled) win over a
             // pending cancellation so the caller sees the actual failure.
@@ -1474,9 +1479,18 @@ where
                         pending.push_back(batch);
                         continue;
                     }
+                    // These siblings were already completed and checkpointed,
+                    // even when their positions follow the terminal failure.
+                    if !cancel.is_cancelled()
+                        && !matches!(error, EmbeddingError::Cancelled)
+                        && unreported_successes > 0
+                    {
+                        on_progress(done_count + unreported_successes, total);
+                    }
                     return Err(error);
                 }
             };
+            unreported_successes -= batch_results.len();
             if cancel.is_cancelled() {
                 return Err(EmbeddingError::Cancelled);
             }

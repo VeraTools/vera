@@ -11,7 +11,10 @@ pub mod freshness;
 pub mod lock;
 pub mod pipeline;
 pub mod progress;
+mod telemetry;
 pub mod update;
+
+pub use telemetry::PhaseSecs;
 
 pub use freshness::{IndexFreshness, detect_staleness};
 pub use pipeline::{

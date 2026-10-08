@@ -28,7 +28,8 @@ use crate::CancellationToken;
 use crate::config::VeraConfig;
 use crate::discovery;
 use crate::embedding::{
-    EmbeddingError, EmbeddingProvider, embed_chunks_concurrent_with_progress_and_cancellation,
+    EmbeddingError, EmbeddingProvider, EmbeddingRequestStats,
+    embed_chunks_concurrent_with_progress_and_cancellation,
 };
 use crate::parsing;
 use crate::storage::bm25::Bm25Index;
@@ -39,6 +40,7 @@ use crate::types::Language;
 use super::checkpoint::EmbeddingCheckpoint;
 use super::pipeline;
 use super::pipeline::FileError;
+use super::telemetry::{PhaseSecs, rounded_secs};
 
 /// Summary of an incremental update run.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,6 +65,16 @@ pub struct UpdateSummary {
     pub total_chunks: u64,
     /// Number of vectors reused from a previous failed run.
     pub embeddings_reused: usize,
+    /// HTTP embedding attempts sent during this run.
+    pub embedding_requests: u64,
+    /// Immediate retries and requeued resends during this run.
+    pub embedding_retries: u64,
+    /// HTTP embedding attempts that timed out during this run.
+    pub embedding_timeouts: u64,
+    /// Batches that exhausted immediate retries during this run.
+    pub embedding_failed_batches: u64,
+    /// Cumulative busy stage times, rounded to milliseconds.
+    pub phase_secs: PhaseSecs,
     /// Wall-clock elapsed time in seconds.
     pub elapsed_secs: f64,
 }
@@ -299,6 +311,10 @@ where
     F: Fn(UpdateProgress) + Send + Sync,
 {
     let start = Instant::now();
+    let initial_stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot());
+    let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
 
     // ── 1. Validate path ─────────────────────────────────────────
@@ -327,14 +343,17 @@ where
     info!(path = %repo_root.display(), "starting incremental update");
 
     // ── 2. Discover current files on disk ────────────────────────
+    let discovery_start = Instant::now();
     let disc =
         discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
             .context("file discovery failed")?;
+    phase_secs.discovery = rounded_secs(discovery_start.elapsed());
     on_progress(UpdateProgress::DiscoveryDone {
         file_count: disc.files.len(),
     });
 
     // ── 3. Load stored hashes and classify files ─────────────────
+    let classification_start = Instant::now();
     let metadata_path = idx_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
@@ -527,8 +546,10 @@ where
         unchanged,
         deferred: files_deferred,
     });
+    phase_secs.classification = Some(rounded_secs(classification_start.elapsed()));
 
     // ── 4. Prepare modifications and additions ───────────────────
+    let parse_start = Instant::now();
     let files_to_index: Vec<(String, String, String, Option<String>, bool)> = modified
         .iter()
         .cloned()
@@ -610,6 +631,7 @@ where
         .iter()
         .map(|file| file.state.clone())
         .collect();
+    phase_secs.parse = rounded_secs(parse_start.elapsed());
 
     if !files_to_index.is_empty() {
         on_progress(UpdateProgress::ParsingDone {
@@ -646,6 +668,8 @@ where
         let progress_cb = |done: usize, total: usize| {
             on_progress(UpdateProgress::EmbeddingProgress { done, total });
         };
+        progress_cb(0, all_chunks.len());
+        let embed_start = Instant::now();
         let embedding_result = embed_chunks_concurrent_with_progress_and_cancellation(
             provider,
             &all_chunks,
@@ -657,6 +681,7 @@ where
             progress_cb,
         )
         .await;
+        phase_secs.embed = rounded_secs(embed_start.elapsed());
         let embeddings = match embedding_result {
             Ok(embeddings) => embeddings,
             Err(error) => {
@@ -676,6 +701,7 @@ where
     };
     cancellation.check()?;
 
+    let store_start = Instant::now();
     let final_stored_dim = if embeddings.is_empty() {
         stored_dim
     } else {
@@ -804,6 +830,11 @@ where
         EmbeddingCheckpoint::remove(&idx_dir);
     }
     on_progress(UpdateProgress::StorageDone);
+    phase_secs.store = rounded_secs(store_start.elapsed());
+    let stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot())
+        .since(initial_stats);
 
     let summary = UpdateSummary {
         files_modified: processed_modified,
@@ -816,6 +847,11 @@ where
         files_deferred,
         total_chunks,
         embeddings_reused,
+        embedding_requests: stats.requests,
+        embedding_retries: stats.retries,
+        embedding_timeouts: stats.timeouts,
+        embedding_failed_batches: stats.failed_batches,
+        phase_secs,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
 

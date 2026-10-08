@@ -31,6 +31,18 @@ pub struct EmbeddingRequestStats {
     pub failed_batches: u64,
 }
 
+impl EmbeddingRequestStats {
+    /// Counters belonging to this run, excluding earlier work by a reused provider.
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            requests: self.requests.saturating_sub(before.requests),
+            retries: self.retries.saturating_sub(before.retries),
+            timeouts: self.timeouts.saturating_sub(before.timeouts),
+            failed_batches: self.failed_batches.saturating_sub(before.failed_batches),
+        }
+    }
+}
+
 impl EmbeddingStats {
     pub fn snapshot(&self) -> EmbeddingRequestStats {
         EmbeddingRequestStats {

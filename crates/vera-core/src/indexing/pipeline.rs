@@ -6,18 +6,20 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use super::checkpoint::EmbeddingCheckpoint;
+use super::telemetry::{PhaseSecs, rounded_secs};
 use crate::CancellationToken;
 use crate::config::VeraConfig;
 use crate::discovery::{self, DiscoveryResult};
 use crate::embedding::{
-    EmbeddingError, EmbeddingProvider, embed_chunks_concurrent_with_progress_and_cancellation,
+    EmbeddingError, EmbeddingProvider, EmbeddingRequestStats,
+    embed_chunks_concurrent_with_progress_and_cancellation,
 };
 use crate::indexing::update::{content_hash, detect_language_for_path};
 use crate::parsing;
@@ -41,6 +43,16 @@ pub struct IndexSummary {
     pub embeddings_generated: usize,
     /// Number of vectors reused from a previous failed run.
     pub embeddings_reused: usize,
+    /// HTTP embedding attempts sent during this run.
+    pub embedding_requests: u64,
+    /// Immediate retries and requeued resends during this run.
+    pub embedding_retries: u64,
+    /// HTTP embedding attempts that timed out during this run.
+    pub embedding_timeouts: u64,
+    /// Batches that exhausted immediate retries during this run.
+    pub embedding_failed_batches: u64,
+    /// Cumulative busy stage times; overlapping stages are measured independently.
+    pub phase_secs: PhaseSecs,
     /// Number of binary files skipped.
     pub binary_skipped: usize,
     /// Number of files skipped due to size threshold.
@@ -245,6 +257,10 @@ where
     F: Fn(IndexProgress) + Send + Sync,
 {
     let start = Instant::now();
+    let initial_stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot());
+    let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
     let window_chunk_target = window_chunk_target.max(1);
 
@@ -274,9 +290,11 @@ where
     let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
 
     // ── 2. Discover files ────────────────────────────────────────
+    let discovery_start = Instant::now();
     let discovery =
         discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
             .context("file discovery failed")?;
+    phase_secs.discovery = rounded_secs(discovery_start.elapsed());
 
     if discovery.files.is_empty() {
         return Ok(IndexSummary {
@@ -284,6 +302,11 @@ where
             chunks_created: 0,
             embeddings_generated: 0,
             embeddings_reused: 0,
+            embedding_requests: 0,
+            embedding_retries: 0,
+            embedding_timeouts: 0,
+            embedding_failed_batches: 0,
+            phase_secs,
             binary_skipped: discovery.binary_skipped,
             large_skipped: discovery.large_skipped,
             large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -345,6 +368,8 @@ where
     let mut parse_errors = Vec::new();
     let mut file_hashes = Vec::new();
     let mut file_states = Vec::new();
+    let mut parse_busy = Duration::ZERO;
+    let mut embed_busy = Duration::ZERO;
 
     // Parse one window ahead of the embed+store stage. Parsing is pure (it
     // only reads source files), so running window N+1 on a blocking thread
@@ -358,7 +383,8 @@ where
         let config = config.clone();
         let cancellation = cancellation.clone();
         tokio::task::spawn_blocking(move || {
-            parse_window(
+            let parse_start = Instant::now();
+            let window = parse_window(
                 &discovery,
                 start_file_index,
                 window_chunk_target,
@@ -366,7 +392,8 @@ where
                 &repo_root,
                 &config,
                 &cancellation,
-            )
+            )?;
+            Ok::<_, anyhow::Error>((window, parse_start.elapsed()))
         })
     };
 
@@ -374,9 +401,10 @@ where
     let mut parse_ahead = (0 < total_files).then(|| spawn_parse(0));
     while let Some(handle) = parse_ahead.take() {
         cancellation.check()?;
-        let window = handle
+        let (window, parse_duration) = handle
             .await
             .map_err(|error| anyhow::anyhow!("parse task panicked: {error}"))??;
+        parse_busy += parse_duration;
         let next_file_index = window.next_file_index;
         parse_ahead = (next_file_index < total_files).then(|| spawn_parse(next_file_index));
 
@@ -407,6 +435,8 @@ where
                     total: parsed_through_window,
                 });
             };
+            progress_cb(0, window.chunks.len());
+            let embed_start = Instant::now();
             let embedding_result = embed_chunks_concurrent_with_progress_and_cancellation(
                 provider,
                 &window.chunks,
@@ -418,6 +448,7 @@ where
                 progress_cb,
             )
             .await;
+            embed_busy += embed_start.elapsed();
             let mut embeddings = match embedding_result {
                 Ok(embeddings) => embeddings,
                 Err(error) => {
@@ -468,12 +499,18 @@ where
     }
 
     if parsed_chunk_count == 0 {
-        stores.abort().await;
+        phase_secs.parse = rounded_secs(parse_busy);
+        phase_secs.store = rounded_secs(stores.abort().await);
         return Ok(IndexSummary {
             files_parsed: discovery.files.len() - parse_errors.len(),
             chunks_created: 0,
             embeddings_generated: 0,
             embeddings_reused: 0,
+            embedding_requests: 0,
+            embedding_retries: 0,
+            embedding_timeouts: 0,
+            embedding_failed_batches: 0,
+            phase_secs,
             binary_skipped: discovery.binary_skipped,
             large_skipped: discovery.large_skipped,
             large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -493,18 +530,39 @@ where
     cancellation.check()?;
     // The worker commits the BM25 index, applies the empty-vector
     // dimensionality fallback, and certifies the build before replying.
-    stores
+    let store_busy = stores
         .finish(parsed_chunk_count > 0, file_hashes, config.indexing.clone())
         .await?;
+
+    let publication_start = Instant::now();
+    swap_staging_index(&idx_dir, &staging.build_dir, &staging.old_dir)
+        .context("failed to publish staged index")?;
+    staging.committed = true;
+    // A published full build supersedes saved progress from any backend.
+    let embeddings_reused = checkpoint
+        .as_ref()
+        .map_or(0, EmbeddingCheckpoint::reused_count);
+    drop(checkpoint);
+    EmbeddingCheckpoint::remove(&idx_dir);
+    phase_secs.parse = rounded_secs(parse_busy);
+    phase_secs.embed = rounded_secs(embed_busy);
+    phase_secs.store = rounded_secs(store_busy + publication_start.elapsed());
+    let stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot())
+        .since(initial_stats);
 
     let files_parsed = discovery.files.len() - parse_errors.len();
     let summary = IndexSummary {
         files_parsed,
         chunks_created: parsed_chunk_count,
         embeddings_generated: embedded_count,
-        embeddings_reused: checkpoint
-            .as_ref()
-            .map_or(0, EmbeddingCheckpoint::reused_count),
+        embeddings_reused,
+        embedding_requests: stats.requests,
+        embedding_retries: stats.retries,
+        embedding_timeouts: stats.timeouts,
+        embedding_failed_batches: stats.failed_batches,
+        phase_secs,
         binary_skipped: discovery.binary_skipped,
         large_skipped: discovery.large_skipped,
         large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -514,13 +572,6 @@ where
         parse_errors,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
-
-    swap_staging_index(&idx_dir, &staging.build_dir, &staging.old_dir)
-        .context("failed to publish staged index")?;
-    staging.committed = true;
-    // A published full build supersedes saved progress from any backend.
-    drop(checkpoint);
-    EmbeddingCheckpoint::remove(&idx_dir);
 
     info!(index_dir = %idx_dir.display(), "index artifacts written");
     on_progress(IndexProgress::StorageDone);
@@ -625,7 +676,7 @@ enum StoreCommand {
 /// staging guard removes the build directory.
 struct StoreHandle {
     tx: tokio::sync::mpsc::Sender<StoreCommand>,
-    worker: Option<tokio::task::JoinHandle<Result<()>>>,
+    worker: Option<tokio::task::JoinHandle<Result<Duration>>>,
 }
 
 impl StoreHandle {
@@ -657,7 +708,7 @@ impl StoreHandle {
         create_fallback_vector_store: bool,
         file_hashes: Vec<(String, String)>,
         indexing_config: crate::config::IndexingConfig,
-    ) -> Result<()> {
+    ) -> Result<Duration> {
         self.tx
             .send(StoreCommand::Finish {
                 create_fallback_vector_store,
@@ -672,20 +723,21 @@ impl StoreHandle {
     /// Close the channel and wait for the worker to drain and exit. Used on
     /// error paths; the worker's own result is superseded by the error the
     /// caller is already returning.
-    async fn abort(mut self) {
+    async fn abort(mut self) -> Duration {
         drop(self.tx);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.await;
+            return worker.await.ok().and_then(Result::ok).unwrap_or_default();
         }
+        Duration::ZERO
     }
 
-    async fn join(&mut self) -> Result<()> {
+    async fn join(&mut self) -> Result<Duration> {
         if let Some(worker) = self.worker.take() {
-            worker
+            return worker
                 .await
-                .map_err(|error| anyhow::anyhow!("store worker panicked: {error}"))??;
+                .map_err(|error| anyhow::anyhow!("store worker panicked: {error}"))?;
         }
-        Ok(())
+        Ok(Duration::ZERO)
     }
 }
 
@@ -701,7 +753,8 @@ fn store_worker(
     model_name: &str,
     document_prefix: &str,
     mut rx: tokio::sync::mpsc::Receiver<StoreCommand>,
-) -> Result<()> {
+) -> Result<Duration> {
+    let setup_start = Instant::now();
     let metadata_store = MetadataStore::open(&build_dir.join(METADATA_DB))
         .context("failed to open staging metadata store")?;
     metadata_store
@@ -720,8 +773,10 @@ fn store_worker(
         .context("failed to open bulk BM25 writer")?;
     let mut vector_store = None;
     let mut stored_dim = None;
+    let mut busy = setup_start.elapsed();
 
     while let Some(command) = rx.blocking_recv() {
+        let command_start = Instant::now();
         match command {
             StoreCommand::Window(job) => {
                 if job.chunks.is_empty() {
@@ -733,6 +788,7 @@ fn store_worker(
                     metadata_store
                         .insert_parse_artifacts_batch(&job.refs, &job.type_relations)
                         .context("failed to store references and type relations")?;
+                    busy += command_start.elapsed();
                     continue;
                 }
                 metadata_store
@@ -804,11 +860,12 @@ fn store_worker(
                     .context("failed to commit BM25 index")?;
                 publish_index_certification(&metadata_store, &file_hashes, &indexing_config)
                     .context("failed to publish index freshness metadata")?;
-                return Ok(());
+                return Ok(busy + command_start.elapsed());
             }
         }
+        busy += command_start.elapsed();
     }
-    Ok(())
+    Ok(busy)
 }
 
 /// Parse all discovered files in parallel using rayon and collect chunks.
