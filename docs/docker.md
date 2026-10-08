@@ -9,7 +9,11 @@ Vera provides Docker images for running the MCP server (or any Vera command) in 
 | `vera:rocm` | `rocm/dev-ubuntu-24.04:6.4.4` | ~8 GB | AMD GPU acceleration |
 | `vera:openvino` | `ubuntu:24.04` + OpenVINO | ~1 GB | Intel GPU/iGPU acceleration |
 
-The CPU image selects Potion Code. GPU variants select the matching Jina ONNX backend. Mutable `cpu`, `cuda`, `rocm`, and `openvino` tags follow the newest stable release; pin a version such as `2.0.0-cpu` for repeatable deployments. Published version tags are preserved on retries.
+The CPU image selects Potion Code. GPU variants select the matching Jina ONNX backend. Each image sets `VERA_BACKEND`, which wins over a backend saved with `vera setup`; pass `-e VERA_BACKEND=<backend>` to choose another.
+
+Before v2.0.0, every image ran Jina ONNX on the CPU. GPU images keep the same model, now on the GPU. The CPU image switches to Potion Code, so rebuild indexes made with an older CPU image (`vera index /workspace`), or keep Jina with `-e VERA_BACKEND=onnx-jina-cpu`.
+
+Mutable `cpu`, `cuda`, `rocm`, and `openvino` tags follow the newest stable release; pin a version such as `2.0.0-cpu` for repeatable deployments. Published version tags are preserved on retries.
 
 ## Running the MCP server
 

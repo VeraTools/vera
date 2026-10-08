@@ -10,6 +10,23 @@ The setup wizard starts with local CPU, then API mode with Qwen/OpenRouter first
 
 Wrappers verify exact-version release archives and reuse completed caches offline. Interrupted downloads, unsafe archive entries, and checksum failures do not populate the executable cache.
 
+### API indexing reliability
+
+- API indexing sends two 128-input requests at a time with a 120-second timeout (was 16 inputs and 60 seconds). Saved configs that pinned the old defaults are upgraded once; other explicit values stay. On a mock endpoint with slow tails, the old defaults failed 10 of 10 runs and the new ones finished all 10.
+- Retries use jittered exponential backoff and honor `Retry-After` up to 60 seconds. Failed or timed-out batches go to the back of the queue and are resent up to twice; other 4xx and authentication errors fail at once.
+- A slow response no longer holds the other request slots idle until it returns.
+- A failed API `vera index` keeps finished embeddings in `<repo>/.vera.resume/`, and the next run reuses them (`embeddings_reused`). An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
+- `vera index --json` and `vera update --json` report request, retry, timeout, and failed-batch counts plus per-stage busy time. Slow runs print progress to stderr even when it is not a terminal. On failure, stdout stays empty and the error is the last stderr line.
+- Error messages drop endpoint URLs and redact tokens and credentials from provider responses.
+
+### Search and configuration
+
+- `vera search --json --rerank-status` reports whether results were reranked and why not. A reranker that is enabled but missing or broken prints a `reranker unavailable` warning.
+- Saved `embedding.query_prefix` and `embedding.document_prefix` now reach API requests. Saved ignore and exclude settings are no longer reset by absent CLI flags, and every documented config key works with `vera config get` and `set`.
+- Budgeted JSON search output stays within `retrieval.max_output_chars` even when result content needs escaping.
+- Each Docker image sets its own `VERA_BACKEND`, so GPU images now use the GPU. See [Docker](docker.md).
+- `yoke-derive` moves off a yanked release.
+
 ## v1.4.2
 
 Updates rustls to `0.23.45` for the [RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0285.html). Release version stamping preserves the reviewed dependency lockfile.
