@@ -266,7 +266,10 @@ pub struct CorpusManifest {
 }
 
 /// Metadata section of corpus.toml.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Corpus descriptions are retained when loading the published manifest schema"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CorpusMetadata {
     pub version: u32,
@@ -275,7 +278,10 @@ pub struct CorpusMetadata {
 }
 
 /// A single repo entry in corpus.toml.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Repository URL, language and description are manifest contracts for external corpus tooling"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoEntry {
     pub name: String,

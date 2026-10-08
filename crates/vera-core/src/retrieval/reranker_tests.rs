@@ -485,7 +485,7 @@ fn api_reranker_detects_voyage() {
         20,
     )
     .unwrap();
-    assert!(voyage.is_voyage);
+    assert_eq!(voyage.protocol, RerankerProtocol::Voyage);
 
     let other = ApiReranker::new_with_max_rerank_batch(
         RerankerConfig::new(
@@ -496,7 +496,7 @@ fn api_reranker_detects_voyage() {
         20,
     )
     .unwrap();
-    assert!(!other.is_voyage);
+    assert_eq!(other.protocol, RerankerProtocol::Generic);
 }
 
 #[test]
@@ -606,7 +606,10 @@ mod protocol_wire_tests {
         (first_line, body)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The protocol test matrix varies each persisted reranker field independently."
+    )]
     fn make_retrieval_with(
         protocol: Option<RerankerProtocol>,
         endpoint_path: Option<&str>,
@@ -710,9 +713,9 @@ mod protocol_wire_tests {
             make_retrieval_with(None, None, None, None, None, None, None, None, None, None);
         let cfg = RerankerConfig::new(base, "rerank-2".to_string(), "k".to_string());
         let reranker = ApiReranker::from_configs(cfg, &retrieval).unwrap();
-        // Verify the reranker internally chose Voyage protocol (is_voyage true)
+        // Verify the reranker internally chose Voyage protocol
         assert!(
-            reranker.is_voyage,
+            reranker.protocol == RerankerProtocol::Voyage,
             "voyage hostname should auto-detect Voyage"
         );
         // For wire capture we need a mock that actually receives top_k; use explicit Voyage on loopback
@@ -769,7 +772,7 @@ mod protocol_wire_tests {
         );
         let r = ApiReranker::from_configs(cfg, &retrieval).unwrap();
         assert!(
-            !r.is_voyage,
+            r.protocol == RerankerProtocol::Generic,
             "explicit Generic must override Voyage hostname"
         );
         assert_eq!(r.protocol, RerankerProtocol::Generic);
@@ -794,7 +797,7 @@ mod protocol_wire_tests {
         );
         let r2 = ApiReranker::from_configs(cfg2, &retrieval2).unwrap();
         assert!(
-            r2.is_voyage,
+            r2.protocol == RerankerProtocol::Voyage,
             "explicit Voyage must win over generic hostname"
         );
     }

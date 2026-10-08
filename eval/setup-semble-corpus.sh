@@ -18,15 +18,19 @@ if [[ ! -f "$CORPUS_FILE" ]]; then
     exit 1
 fi
 
-CLONE_ROOT=$(python3 -c "
-import tomllib, os
-with open('$CORPUS_FILE', 'rb') as f:
+CLONE_ROOT=$(python3 - "$CORPUS_FILE" "$REPO_ROOT" <<'PY'
+import os
+import sys
+import tomllib
+
+with open(sys.argv[1], 'rb') as f:
     data = tomllib.load(f)
 root = data['corpus']['clone_root']
 if not os.path.isabs(root):
-    root = os.path.join('$REPO_ROOT', root)
+    root = os.path.join(sys.argv[2], root)
 print(root)
-")
+PY
+)
 
 echo "=== Semble Corpus Setup ==="
 echo "Clone root: $CLONE_ROOT"
@@ -34,13 +38,12 @@ echo ""
 
 mkdir -p "$CLONE_ROOT"
 
-TOTAL=0
-SKIPPED=0
-CLONED=0
+python3 - "$CORPUS_FILE" <<'PY' | while IFS= read -r repo_json; do
+import json
+import sys
+import tomllib
 
-python3 -c "
-import tomllib, json
-with open('$CORPUS_FILE', 'rb') as f:
+with open(sys.argv[1], 'rb') as f:
     data = tomllib.load(f)
 for repo in data['repos']:
     name = repo.get('name')
@@ -55,7 +58,7 @@ for repo in data['repos']:
             f"ERROR: repository name must be a single path component: {name!r}"
         )
     print(json.dumps(repo))
-" | while IFS= read -r repo_json; do
+PY
     NAME=$(echo "$repo_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['name'])")
     URL=$(echo "$repo_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")
     COMMIT=$(echo "$repo_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['commit'])")
@@ -96,4 +99,4 @@ done
 echo ""
 echo "=== Semble corpus setup complete ==="
 echo "Repos in $CLONE_ROOT:"
-ls -1 "$CLONE_ROOT" | wc -l
+find "$CLONE_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '.\n' | wc -l

@@ -417,12 +417,16 @@ fn set_process_env(key: &str, value: &str) {
     // body, and nothing else in the test binary touches those variables. Any
     // new test that calls this, `clear_process_env`, or a helper reaching them
     // must take the same lock.
+    // SAFETY: Startup applies configuration before native providers run. CLI
+    // fixtures serialize writes and do not run native inference during mutation.
     unsafe {
         std::env::set_var(key, value);
     }
 }
 
 fn clear_process_env(key: &str) {
+    // SAFETY: This has the same startup and isolated-fixture invariant as
+    // set_process_env; it clears configuration before native provider use.
     unsafe {
         std::env::remove_var(key);
     }

@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY dist/vera /usr/local/bin/vera
 
-ENV VERA_LOCAL=1
+ENV VERA_LOCAL=1 VERA_BACKEND=onnx-jina-cuda
 
 ENTRYPOINT ["vera"]
 CMD ["mcp"]

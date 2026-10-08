@@ -16,28 +16,30 @@ use crate::state;
 /// candidate set tracks a non-default `CARGO_HOME` — a hard-coded
 /// `home.join(".cargo").join("bin")` silently missed a custom cargo home.
 fn shim_candidates(home: &Path, user_bin_dir: Option<&Path>, cargo_bin: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = user_bin_dir {
-        dirs.push(dir.to_path_buf());
-    }
-    #[cfg(windows)]
-    {
-        dirs.push(home.join("AppData").join("Roaming").join("npm"));
-        dirs.push(
-            home.join("AppData")
-                .join("Local")
-                .join("Programs")
-                .join("Vera")
-                .join("bin"),
-        );
-    }
-    #[cfg(not(windows))]
-    {
-        dirs.push(home.join(".local").join("bin"));
-        dirs.push(cargo_bin.to_path_buf());
-        dirs.push(home.join("bin"));
-    }
+    let mut dirs: Vec<PathBuf> = user_bin_dir.map(Path::to_path_buf).into_iter().collect();
+    dirs.extend(platform_shim_dirs(home, cargo_bin));
     dirs
+}
+
+#[cfg(windows)]
+fn platform_shim_dirs(home: &Path, _cargo_bin: &Path) -> [PathBuf; 2] {
+    [
+        home.join("AppData").join("Roaming").join("npm"),
+        home.join("AppData")
+            .join("Local")
+            .join("Programs")
+            .join("Vera")
+            .join("bin"),
+    ]
+}
+
+#[cfg(not(windows))]
+fn platform_shim_dirs(home: &Path, cargo_bin: &Path) -> [PathBuf; 3] {
+    [
+        home.join(".local").join("bin"),
+        cargo_bin.to_path_buf(),
+        home.join("bin"),
+    ]
 }
 
 /// File names Vera may occupy in the candidate directories: the script shim
@@ -438,18 +440,17 @@ fn absolutize(cwd: &Path, dir: PathBuf) -> PathBuf {
 
 /// Executability where the platform tracks it. Windows has no file mode bit;
 /// membership among the exact entry names above is what restricts candidates.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .map(|meta| meta.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
 }
 
 fn configured_user_bin_dir() -> Option<PathBuf> {

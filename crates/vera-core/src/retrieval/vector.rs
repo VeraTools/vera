@@ -63,7 +63,7 @@ pub async fn search_vector_with_stores(
 ///
 /// The embedding call is nested inside the vector search, so a caller that
 /// reports per-stage timings cannot otherwise separate model cost from storage
-/// cost. The returned duration covers only [`generate_query_embedding`]; it is
+/// cost. The returned duration covers only query embedding generation; it is
 /// [`Duration::ZERO`] when `limit` is 0 and no embedding is generated.
 pub async fn search_vector_with_stores_timed(
     vector_store: &VectorStore,
@@ -291,37 +291,6 @@ pub(crate) async fn search_vector_with_cached_stores_filtered_timed(
     let results = search_vector_from_embedding_filtered(
         &vector_store,
         &metadata_store,
-        query,
-        limit,
-        &query_embedding,
-        map,
-        query_elig,
-    )?;
-    Ok((results, embed_elapsed))
-}
-
-#[allow(dead_code)]
-pub(crate) async fn search_vector_with_stores_filtered_timed(
-    vector_store: &VectorStore,
-    metadata_store: &MetadataStore,
-    provider: &impl EmbeddingProvider,
-    query: &str,
-    limit: usize,
-    map: &crate::storage::eligibility::EligibilityMap,
-    query_elig: &crate::storage::eligibility::QueryEligibility,
-) -> Result<(Vec<SearchResult>, Duration), VectorSearchError> {
-    if limit == 0 || query_elig.is_empty() {
-        #[cfg(test)]
-        metadata_store.hydration_count.set(0);
-        return Ok((Vec::new(), Duration::ZERO));
-    }
-    let stored_dim = vector_store.dim();
-    let embed_start = Instant::now();
-    let query_embedding = generate_query_embedding(provider, query, stored_dim).await?;
-    let embed_elapsed = embed_start.elapsed();
-    let results = search_vector_from_embedding_filtered(
-        vector_store,
-        metadata_store,
         query,
         limit,
         &query_embedding,
@@ -717,9 +686,7 @@ mod tests {
     // ── search_vector_with_stores tests ──────────────────────────────
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_returns_results_for_indexed_content() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -733,9 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn results_sorted_by_score_descending() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -765,9 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn results_include_full_metadata() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -789,9 +752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_respects_limit() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -805,9 +766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_zero_limit_skips_embedding() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let vector_store = VectorStore::open_in_memory(dim).unwrap();
         let metadata_store = MetadataStore::open_in_memory().unwrap();
@@ -824,9 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn scores_are_positive_and_bounded() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -848,9 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_with_embedding_error_returns_error() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::failing(EmbeddingError::ConnectionError {
@@ -871,9 +826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_returns_results_from_multiple_languages() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
         let provider = MockProvider::new(dim);
@@ -897,9 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn search_with_truncation() {
-        let _guard = crate::test_serial::counter_guard();
         // Provider returns 16-dim vectors, but store uses 8-dim.
         let dim = 8;
         let (vector_store, metadata_store) = setup_test_stores(dim).await;
@@ -918,9 +869,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn empty_vector_store_returns_empty_results() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let vector_store = VectorStore::open_in_memory(dim).unwrap();
         let metadata_store = MetadataStore::open_in_memory().unwrap();
@@ -935,9 +884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn batch_chunk_fetch_preserves_vector_distance_order() {
-        let _guard = crate::test_serial::counter_guard();
         // Regression test for the N+1 -> batch fetch change: insert chunks
         // in an order different from the requested id order, and assert the
         // search results come back in vector-distance order (the order `vr`
@@ -1054,9 +1001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn result_content_matches_source_chunk() {
-        let _guard = crate::test_serial::counter_guard();
         let dim = 8;
         let chunks = sample_chunks();
         let (vector_store, metadata_store) = setup_test_stores(dim).await;

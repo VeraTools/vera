@@ -71,7 +71,7 @@ for query in "${QUERIES[@]}"; do
 
   # Concatenate full file contents
   full_tmp=$(mktemp)
-  > "$full_tmp"
+  : > "$full_tmp"
   while IFS= read -r fpath; do
     if [ -f "$fpath" ]; then
       cat "$fpath" >> "$full_tmp"

@@ -29,7 +29,10 @@ fn kind_for(intent: StructuralIntent) -> vera_core::retrieval::StructuralSearchK
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Structural search retains the existing CLI filters and output dispatch interface"
+)]
 pub fn run(
     intent: StructuralIntent,
     query: Option<&str>,

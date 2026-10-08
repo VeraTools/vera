@@ -6,10 +6,9 @@
 //! that root, because `Path::join` replaces the base when the right-hand side
 //! is absolute, and `..` components traverse out of it.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::warn;
 
 /// Where an untrusted path resolves relative to a project root.
 #[derive(Debug, PartialEq, Eq)]
@@ -54,39 +53,6 @@ pub(crate) fn resolve_within(canonical_root: &Path, candidate: &Path) -> Contain
     }
 }
 
-/// Resolve a path stored in the index against the canonicalized project root.
-///
-/// Returns `None` for anything that must not be read. An escape is logged:
-/// a stored path that leaves the project root means the index disagrees with
-/// the repository it sits in, and a silent skip would hide that.
-#[allow(dead_code)]
-fn resolve_indexed_path(canonical_root: &Path, relative: &str) -> Option<PathBuf> {
-    let path = Path::new(relative);
-    let shape_ok = !relative.is_empty()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
-
-    let containment = if shape_ok {
-        resolve_within(canonical_root, &canonical_root.join(path))
-    } else {
-        Containment::Escaped
-    };
-
-    match containment {
-        Containment::Inside(path) => Some(path),
-        Containment::Escaped => {
-            warn!(
-                file = %relative,
-                root = %canonical_root.display(),
-                "skipping indexed path that escapes the project root"
-            );
-            None
-        }
-        Containment::Unresolved => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +82,10 @@ mod tests {
     #[test]
     fn relative_path_inside_the_root_resolves() {
         let f = fixture();
-        let resolved = resolve_indexed_path(&f.root, "src/lib.rs").unwrap();
+        let resolved = match resolve_within(&f.root, &f.root.join("src/lib.rs")) {
+            Containment::Inside(path) => path,
+            other => panic!("expected contained path, got {other:?}"),
+        };
         assert_eq!(resolved, f.root.join("src/lib.rs"));
     }
 
@@ -124,24 +93,36 @@ mod tests {
     fn cur_dir_components_in_stored_path_resolve_inside_the_root() {
         let f = fixture();
         for relative in ["./src/lib.rs", "src/./lib.rs"] {
-            let resolved = resolve_indexed_path(&f.root, relative).unwrap();
+            let resolved = match resolve_within(&f.root, &f.root.join(relative)) {
+                Containment::Inside(path) => path,
+                other => panic!("expected contained path, got {other:?}"),
+            };
             assert_eq!(resolved, f.root.join("src/lib.rs"));
         }
     }
 
     #[test]
-    fn absolute_stored_path_is_rejected() {
+    fn absolute_path_outside_the_root_is_rejected() {
         let f = fixture();
         let absolute = f.canary.to_str().unwrap();
         assert!(Path::new(absolute).is_absolute());
-        assert_eq!(resolve_indexed_path(&f.root, absolute), None);
+        assert_eq!(
+            resolve_within(&f.root, Path::new(absolute)),
+            Containment::Escaped
+        );
     }
 
     #[test]
-    fn parent_traversal_stored_path_is_rejected() {
+    fn parent_traversal_out_of_the_root_is_rejected() {
         let f = fixture();
-        assert_eq!(resolve_indexed_path(&f.root, "../canary.txt"), None);
-        assert_eq!(resolve_indexed_path(&f.root, "src/../../canary.txt"), None);
+        assert_eq!(
+            resolve_within(&f.root, &f.root.join("../canary.txt")),
+            Containment::Escaped
+        );
+        assert_eq!(
+            resolve_within(&f.root, &f.root.join("src/../../canary.txt")),
+            Containment::Escaped
+        );
     }
 
     #[test]
@@ -181,6 +162,9 @@ mod tests {
     fn symlink_out_of_the_root_is_rejected_before_it_is_read() {
         let f = fixture();
         std::os::unix::fs::symlink(&f.canary, f.root.join("src/leak.rs")).unwrap();
-        assert_eq!(resolve_indexed_path(&f.root, "src/leak.rs"), None);
+        assert_eq!(
+            resolve_within(&f.root, &f.root.join("src/leak.rs")),
+            Containment::Escaped
+        );
     }
 }

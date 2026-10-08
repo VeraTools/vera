@@ -4268,6 +4268,7 @@ dependencies = [
  "tree-sitter-xml",
  "tree-sitter-zig",
  "tree-sitter-zsh",
+ "windows-sys 0.61.2",
  "zerocopy",
  "zip",
 ]

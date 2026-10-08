@@ -19,19 +19,12 @@ Requires:
 """
 
 from bench_common import (
-    TASKS_DIR,
     binary_version,
     compute_task_metrics,
     git_sha,
-    is_match,
     load_secrets,
     load_tasks,
-    matched_relevances,
-    mrr,
-    ndcg_at_k,
     percentile,
-    precision_at_k,
-    recall_at_k,
 )
 
 import json
@@ -603,7 +596,7 @@ def generate_report(
         add(f"#### {cat_label}")
         add()
         col_labels = [label for _, label in all_cols]
-        add("| Metric     | " + " | ".join(f"{l:>16}" for l in col_labels) + " |")
+        add("| Metric     | " + " | ".join(f"{label:>16}" for label in col_labels) + " |")
         add("|------------|" + "|".join("-" * 18 for _ in col_labels) + "|")
 
         for metric_label, metric_key in [
@@ -1040,21 +1033,20 @@ def main():
     print("=" * 70)
 
     hybrid = vera_results.get("hybrid", {}).get("aggregate", {}).get("retrieval", {})
-    bm25_r = vera_results.get("bm25-only", {}).get("aggregate", {}).get("retrieval", {})
     bm25_perf = vera_results.get("bm25-only", {}).get("aggregate", {}).get("performance", {})
 
-    print(f"\n  Vera Hybrid (full pipeline):")
+    print("\n  Vera Hybrid (full pipeline):")
     print(f"    Recall@1:  {hybrid.get('recall_at_1', 0):.4f}")
     print(f"    Recall@5:  {hybrid.get('recall_at_5', 0):.4f}")
     print(f"    Recall@10: {hybrid.get('recall_at_10', 0):.4f}")
     print(f"    MRR@10:    {hybrid.get('mrr', 0):.4f}")
     print(f"    nDCG@10:   {hybrid.get('ndcg', 0):.4f}")
 
-    print(f"\n  Vera BM25-only:")
+    print("\n  Vera BM25-only:")
     print(f"    p95 latency: {bm25_perf.get('latency_p95_ms', 0):.1f}ms")
 
     # Assertion checks
-    print(f"\n  Performance Targets:")
+    print("\n  Performance Targets:")
     rg_stat = next((s for s in index_stats if s["repo"] == "ripgrep" and s["success"]), None)
     if rg_stat:
         print(f"    Index time (ripgrep 175K LOC): {rg_stat['time_secs']:.1f}s {'✅' if rg_stat['time_secs'] < 120 else '❌'} (<120s)")
@@ -1073,8 +1065,7 @@ def main():
         vera_mrr = vera_intent.get("mrr", 0)
         r5_imp = ((vera_r5 - rg_r5) / rg_r5 * 100) if rg_r5 > 0 else 0
         mrr_imp = ((vera_mrr - rg_mrr) / rg_mrr * 100) if rg_mrr > 0 else 0
-        sem_ok = r5_imp >= 10 or mrr_imp >= 10
-        print(f"\n  Semantic Outperformance (vs ripgrep on intent):")
+        print("\n  Semantic Outperformance (vs ripgrep on intent):")
         print(f"    Recall@5: Vera={vera_r5:.4f} vs rg={rg_r5:.4f} (+{r5_imp:.0f}%) {'✅' if r5_imp >= 10 else '❌'}")
         print(f"    MRR:      Vera={vera_mrr:.4f} vs rg={rg_mrr:.4f} (+{mrr_imp:.0f}%) {'✅' if mrr_imp >= 10 else '❌'}")
 
@@ -1083,7 +1074,7 @@ def main():
         vera_sym = vera_results.get("hybrid", {}).get("per_category", {}).get("symbol_lookup", {}).get("retrieval", {})
         vo_r1 = vo_sym.get("recall_at_1", 0)
         vera_r1 = vera_sym.get("recall_at_1", 0)
-        print(f"\n  Exact Lookup (vs vector-only on symbol_lookup Recall@1):")
+        print("\n  Exact Lookup (vs vector-only on symbol_lookup Recall@1):")
         print(f"    Vera={vera_r1:.4f} vs vector-only={vo_r1:.4f} {'✅' if vera_r1 > vo_r1 else '❌'}")
 
     print(f"\n{'='*70}")

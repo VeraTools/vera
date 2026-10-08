@@ -401,26 +401,12 @@ fn default_ranking_filename_stem_boost() -> bool {
 
 fn default_ranking_filename_stem_min_ratio() -> f64 {
     // Default 0.05 preserves pre-knob behavior. Env authoritative.
-    // Alias set and precedence match `ranking_filename_stem_min_ratio_effective`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_RANKING_FILENAME_STEM_MIN_RATIO"] {
-        if std::env::var(key).is_ok() {
-            return env_f64(key, 0.05);
-        }
-    }
-    0.05
+    env_f64("VERA_RANKING_FILENAME_STEM_MIN_RATIO", 0.05)
 }
 
 fn default_ranking_filename_stem_skip_symbol_queries() -> bool {
     // Default false preserves pre-knob behavior. Env authoritative.
-    // Alias set and precedence match `ranking_filename_stem_skip_symbol_queries_enabled`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES"] {
-        if std::env::var(key).is_ok() {
-            return env_bool(key, false);
-        }
-    }
-    false
+    env_bool("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES", false)
 }
 
 fn default_ranking_definition_boost() -> bool {
@@ -439,14 +425,7 @@ fn default_vector_filter_during_scan() -> bool {
     // (|delta| 0.0000049 <= 0.001), and absolute latency acceptance (p50
     // 6.353 ms <= 7.38, p95 65.034 ms <= 65.88 vs the 072c725 9800X3D
     // baseline 7.879/60.880). Evidence: docs/adr/008-filter-during-scan-default.md.
-    // Alias set and precedence match `vector_filter_during_scan_enabled`
-    // (per alias-discipline convention): first wins, identical order.
-    for key in ["VERA_VECTOR_FILTER_DURING_SCAN"] {
-        if std::env::var(key).is_ok() {
-            return env_bool(key, true);
-        }
-    }
-    true
+    env_bool("VERA_VECTOR_FILTER_DURING_SCAN", true)
 }
 
 impl Default for RetrievalConfig {
@@ -493,26 +472,20 @@ impl RetrievalConfig {
 
     /// Minimum ratio for filename-stem boost, with env-var override.
     /// Default 0.05; env `VERA_RANKING_FILENAME_STEM_MIN_RATIO` authoritative.
-    /// Alias set and precedence identical to `default_ranking_filename_stem_min_ratio`.
     pub fn ranking_filename_stem_min_ratio_effective(&self) -> f64 {
-        for key in ["VERA_RANKING_FILENAME_STEM_MIN_RATIO"] {
-            if std::env::var(key).is_ok() {
-                return env_f64(key, self.ranking_filename_stem_min_ratio);
-            }
-        }
-        self.ranking_filename_stem_min_ratio
+        env_f64(
+            "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
+            self.ranking_filename_stem_min_ratio,
+        )
     }
 
     /// Whether to skip filename-stem boost for symbol queries, with env-var override.
     /// Default false; env `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` authoritative.
-    /// Alias set and precedence identical to `default_ranking_filename_stem_skip_symbol_queries`.
     pub fn ranking_filename_stem_skip_symbol_queries_enabled(&self) -> bool {
-        for key in ["VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES"] {
-            if std::env::var(key).is_ok() {
-                return env_bool(key, self.ranking_filename_stem_skip_symbol_queries);
-            }
-        }
-        self.ranking_filename_stem_skip_symbol_queries
+        env_bool(
+            "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
+            self.ranking_filename_stem_skip_symbol_queries,
+        )
     }
 
     /// Definition-content boost enabled, with env-var override.
@@ -542,14 +515,11 @@ impl RetrievalConfig {
     /// Filter-during-scan optimization enabled, with env-var override.
     /// Default ON since the r5 evidence-backed flip (issue #197);
     /// env `VERA_VECTOR_FILTER_DURING_SCAN` authoritative.
-    /// Alias set and precedence identical to `default_vector_filter_during_scan`.
     pub fn vector_filter_during_scan_enabled(&self) -> bool {
-        for key in ["VERA_VECTOR_FILTER_DURING_SCAN"] {
-            if std::env::var(key).is_ok() {
-                return env_bool(key, self.vector_filter_during_scan);
-            }
-        }
-        self.vector_filter_during_scan
+        env_bool(
+            "VERA_VECTOR_FILTER_DURING_SCAN",
+            self.vector_filter_during_scan,
+        )
     }
 }
 
@@ -1464,19 +1434,20 @@ card0, 1073741824, 4294967296\n";
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn retrieval_config_serialization_round_trips_all_reranker_keys() {
-        let mut cfg = RetrievalConfig::default();
-        cfg.reranker_protocol = Some(RerankerProtocol::Voyage);
-        cfg.reranker_endpoint_path = Some("/v1/reranking".to_string());
-        cfg.reranker_task_instruction = Some("rank by relevance".to_string());
-        cfg.reranker_task_field = Some("instruction".to_string());
-        cfg.reranker_max_doc_chars = 1234;
-        cfg.reranker_timeout_secs = 42;
-        cfg.reranker_max_retries = 5;
-        cfg.reranker_rate_limit_wait_secs = Some(15);
-        cfg.reranker_return_documents = Some(true);
-        cfg.max_rerank_batch = 8;
+        let cfg = RetrievalConfig {
+            reranker_protocol: Some(RerankerProtocol::Voyage),
+            reranker_endpoint_path: Some("/v1/reranking".to_string()),
+            reranker_task_instruction: Some("rank by relevance".to_string()),
+            reranker_task_field: Some("instruction".to_string()),
+            reranker_max_doc_chars: 1234,
+            reranker_timeout_secs: 42,
+            reranker_max_retries: 5,
+            reranker_rate_limit_wait_secs: Some(15),
+            reranker_return_documents: Some(true),
+            max_rerank_batch: 8,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RetrievalConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reranker_protocol, cfg.reranker_protocol);
@@ -1688,38 +1659,41 @@ card0, 1073741824, 4294967296\n";
 
     // ——— Issue #196 signals: toggleable ranking flags ———
 
-    static ENV_BOOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn env_bool_parses_variants() {
-        let _guard = ENV_BOOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let key = "VERA_TEST_BOOL_VARIANTS";
-        let check = |value: &str, default: bool, expected: bool| {
-            unsafe { std::env::set_var(key, value) };
-            let got = env_bool(key, default);
-            unsafe { std::env::remove_var(key) };
-            assert_eq!(
-                got, expected,
-                "env_bool({value:?}, default={default}) expected {expected}"
+        for value in [
+            "1", "0", "true", "TRUE", "false", "FALSE", "yes", "no", "on", "off", "maybe",
+        ] {
+            run_env_test(
+                "config::tests::env_bool_parses_variants_probe",
+                &[("VERA_TEST_BOOL_VARIANTS", Some(value))],
             );
-        };
-        check("1", false, true);
-        check("1", true, true);
-        check("0", true, false);
-        check("true", false, true);
-        check("TRUE", false, true);
-        check("false", true, false);
-        check("FALSE", true, false);
-        check("yes", false, true);
-        check("no", true, false);
-        check("on", false, true);
-        check("off", true, false);
-        check("maybe", true, true);
-        check("maybe", false, false);
-        // unset falls back to default
-        unsafe { std::env::remove_var(key) };
-        assert!(env_bool(key, true));
-        assert!(!env_bool(key, false));
+        }
+        run_env_test(
+            "config::tests::env_bool_parses_variants_probe",
+            &[("VERA_TEST_BOOL_VARIANTS", None)],
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by env_bool_parses_variants"]
+    fn env_bool_parses_variants_probe() {
+        let key = "VERA_TEST_BOOL_VARIANTS";
+        match std::env::var(key).as_deref() {
+            Ok("1" | "true" | "TRUE" | "yes" | "on") => {
+                assert!(env_bool(key, false));
+                assert!(env_bool(key, true));
+            }
+            Ok("0" | "false" | "FALSE" | "no" | "off") => {
+                assert!(!env_bool(key, false));
+                assert!(!env_bool(key, true));
+            }
+            Ok("maybe") | Err(_) => {
+                assert!(env_bool(key, true));
+                assert!(!env_bool(key, false));
+            }
+            Ok(value) => panic!("unexpected boolean test value: {value}"),
+        }
     }
 
     #[test]
@@ -1751,12 +1725,13 @@ card0, 1073741824, 4294967296\n";
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn retrieval_config_new_flags_round_trip() {
-        let mut cfg = RetrievalConfig::default();
-        cfg.ranking_filename_stem_boost = false;
-        cfg.ranking_definition_boost = false;
-        cfg.ranking_recall_pool_expansion = false;
+        let cfg = RetrievalConfig {
+            ranking_filename_stem_boost: false,
+            ranking_definition_boost: false,
+            ranking_recall_pool_expansion: false,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RetrievalConfig = serde_json::from_str(&json).unwrap();
         assert!(!back.ranking_filename_stem_boost);
@@ -1767,8 +1742,10 @@ card0, 1073741824, 4294967296\n";
         assert!(!back.ranking_recall_pool_expansion_enabled());
 
         // true round-trip
-        let mut cfg2 = RetrievalConfig::default();
-        cfg2.ranking_filename_stem_boost = true;
+        let cfg2 = RetrievalConfig {
+            ranking_filename_stem_boost: true,
+            ..Default::default()
+        };
         let json2 = serde_json::to_string(&cfg2).unwrap();
         let back2: RetrievalConfig = serde_json::from_str(&json2).unwrap();
         assert!(back2.ranking_filename_stem_boost);

@@ -639,7 +639,7 @@ pub enum Commands {
                       vera config set retrieval.default_limit 20   # Set a value\n  \
                       vera config --json                           # JSON output")]
     Config {
-        /// Config action: show (default), get <key>, or set <key> <value>.
+        /// Config action: show (default), get KEY, or set KEY VALUE.
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },

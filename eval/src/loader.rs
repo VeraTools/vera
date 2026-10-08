@@ -20,9 +20,14 @@ pub fn load_tasks(tasks_dir: &Path) -> Result<Vec<BenchmarkTask>> {
     let mut tasks = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(tasks_dir)
         .with_context(|| format!("Failed to read tasks directory: {}", tasks_dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| {
+            format!(
+                "Failed to enumerate tasks directory: {}",
+                tasks_dir.display()
+            )
+        })?;
+    entries.retain(|entry| entry.path().extension().is_some_and(|ext| ext == "json"));
 
     // Sort entries by filename for deterministic ordering
     entries.sort_by_key(|e| e.file_name());

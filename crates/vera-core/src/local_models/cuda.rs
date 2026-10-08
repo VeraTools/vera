@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use super::ort::command_exists;
 use super::*;
 
@@ -157,6 +158,7 @@ pub(super) fn cuda_ort_cache_dir_name(detected_cuda_major: Option<u32>) -> &'sta
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn parse_cuda_major_from_runtime_library_entry(value: &str) -> Option<u32> {
     CUDA_RUNTIME_LIBRARY_PREFIXES
         .iter()

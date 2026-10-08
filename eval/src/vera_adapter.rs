@@ -126,7 +126,10 @@ fn normalize(vector: &mut [f32]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Search bridges an existing runtime, model context, query and benchmark reporting identity"
+)]
 fn search_with(
     runtime: &Runtime,
     search_context: &SearchContext,
@@ -773,64 +776,56 @@ mod tests {
         assert_eq!(elapsed2, 0.0);
     }
 
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn reuse_env_alias_reuses() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let prev = std::env::var("VERA_EMBEDDING_MODEL_ALIASES").ok();
-        unsafe {
-            std::env::set_var(
-                "VERA_EMBEDDING_MODEL_ALIASES",
-                "canonical,alias;other,other-alias",
-            );
+        let name = "vera_adapter::tests::reuse_env_alias_reuses";
+        if std::env::var("VERA_EVAL_ENV_PROBE").as_deref() != Ok(name) {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--test-threads=1"])
+                .env("VERA_EVAL_ENV_PROBE", name)
+                .env(
+                    "VERA_EMBEDDING_MODEL_ALIASES",
+                    "canonical,alias;other,other-alias",
+                )
+                .status()
+                .unwrap();
+            assert!(status.success(), "environment alias probe failed");
+            return;
         }
-        let result = std::panic::catch_unwind(|| {
-            let dir = tempfile::tempdir().unwrap();
-            write_repo_file(dir.path(), "lib.rs", "pub fn hello() {}\n");
-            let runtime = test_runtime();
-            let config = VeraConfig::default();
-            let provider = HashEmbeddingProvider;
-            index_once(&runtime, dir.path(), &config, &provider, "canonical");
-            let is_current = index_is_current(&config, dir.path(), &provider, "alias");
-            assert!(is_current, "env alias should allow reuse canonical->alias");
-            let (elapsed, _) = index_with(
-                &runtime,
-                &config,
-                dir.path(),
-                &provider,
-                "alias",
-                "test-label",
-                true,
-            );
-            assert_eq!(elapsed, 0.0);
+        let dir = tempfile::tempdir().unwrap();
+        write_repo_file(dir.path(), "lib.rs", "pub fn hello() {}\n");
+        let runtime = test_runtime();
+        let config = VeraConfig::default();
+        let provider = HashEmbeddingProvider;
+        index_once(&runtime, dir.path(), &config, &provider, "canonical");
+        let is_current = index_is_current(&config, dir.path(), &provider, "alias");
+        assert!(is_current, "env alias should allow reuse canonical->alias");
+        let (elapsed, _) = index_with(
+            &runtime,
+            &config,
+            dir.path(),
+            &provider,
+            "alias",
+            "test-label",
+            true,
+        );
+        assert_eq!(elapsed, 0.0);
 
-            let dir2 = tempfile::tempdir().unwrap();
-            write_repo_file(dir2.path(), "lib.rs", "pub fn hello() {}\n");
-            index_once(&runtime, dir2.path(), &config, &provider, "alias");
-            let is_current2 = index_is_current(&config, dir2.path(), &provider, "canonical");
-            assert!(is_current2, "env alias should match both directions");
-            let (elapsed2, _) = index_with(
-                &runtime,
-                &config,
-                dir2.path(),
-                &provider,
-                "canonical",
-                "test-label",
-                true,
-            );
-            assert_eq!(elapsed2, 0.0);
-        });
-        // Restore
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("VERA_EMBEDDING_MODEL_ALIASES", v),
-                None => std::env::remove_var("VERA_EMBEDDING_MODEL_ALIASES"),
-            }
-        }
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
-        }
+        let dir2 = tempfile::tempdir().unwrap();
+        write_repo_file(dir2.path(), "lib.rs", "pub fn hello() {}\n");
+        index_once(&runtime, dir2.path(), &config, &provider, "alias");
+        let is_current2 = index_is_current(&config, dir2.path(), &provider, "canonical");
+        assert!(is_current2, "env alias should match both directions");
+        let (elapsed2, _) = index_with(
+            &runtime,
+            &config,
+            dir2.path(),
+            &provider,
+            "canonical",
+            "test-label",
+            true,
+        );
+        assert_eq!(elapsed2, 0.0);
     }
 
     #[test]

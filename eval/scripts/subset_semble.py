@@ -93,13 +93,13 @@ def main():
         lines.append(f'url = "{repo["url"]}"')
         lines.append(f'commit = "{repo["commit"]}"')
         lines.append(f'language = "{repo["language"]}"')
-        lines.append(f'description = "semble benchmark repo"')
+        lines.append('description = "semble benchmark repo"')
         if repo.get("benchmark_root"):
             lines.append(f'benchmark_root = "{repo["benchmark_root"]}"')
         lines.append('')
 
     Path("eval/semble-subset-corpus.toml").write_text('\n'.join(lines))
-    print(f"Corpus manifest: eval/semble-subset-corpus.toml", file=sys.stderr)
+    print("Corpus manifest: eval/semble-subset-corpus.toml", file=sys.stderr)
 
 
 if __name__ == "__main__":

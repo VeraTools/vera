@@ -109,6 +109,7 @@ mod tests {
 
 /// Returns the pip package name for EPs that require pip-based installation, or None
 /// for EPs that have pre-built GitHub release archives.
+#[cfg(target_os = "linux")]
 pub(super) fn pip_package_for_ep(ep: OnnxExecutionProvider) -> Option<&'static str> {
     match ep {
         OnnxExecutionProvider::OpenVino => Some("onnxruntime-openvino"),

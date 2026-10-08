@@ -12,7 +12,10 @@ use crate::helpers::{output_results, prepare_indexed_search, should_offer_auto_i
 use crate::state;
 
 /// Run the `vera search <query>` command.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Search retains the existing CLI query, backend, filter and output dispatch interface"
+)]
 pub fn run(
     queries: &[String],
     intent: Option<&str>,

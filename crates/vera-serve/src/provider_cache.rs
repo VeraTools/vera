@@ -5,6 +5,7 @@
 //! concurrent requests to await one build without holding the slot lock.
 
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -75,7 +76,8 @@ impl<T, E> ModelSlot<T, E> {
     ///
     /// A loader that reports the model as unavailable (`Ok(None)`) leaves the
     /// slot empty, so a transient failure is retried by the next request instead
-    /// of being cached for the lifetime of the process.
+    /// of being cached for the lifetime of the process. A panicking cached
+    /// loader also reports unavailable and leaves the slot retryable.
     pub(crate) async fn get_or_load<F, Fut>(&self, load: F) -> Result<Option<Arc<T>>, E>
     where
         T: Send + Sync + 'static,
@@ -94,6 +96,14 @@ impl<T, E> ModelSlot<T, E> {
                 return Ok(Some(Arc::clone(&resident.model)));
             }
 
+            if state
+                .loading
+                .as_ref()
+                .is_some_and(|receiver| receiver.has_changed().is_err())
+            {
+                state.loading = None;
+            }
+
             if let Some(receiver) = state.loading.as_ref() {
                 (receiver.clone(), None)
             } else {
@@ -105,9 +115,26 @@ impl<T, E> ModelSlot<T, E> {
 
         if let Some(sender) = sender {
             let state = Arc::clone(&self.state);
-            let future = load();
+            let future = catch_unwind(AssertUnwindSafe(load));
             tokio::spawn(async move {
-                let result = future.await;
+                // Observe the loader's task failure so every waiter receives a
+                // result and a failed cold load cannot leave a stuck slot.
+                let result = match future {
+                    Ok(future) => match tokio::spawn(future).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::error!(
+                                panicked = error.is_panic(),
+                                "model loader task failed before publishing a result"
+                            );
+                            Ok(None)
+                        }
+                    },
+                    Err(_) => {
+                        tracing::error!("model loader panicked before starting");
+                        Ok(None)
+                    }
+                };
                 let mut state = state.lock().await;
                 if let Ok(Some(model)) = result.as_ref() {
                     state.resident = Some(Resident {
@@ -177,10 +204,10 @@ where
         if let Some(result) = result {
             return result;
         }
-        receiver
-            .changed()
-            .await
-            .expect("in-flight model load ended without a result");
+        if receiver.changed().await.is_err() {
+            tracing::error!("model load channel closed without a result");
+            return Ok(None);
+        }
     }
 }
 
@@ -337,6 +364,88 @@ mod tests {
         assert_eq!(*again.unwrap(), 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(builds.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_loader_leaves_the_slot_retryable() {
+        let slot: ModelSlot<usize> = ModelSlot::new(CacheMode::Forever);
+        let builds = Builds::new();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            slot.get_or_load(|| async { panic!("model loader failed") }),
+        )
+        .await
+        .expect("a failed loader must release waiting requests");
+        assert!(result.unwrap().is_none());
+
+        for _ in 0..2 {
+            let model = slot.get_or_load(|| builds.load()).await.unwrap().unwrap();
+            assert_eq!(*model, 1);
+        }
+        assert_eq!(builds.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_cold_load_releases_all_waiters() {
+        let slot: ModelSlot<usize> = ModelSlot::new(CacheMode::Forever);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let load = || {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                panic!("shared model loader failed");
+            }
+        };
+
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(slot.get_or_load(load), slot.get_or_load(load))
+        })
+        .await
+        .expect("all requests waiting on a failed loader must be released");
+        assert!(first.unwrap().is_none());
+        assert!(second.unwrap().is_none());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_loader_factory_leaves_the_slot_retryable() {
+        let slot: ModelSlot<usize> = ModelSlot::new(CacheMode::Forever);
+        let builds = Builds::new();
+
+        let result = slot
+            .get_or_load(|| -> std::future::Ready<Result<Option<Arc<usize>>, ()>> {
+                panic!("model loader could not be created");
+            })
+            .await;
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            *slot.get_or_load(|| builds.load()).await.unwrap().unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_load_channel_does_not_block_a_later_load() {
+        let slot: ModelSlot<usize> = ModelSlot::new(CacheMode::Forever);
+        let builds = Builds::new();
+        let (sender, receiver) = watch::channel(None);
+        drop(sender);
+
+        assert!(
+            wait_for_load::<usize, ()>(receiver.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        slot.state.lock().await.loading = Some(receiver);
+        let model =
+            tokio::time::timeout(Duration::from_secs(5), slot.get_or_load(|| builds.load()))
+                .await
+                .expect("a closed load channel must not block a retry")
+                .unwrap()
+                .unwrap();
+        assert_eq!(*model, 1);
     }
 
     #[tokio::test]
