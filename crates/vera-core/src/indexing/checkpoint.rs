@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::embedding::EmbeddingProvider;
@@ -30,6 +30,7 @@ pub(crate) struct EmbeddingCheckpoint(Arc<CheckpointState>);
 
 struct CheckpointState {
     connection: Mutex<Connection>,
+    identity: String,
     disabled: AtomicBool,
     reused: AtomicUsize,
 }
@@ -68,6 +69,7 @@ impl EmbeddingCheckpoint {
         transaction.commit()?;
         Ok(Self(Arc::new(CheckpointState {
             connection: Mutex::new(connection),
+            identity: identity.to_owned(),
             disabled: AtomicBool::new(false),
             reused: AtomicUsize::new(0),
         })))
@@ -163,7 +165,17 @@ impl EmbeddingCheckpoint {
 
     fn store_blocking(&self, vectors: &[(EmbeddingKey, Vec<f32>)]) -> Result<(), CheckpointError> {
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A newer run with another model may have reset the checkpoint while
+        // this write was queued; its vectors must not land under that identity.
+        let current: Option<String> = transaction
+            .query_row("SELECT value FROM identity WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if current.as_deref() != Some(self.0.identity.as_str()) {
+            return Ok(());
+        }
         {
             let mut statement = transaction
                 .prepare("INSERT OR IGNORE INTO vectors (key, vector) VALUES (?1, ?2)")?;
@@ -269,6 +281,20 @@ mod tests {
             checkpoint.store(&[(key, &[1.0, 2.0])]).await;
             assert_eq!(checkpoint.saved_count(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn stale_writer_cannot_store_under_a_newer_identity() {
+        let root = tempdir().unwrap();
+        let idx_dir = root.path().join(".vera");
+        let key = EmbeddingCheckpoint::key("text");
+        let stale = EmbeddingCheckpoint::open(&idx_dir, "old-model\nprefix").unwrap();
+        let current = EmbeddingCheckpoint::open(&idx_dir, "new-model\nprefix").unwrap();
+
+        stale.store(&[(key, &[1.0, 2.0])]).await;
+
+        assert_eq!(current.lookup(&[key]), vec![None]);
+        assert_eq!(current.saved_count(), 0);
     }
 
     #[tokio::test]
