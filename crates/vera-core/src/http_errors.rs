@@ -4,6 +4,9 @@
 //! response bodies can echo credentials, so neither reaches user-facing text.
 
 use std::error::Error as _;
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 const MAX_BODY_CHARS: usize = 500;
 
@@ -38,19 +41,28 @@ pub(crate) fn sanitize_error_body(body: &str) -> String {
 }
 
 fn redact_secrets(text: &str) -> String {
-    let mut redacted = Vec::new();
-    let mut after_bearer = false;
-    for word in text.split(' ') {
-        redacted.push(if after_bearer && !word.is_empty() {
-            "[redacted]"
-        } else if word.contains("://") {
-            "[url]"
-        } else {
-            word
-        });
-        after_bearer = word.eq_ignore_ascii_case("bearer");
+    static PATTERNS: OnceLock<[(Regex, &str); 3]> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        let pattern = |re: &str| Regex::new(re).expect("valid redaction pattern");
+        [
+            (pattern(r#"(?i)[a-z][a-z0-9+.-]*://[^\s"'<>()]+"#), "[url]"),
+            (
+                pattern(r#"(?i)\b(bearer|basic)\s+[^\s"',;}\]]+"#),
+                "$1 [redacted]",
+            ),
+            (
+                pattern(
+                    r#"(?i)\b((?:api[_-]?key|access[_-]?token|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s"',;}&\]]+"#,
+                ),
+                "${1}[redacted]",
+            ),
+        ]
+    });
+    let mut redacted = text.to_string();
+    for (pattern, replacement) in patterns {
+        redacted = pattern.replace_all(&redacted, *replacement).into_owned();
     }
-    redacted.join(" ")
+    redacted
 }
 
 #[cfg(test)]
@@ -62,7 +74,19 @@ mod tests {
         let body = "bad key\tBearer sk-secret for (https://host.internal/v1?key=abc) retry";
         assert_eq!(
             sanitize_error_body(body),
-            "bad key Bearer [redacted] for [url] retry"
+            "bad key Bearer [redacted] for ([url]) retry"
+        );
+        assert_eq!(
+            sanitize_error_body(r#"{"error":"Bearer sk-secret","api_key":"sk-other"}"#),
+            r#"{"error":"Bearer [redacted]","api_key":"[redacted]"}"#
+        );
+        assert_eq!(
+            sanitize_error_body("bearer   sk-secret token=abc&x=1"),
+            "bearer [redacted] token=[redacted]&x=1"
+        );
+        assert_eq!(
+            sanitize_error_body("maximum input length is 8192 tokens; max_tokens=8192"),
+            "maximum input length is 8192 tokens; max_tokens=8192"
         );
         assert_eq!(sanitize_error_body(" \n "), "no details available");
     }
