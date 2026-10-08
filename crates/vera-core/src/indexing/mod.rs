@@ -6,6 +6,7 @@
 //! - Building vector indexes via sqlite-vec
 //! - Incremental update logic (detect changed files, re-index only those)
 
+pub(crate) mod checkpoint;
 pub mod freshness;
 pub mod lock;
 pub mod pipeline;

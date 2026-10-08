@@ -30,9 +30,72 @@ pub use model2vec_provider::Model2VecProvider;
 pub(crate) mod test_helpers {
     pub use super::provider::test_helpers::MockProvider;
 
+    use super::EmbeddingError;
     use super::provider::EmbeddingProvider;
     use crate::storage::vector::VectorStore;
     use crate::types::Chunk;
+    use std::sync::Mutex;
+
+    /// Records requests and fails one chosen batch, without retryable API errors.
+    pub(crate) struct CheckpointProvider {
+        requests: Mutex<Vec<Vec<String>>>,
+        fail_on_call: Option<usize>,
+        pub prefix: &'static str,
+    }
+
+    impl CheckpointProvider {
+        pub(crate) fn new(fail_on_call: Option<usize>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                fail_on_call,
+                prefix: "passage: ",
+            }
+        }
+
+        pub(crate) fn inputs(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .cloned()
+                .collect()
+        }
+
+        pub(crate) fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    impl EmbeddingProvider for CheckpointProvider {
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            let call = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(texts.to_vec());
+                requests.len()
+            };
+            if self.fail_on_call == Some(call) {
+                return Err(EmbeddingError::ApiError {
+                    status: 400,
+                    message: "checkpoint test failure".to_string(),
+                });
+            }
+            MockProvider::new(4).embed_batch(texts).await
+        }
+
+        fn expected_dim(&self) -> Option<usize> {
+            Some(4)
+        }
+        fn checkpoints_embeddings(&self) -> bool {
+            true
+        }
+        fn prepare_document_text(&self, text: &str) -> String {
+            format!("{}{text}", self.prefix)
+        }
+        fn document_prefix_identity(&self) -> String {
+            self.prefix.trim().to_string()
+        }
+    }
 
     /// Embed chunks with the provider and insert the vectors into the store.
     pub(crate) async fn embed_and_insert_vectors(

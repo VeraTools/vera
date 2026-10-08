@@ -36,6 +36,7 @@ use crate::storage::metadata::{FileIndexState, FileIndexStatus, MetadataStore};
 use crate::storage::vector::VectorStore;
 use crate::types::Language;
 
+use super::checkpoint::EmbeddingCheckpoint;
 use super::pipeline;
 use super::pipeline::FileError;
 
@@ -60,6 +61,8 @@ pub struct UpdateSummary {
     pub files_deferred: usize,
     /// Total chunks after the update.
     pub total_chunks: u64,
+    /// Number of vectors reused from a previous failed run.
+    pub embeddings_reused: usize,
     /// Wall-clock elapsed time in seconds.
     pub elapsed_secs: f64,
 }
@@ -405,6 +408,8 @@ where
         stored_dim = dim;
     }
 
+    let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
+
     let stored_files: HashSet<String> = metadata_store
         .tracked_files()
         .context("failed to list tracked files")?
@@ -648,6 +653,7 @@ where
             max_concurrent_requests,
             config.indexing.max_chunk_bytes,
             cancellation.as_async_token(),
+            checkpoint.as_ref(),
             progress_cb,
         )
         .await;
@@ -657,7 +663,10 @@ where
                 if matches!(error, EmbeddingError::Cancelled) {
                     cancellation.check()?;
                 }
-                return Err(error).context("embedding generation failed");
+                return Err(error).context(EmbeddingCheckpoint::failure_context(
+                    checkpoint.as_ref(),
+                    "update",
+                ));
             }
         };
         on_progress(UpdateProgress::EmbeddingDone {
@@ -709,6 +718,9 @@ where
         // All parsing, embedding, and read-only cleanup discovery is complete.
         // Writes below publish the prepared update and must run to completion.
         cancellation.check()?;
+        metadata_store
+            .set_index_meta(super::freshness::INDEX_COMPLETE_KEY, "0")
+            .context("failed to mark index update incomplete")?;
         bm25_index
             .delete_by_files(&bm25_deletions)
             .context("failed to delete BM25 entries for changed files")?;
@@ -784,6 +796,13 @@ where
         .context("failed to count chunks")?;
     super::freshness::record_index_snapshot(&metadata_store, &config.indexing)
         .context("failed to update index freshness metadata")?;
+    let embeddings_reused = checkpoint
+        .as_ref()
+        .map_or(0, EmbeddingCheckpoint::reused_count);
+    drop(checkpoint);
+    if provider.checkpoints_embeddings() {
+        EmbeddingCheckpoint::remove(&idx_dir);
+    }
     on_progress(UpdateProgress::StorageDone);
 
     let summary = UpdateSummary {
@@ -796,6 +815,7 @@ where
         parse_errors,
         files_deferred,
         total_chunks,
+        embeddings_reused,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
 
@@ -936,6 +956,152 @@ fn remove_file_from_index(
 #[cfg(test)]
 #[path = "update_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use crate::embedding::test_helpers::CheckpointProvider;
+    use crate::indexing::index_repository;
+    use tempfile::tempdir;
+
+    fn config() -> VeraConfig {
+        let mut config = VeraConfig::default();
+        config.embedding.batch_size = 1;
+        config.embedding.max_concurrent_requests = 1;
+        config
+    }
+
+    #[tokio::test]
+    async fn failed_update_preserves_live_rows_and_resumes_saved_embeddings() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("old.rs"), "pub fn old() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        let old_chunks = metadata.get_chunks_by_file("old.rs").unwrap();
+        let old_hash = metadata.get_file_hash("old.rs").unwrap();
+        for name in ["one", "two", "three"] {
+            std::fs::write(
+                root.path().join(format!("{name}.rs")),
+                format!("pub fn {name}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let failing = CheckpointProvider::new(Some(3));
+        let error = update_repository(root.path(), &failing, &config(), "model")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("2 embeddings saved"));
+        assert!(error.to_string().contains("`vera update`"));
+        assert!(error.downcast_ref::<EmbeddingError>().is_some());
+        assert_eq!(metadata.chunk_count().unwrap(), old_chunks.len() as u64);
+        assert_eq!(
+            metadata.get_chunks_by_file("old.rs").unwrap()[0].content,
+            old_chunks[0].content
+        );
+        assert_eq!(metadata.get_file_hash("old.rs").unwrap(), old_hash);
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert!(root.path().join(".vera.resume/embeddings.db").exists());
+
+        // Rejected updates must not reset another model's saved checkpoint.
+        assert!(
+            update_repository(
+                root.path(),
+                &CheckpointProvider::new(None),
+                &config(),
+                "wrong-model"
+            )
+            .await
+            .is_err()
+        );
+        let mut wrong_prefix = CheckpointProvider::new(None);
+        wrong_prefix.prefix = "different: ";
+        assert!(
+            update_repository(root.path(), &wrong_prefix, &config(), "model")
+                .await
+                .is_err()
+        );
+        let checkpoint = EmbeddingCheckpoint::open(&idx_dir, "model\npassage:").unwrap();
+        assert_eq!(checkpoint.saved_count(), 2);
+        drop(checkpoint);
+
+        let healthy = CheckpointProvider::new(None);
+        let summary = update_repository(root.path(), &healthy, &config(), "model")
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_reused, 2);
+        assert_eq!(healthy.inputs(), vec![failing.inputs()[2].clone()]);
+        assert_eq!(summary.total_chunks, 4);
+        assert!(!root.path().join(".vera.resume").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_live_write_marks_index_incomplete_and_update_repairs_it() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let connection = rusqlite::Connection::open(idx_dir.join("metadata.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_update BEFORE INSERT ON chunks BEGIN SELECT RAISE(FAIL, 'interrupted live write'); END;").unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn after() {}\n").unwrap();
+        let error = update_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("interrupted live write"));
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("0")
+        );
+        assert!(super::super::freshness::ensure_index_complete(&idx_dir).is_err());
+        connection
+            .execute_batch("DROP TRIGGER fail_update")
+            .unwrap();
+        let healthy = CheckpointProvider::new(None);
+        let summary = update_repository(root.path(), &healthy, &config(), "model")
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_reused, 1);
+        assert_eq!(healthy.request_count(), 0);
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        super::super::freshness::ensure_index_complete(&idx_dir).unwrap();
+        assert!(!root.path().join(".vera.resume").exists());
+    }
+}
 
 #[cfg(test)]
 mod regression_tests {

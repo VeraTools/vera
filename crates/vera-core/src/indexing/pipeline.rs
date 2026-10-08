@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
+use super::checkpoint::EmbeddingCheckpoint;
 use crate::CancellationToken;
 use crate::config::VeraConfig;
 use crate::discovery::{self, DiscoveryResult};
@@ -38,6 +39,8 @@ pub struct IndexSummary {
     pub chunks_created: usize,
     /// Number of embedding vectors generated.
     pub embeddings_generated: usize,
+    /// Number of vectors reused from a previous failed run.
+    pub embeddings_reused: usize,
     /// Number of binary files skipped.
     pub binary_skipped: usize,
     /// Number of files skipped due to size threshold.
@@ -87,7 +90,9 @@ pub(crate) const INDEX_DIR_NAME: &str = ".vera";
 
 const INDEX_BUILD_SUFFIX: &str = "build";
 const INDEX_OLD_SUFFIX: &str = "old";
-pub(crate) const INDEX_STAGING_SUFFIXES: [&str; 2] = [INDEX_BUILD_SUFFIX, INDEX_OLD_SUFFIX];
+pub(crate) const INDEX_RESUME_SUFFIX: &str = "resume";
+pub(crate) const INDEX_STAGING_SUFFIXES: [&str; 3] =
+    [INDEX_BUILD_SUFFIX, INDEX_OLD_SUFFIX, INDEX_RESUME_SUFFIX];
 
 /// Subdirectory for BM25 (Tantivy) index files.
 const BM25_SUBDIR: &str = "bm25";
@@ -112,8 +117,8 @@ pub fn index_dir(repo_root: &Path) -> std::path::PathBuf {
 }
 
 /// True when `path` lives inside the live index directory or one of the
-/// staging siblings (`.vera.build`, `.vera.old`) a build swaps in and out.
-/// Watchers and file discovery must treat all three as internal artifacts:
+/// staging/checkpoint siblings (`.vera.build`, `.vera.old`, `.vera.resume`).
+/// Watchers and file discovery must treat these as internal artifacts:
 /// reacting to staging writes re-triggers watchers, and indexing them
 /// duplicates index content as source.
 pub fn path_in_index_artifacts(idx_dir: &Path, path: &Path) -> bool {
@@ -266,6 +271,7 @@ where
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
         .context("failed to acquire index lock")?;
     recover_index_directories(&idx_dir).context("failed to recover index directories")?;
+    let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
 
     // ── 2. Discover files ────────────────────────────────────────
     let discovery =
@@ -277,6 +283,7 @@ where
             files_parsed: 0,
             chunks_created: 0,
             embeddings_generated: 0,
+            embeddings_reused: 0,
             binary_skipped: discovery.binary_skipped,
             large_skipped: discovery.large_skipped,
             large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -407,6 +414,7 @@ where
                 max_concurrent_requests,
                 config.indexing.max_chunk_bytes,
                 cancellation.as_async_token(),
+                checkpoint.as_ref(),
                 progress_cb,
             )
             .await;
@@ -419,7 +427,10 @@ where
                         cancellation.check()?;
                     }
                     stores.abort().await;
-                    return Err(error).context("embedding generation failed");
+                    return Err(error).context(EmbeddingCheckpoint::failure_context(
+                        checkpoint.as_ref(),
+                        "index",
+                    ));
                 }
             };
             cancellation.check()?;
@@ -462,6 +473,7 @@ where
             files_parsed: discovery.files.len() - parse_errors.len(),
             chunks_created: 0,
             embeddings_generated: 0,
+            embeddings_reused: 0,
             binary_skipped: discovery.binary_skipped,
             large_skipped: discovery.large_skipped,
             large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -490,6 +502,9 @@ where
         files_parsed,
         chunks_created: parsed_chunk_count,
         embeddings_generated: embedded_count,
+        embeddings_reused: checkpoint
+            .as_ref()
+            .map_or(0, EmbeddingCheckpoint::reused_count),
         binary_skipped: discovery.binary_skipped,
         large_skipped: discovery.large_skipped,
         large_skipped_paths: discovery.large_skipped_paths.clone(),
@@ -503,6 +518,9 @@ where
     swap_staging_index(&idx_dir, &staging.build_dir, &staging.old_dir)
         .context("failed to publish staged index")?;
     staging.committed = true;
+    // A published full build supersedes saved progress from any backend.
+    drop(checkpoint);
+    EmbeddingCheckpoint::remove(&idx_dir);
 
     info!(index_dir = %idx_dir.display(), "index artifacts written");
     on_progress(IndexProgress::StorageDone);
@@ -1045,7 +1063,7 @@ impl Drop for StagingIndex {
     }
 }
 
-fn sibling_index_dir(idx_dir: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sibling_index_dir(idx_dir: &Path, suffix: &str) -> PathBuf {
     let name = idx_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -1144,3 +1162,301 @@ pub(crate) fn count_tier0_fallback_files(file_states: &[FileIndexState]) -> usiz
 #[cfg(test)]
 #[path = "pipeline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::embedding::test_helpers::{CheckpointProvider, MockProvider};
+    use crate::retrieval::search_service::SearchContext;
+    use crate::types::SearchFilters;
+    use tempfile::tempdir;
+
+    fn config() -> VeraConfig {
+        let mut config = VeraConfig::default();
+        config.embedding.batch_size = 1;
+        config.embedding.max_concurrent_requests = 1;
+        config.embedding.max_stored_dim = 2;
+        config
+    }
+
+    fn write_corpus(root: &Path) {
+        for index in 0..4 {
+            std::fs::write(
+                root.join(format!("file_{index}.rs")),
+                format!("pub fn item_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Read actual stored bytes, not search distances, to compare builds exactly.
+    fn vectors(idx_dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let connection = rusqlite::Connection::open(idx_dir.join(VECTOR_DB)).unwrap();
+        connection.prepare(
+            "SELECT m.chunk_id, v.embedding FROM chunk_id_map m JOIN vec_chunks v ON m.rowid = v.rowid ORDER BY m.chunk_id"
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    async fn windowed(
+        root: &Path,
+        provider: &CheckpointProvider,
+        target: usize,
+    ) -> Result<IndexSummary> {
+        index_repository_with_progress_and_cancellation_with_window_target(
+            root,
+            provider,
+            &config(),
+            "checkpoint-model",
+            |_| {},
+            &CancellationToken::new(),
+            target,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn failed_build_resumes_saved_embeddings_and_preserves_live_index() {
+        let reference = tempdir().unwrap();
+        write_corpus(reference.path());
+        let baseline_provider = CheckpointProvider::new(None);
+        let baseline = windowed(reference.path(), &baseline_provider, 4)
+            .await
+            .unwrap();
+        assert_eq!(baseline.chunks_created, 4);
+        let expected_vectors = vectors(&index_dir(reference.path()));
+
+        for existing_index in [false, true] {
+            let root = tempdir().unwrap();
+            write_corpus(root.path());
+            let idx_dir = index_dir(root.path());
+            if existing_index {
+                windowed(root.path(), &CheckpointProvider::new(None), 4)
+                    .await
+                    .unwrap();
+            }
+            let failing = CheckpointProvider::new(Some(3));
+            let error = windowed(root.path(), &failing, 1).await.unwrap_err();
+            assert!(
+                error.to_string().contains("2 embeddings saved"),
+                "{error:#}"
+            );
+            assert!(error.to_string().contains("`vera index`"));
+            assert!(error.downcast_ref::<EmbeddingError>().is_some());
+            assert!(root.path().join(".vera.resume/embeddings.db").is_file());
+            assert!(!root.path().join(".vera.build").exists());
+            if existing_index {
+                assert_eq!(vectors(&idx_dir), expected_vectors);
+                assert_eq!(
+                    crate::stats::collect_stats(root.path())
+                        .unwrap()
+                        .chunk_count,
+                    4
+                );
+                let (hits, _) = SearchContext::bm25_only()
+                    .search(
+                        &idx_dir,
+                        "item_0",
+                        None,
+                        &config(),
+                        &SearchFilters::default(),
+                        5,
+                    )
+                    .await
+                    .unwrap();
+                assert!(!hits.is_empty());
+            } else {
+                assert!(!idx_dir.exists());
+            }
+
+            let healthy = CheckpointProvider::new(None);
+            let resumed = windowed(root.path(), &healthy, 3).await.unwrap();
+            assert_eq!(resumed.embeddings_reused, 2);
+            assert_eq!(resumed.embeddings_generated, baseline.embeddings_generated);
+            assert_eq!(healthy.request_count(), 2);
+            let mut missing = baseline_provider.inputs();
+            for text in failing.inputs().iter().take(2) {
+                missing.retain(|input| input != text);
+            }
+            missing.sort();
+            let mut sent = healthy.inputs();
+            sent.sort();
+            assert_eq!(sent, missing);
+            assert_eq!(vectors(&idx_dir), expected_vectors);
+            assert!(!root.path().join(".vera.resume").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_source_invalidates_only_its_saved_embeddings() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        let failing = CheckpointProvider::new(Some(4));
+        assert!(windowed(root.path(), &failing, 4).await.is_err());
+        let sent = failing.inputs();
+        let changed = (0..4)
+            .find(|index| sent[0].contains(&format!("fn item_{index}()")))
+            .unwrap();
+        std::fs::write(
+            root.path().join(format!("file_{changed}.rs")),
+            format!("pub fn revised_{changed}() {{}}\n"),
+        )
+        .unwrap();
+        let healthy = CheckpointProvider::new(None);
+        let summary = windowed(root.path(), &healthy, 4).await.unwrap();
+        assert_eq!(summary.embeddings_reused, 2);
+        assert_eq!(healthy.inputs().len(), 2);
+        assert!(healthy.inputs().contains(&sent[3]));
+        assert!(
+            healthy
+                .inputs()
+                .iter()
+                .any(|text| text.contains(&format!("fn revised_{changed}()")))
+        );
+        assert!(!healthy.inputs().iter().any(|text| sent[..3].contains(text)));
+    }
+
+    #[tokio::test]
+    async fn local_provider_never_creates_an_embedding_checkpoint() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        let provider = MockProvider::new(4);
+        index_repository(root.path(), &provider, &config(), "local-model")
+            .await
+            .unwrap();
+        std::fs::write(root.path().join("file_0.rs"), "pub fn changed_local() {}\n").unwrap();
+        crate::indexing::update_repository(root.path(), &provider, &config(), "local-model")
+            .await
+            .unwrap();
+        assert!(!root.path().join(".vera.resume").exists());
+    }
+
+    #[tokio::test]
+    async fn local_full_build_removes_stale_api_checkpoint() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        let resume_dir = root.path().join(".vera.resume");
+        std::fs::create_dir(&resume_dir).unwrap();
+        std::fs::write(resume_dir.join("embeddings.db"), "").unwrap();
+        index_repository(root.path(), &MockProvider::new(4), &config(), "local-model")
+            .await
+            .unwrap();
+        assert!(!resume_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn unavailable_checkpoint_does_not_fail_indexing() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        // A corrupt SQLite database makes checkpoint open fail deterministically.
+        let resume_dir = root.path().join(".vera.resume");
+        std::fs::create_dir(&resume_dir).unwrap();
+        std::fs::write(resume_dir.join("embeddings.db"), "not a database").unwrap();
+        let summary = windowed(root.path(), &CheckpointProvider::new(None), 4)
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_generated, 4);
+        assert_eq!(summary.embeddings_reused, 0);
+    }
+
+    #[tokio::test]
+    async fn real_api_indexing_resumes_after_an_http_failure() {
+        use crate::embedding::{EmbeddingProviderConfig, OpenAiProvider};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let fail = Arc::new(AtomicBool::new(true));
+        let seen = Arc::clone(&requests);
+        let server_fail = Arc::clone(&fail);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                let body_start = loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(start) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        break start + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                while request.len() < body_start + length {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[body_start..body_start + length]).unwrap();
+                let input = body["input"].as_array().unwrap()[0]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                let call = {
+                    let mut seen = seen.lock().unwrap();
+                    seen.push(input);
+                    seen.len()
+                };
+                let (status, response) = if call == 3 && server_fail.load(Ordering::Relaxed) {
+                    (
+                        "400 Bad Request",
+                        serde_json::json!({"error": "test HTTP failure"}),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        serde_json::json!({"data": [{"index": 0, "embedding": [0.25, -0.5, 0.75, 1.0]}]}),
+                    )
+                };
+                let response = response.to_string();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let provider = OpenAiProvider::new(
+            EmbeddingProviderConfig::new(
+                format!("http://{address}/v1"),
+                "http-checkpoint-model".into(),
+                "test-key".into(),
+            )
+            .with_max_retries(0),
+        )
+        .unwrap();
+        let error = index_repository(root.path(), &provider, &config(), "http-checkpoint-model")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("2 embeddings saved"));
+        assert!(!index_dir(root.path()).exists());
+        assert!(root.path().join(".vera.resume/embeddings.db").exists());
+        let saved_texts = requests.lock().unwrap()[..2].to_vec();
+        fail.store(false, Ordering::Relaxed);
+        let summary = index_repository(root.path(), &provider, &config(), "http-checkpoint-model")
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_reused, 2);
+        assert_eq!(requests.lock().unwrap().len(), 5);
+        assert!(
+            !requests.lock().unwrap()[3..]
+                .iter()
+                .any(|text| saved_texts.contains(text))
+        );
+        assert!(vectors(&index_dir(root.path())).iter().all(|(_, bytes)| {
+            *bytes == [0.25_f32.to_le_bytes(), (-0.5_f32).to_le_bytes()].concat()
+        }));
+        assert!(!root.path().join(".vera.resume").exists());
+        server.abort();
+    }
+}

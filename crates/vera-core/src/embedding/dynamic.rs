@@ -33,6 +33,16 @@ pub enum DynamicProvider {
 }
 
 impl EmbeddingProvider for DynamicProvider {
+    fn checkpoints_embeddings(&self) -> bool {
+        match self {
+            Self::Api(p) => p.checkpoints_embeddings(),
+            Self::Local(p) => p.checkpoints_embeddings(),
+            Self::Model2Vec(p) => p.checkpoints_embeddings(),
+            #[cfg(test)]
+            Self::Stub(p) => p.checkpoints_embeddings(),
+        }
+    }
+
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         match self {
             Self::Api(p) => p.embed_batch(texts).await,
@@ -160,6 +170,10 @@ mod tests {
             Some(1)
         }
 
+        fn checkpoints_embeddings(&self) -> bool {
+            true
+        }
+
         fn prepare_document_text(&self, document: &str) -> String {
             format!("Document: {document}")
         }
@@ -186,5 +200,10 @@ mod tests {
             DynamicProvider::Stub(StubProvider).prepare_query_text("find main"),
             "Query: find main"
         );
+    }
+
+    #[test]
+    fn dynamic_provider_forwards_checkpoint_support() {
+        assert!(DynamicProvider::Stub(StubProvider).checkpoints_embeddings());
     }
 }

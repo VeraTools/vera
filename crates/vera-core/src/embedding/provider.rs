@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::chunk_text;
+use crate::indexing::checkpoint::EmbeddingCheckpoint;
 use crate::local_models::CODERANK_QUERY_PREFIX;
 use crate::types::Chunk;
 
@@ -69,6 +70,11 @@ pub(crate) fn api_err(error: impl std::fmt::Display) -> EmbeddingError {
     reason = "Provider futures retain the existing static-dispatch trait contract; callers await them in their current task."
 )]
 pub trait EmbeddingProvider: Send + Sync {
+    /// Persist costly API embeddings across failed indexing attempts.
+    fn checkpoints_embeddings(&self) -> bool {
+        false
+    }
+
     /// Embed a batch of text inputs, returning one vector per input.
     ///
     /// The returned vectors must all have the same dimensionality.
@@ -587,6 +593,10 @@ async fn read_error_response_text(
 }
 
 impl EmbeddingProvider for OpenAiProvider {
+    fn checkpoints_embeddings(&self) -> bool {
+        true
+    }
+
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -1150,6 +1160,7 @@ pub async fn embed_chunks_concurrent<P: EmbeddingProvider>(
         max_concurrent,
         max_chunk_bytes,
         &CancellationToken::new(),
+        None,
         |_, _| {},
     )
     .await
@@ -1160,6 +1171,10 @@ pub async fn embed_chunks_concurrent<P: EmbeddingProvider>(
 /// The token remains owned by the indexing operation. Cancellation drops every
 /// active provider future and returns [`EmbeddingError::Cancelled`] without
 /// reporting further progress.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps checkpointing optional without changing existing embedding controls."
+)]
 pub(crate) async fn embed_chunks_concurrent_with_progress_and_cancellation<P, F>(
     provider: &P,
     chunks: &[Chunk],
@@ -1167,6 +1182,7 @@ pub(crate) async fn embed_chunks_concurrent_with_progress_and_cancellation<P, F>
     max_concurrent: usize,
     max_chunk_bytes: usize,
     cancel: &CancellationToken,
+    checkpoint: Option<&EmbeddingCheckpoint>,
     on_progress: F,
 ) -> Result<Vec<(String, Vec<f32>)>, EmbeddingError>
 where
@@ -1192,7 +1208,7 @@ where
 
     let body_budget = budget_after_prefix(max_chunk_bytes, document_prefix_overhead(provider));
 
-    let batch_inputs: Vec<Vec<EmbeddingBatchItem>> = indexed_chunks
+    let mut batch_inputs: Vec<Vec<EmbeddingBatchItem>> = indexed_chunks
         .chunks(batch_size)
         .map(|batch| {
             batch
@@ -1209,6 +1225,37 @@ where
 
     let mut all_results: Vec<(usize, String, Vec<f32>)> = Vec::with_capacity(total);
     let mut done_count: usize = 0;
+
+    let mut keys = Vec::new();
+    if let Some(checkpoint) = checkpoint {
+        keys.resize(total, [0; 32]);
+        let items: Vec<_> = batch_inputs.into_iter().flatten().collect();
+        let lookup_keys: Vec<_> = items
+            .iter()
+            .map(|item| {
+                let key = EmbeddingCheckpoint::key(&item.text);
+                keys[item.original_index] = key;
+                key
+            })
+            .collect();
+        let hits = checkpoint.lookup(&lookup_keys);
+        if cancel.is_cancelled() {
+            return Err(EmbeddingError::Cancelled);
+        }
+        let mut misses = Vec::new();
+        for (item, hit) in items.into_iter().zip(hits) {
+            if let Some(vector) = hit {
+                all_results.push((item.original_index, item.chunk_id, vector));
+            } else {
+                misses.push(item);
+            }
+        }
+        done_count = all_results.len();
+        if done_count > 0 {
+            on_progress(done_count, total);
+        }
+        batch_inputs = misses.chunks(batch_size).map(<[_]>::to_vec).collect();
+    }
 
     for group_start in (0..batch_inputs.len()).step_by(max_concurrent) {
         let group_end = (group_start + max_concurrent).min(batch_inputs.len());
@@ -1227,6 +1274,16 @@ where
             .collect();
 
         let results = futures::future::join_all(futures).await;
+        if let Some(checkpoint) = checkpoint {
+            // Save every successful sibling before the first provider error wins.
+            let saved: Vec<_> = results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .flatten()
+                .map(|(index, _, vector)| (keys[*index], vector.as_slice()))
+                .collect();
+            checkpoint.store(&saved).await;
+        }
         for result in results {
             // Batch errors (real provider failures or Cancelled) win over a
             // pending cancellation so the caller sees the actual failure.
@@ -1429,6 +1486,82 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn checkpoint_saves_successful_siblings_before_returning_a_group_error() {
+        use crate::embedding::test_helpers::CheckpointProvider;
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint =
+            EmbeddingCheckpoint::open(&root.path().join(".vera"), "model\npassage:").unwrap();
+        let chunks: Vec<_> = (0..3)
+            .map(|index| Chunk {
+                id: format!("chunk-{index}"),
+                file_path: "test.rs".into(),
+                line_start: index + 1,
+                line_end: index + 1,
+                content: format!("fn item_{index}() {{}}"),
+                language: crate::types::Language::Rust,
+                symbol_type: None,
+                symbol_name: None,
+                part_index: None,
+            })
+            .collect();
+        let failing = CheckpointProvider::new(Some(1));
+        let error = embed_chunks_concurrent_with_progress_and_cancellation(
+            &failing,
+            &chunks,
+            1,
+            3,
+            200,
+            &CancellationToken::new(),
+            Some(&checkpoint),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            EmbeddingError::ApiError { status: 400, .. }
+        ));
+        assert_eq!(failing.request_count(), 3);
+        assert_eq!(checkpoint.saved_count(), 2);
+        let healthy = CheckpointProvider::new(None);
+        let progress = Mutex::new(Vec::new());
+        let resumed = embed_chunks_concurrent_with_progress_and_cancellation(
+            &healthy,
+            &chunks,
+            2,
+            3,
+            200,
+            &CancellationToken::new(),
+            Some(&checkpoint),
+            |done, total| progress.lock().unwrap().push((done, total)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(healthy.inputs(), vec![failing.inputs()[0].clone()]);
+        assert_eq!(*progress.lock().unwrap(), vec![(2, 3), (3, 3)]);
+        let uninterrupted = embed_chunks_concurrent_with_progress_and_cancellation(
+            &CheckpointProvider::new(None),
+            &chunks,
+            3,
+            1,
+            200,
+            &CancellationToken::new(),
+            None,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, uninterrupted);
+        assert_eq!(
+            resumed
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chunk-0", "chunk-1", "chunk-2"]
+        );
+    }
 
     async fn provider_with_truncated_error_body(
         status: &'static str,
@@ -1936,6 +2069,7 @@ mod tests {
             1,
             0,
             &CancellationToken::new(),
+            None,
             |_, _| {
                 progress_events.fetch_add(1, Ordering::SeqCst);
             },
@@ -1996,6 +2130,7 @@ mod tests {
             1,
             0,
             &CancellationToken::new(),
+            None,
             |_, _| {},
         )
         .await
@@ -2048,6 +2183,7 @@ mod tests {
             1,
             BUDGET,
             &CancellationToken::new(),
+            None,
             |_, _| {},
         )
         .await

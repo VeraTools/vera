@@ -28,6 +28,21 @@ pub const INDEX_FORMAT_VERSION: &str = "2";
 pub const INDEX_COMPLETE_KEY: &str = "index_complete";
 pub const INDEX_COMPLETE_VALUE: &str = "1";
 
+/// Legacy indexes lack this key; only an explicit interrupted-update marker fails.
+pub fn ensure_index_complete(idx_dir: &Path) -> Result<()> {
+    let metadata = MetadataStore::open_existing(&idx_dir.join("metadata.db"))
+        .context("failed to open index completeness metadata")?;
+    if metadata.get_index_meta(INDEX_COMPLETE_KEY)?.as_deref() == Some("0")
+        && !super::lock::IndexLock::is_locked_for_index_dir(idx_dir)
+    {
+        bail!(
+            "the index at {} is incomplete because an update stopped before it finished writing; run `vera update` to repair it or `vera index` to rebuild",
+            idx_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Returns true if the stored index format version matches the current binary.
 pub fn index_format_is_current(metadata_store: &MetadataStore) -> bool {
     matches!(
@@ -308,6 +323,79 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_and_stats_refuse_interrupted_updates_unless_locked_or_legacy() {
+        use crate::embedding::test_helpers::MockProvider;
+        use crate::indexing::{index_repository, update_repository};
+        use crate::retrieval::search_service::SearchContext;
+        let root = tempdir().unwrap();
+        write_file(root.path(), "main.rs", "pub fn searchable() {}\n");
+        let provider = MockProvider::new(4);
+        let config = crate::config::VeraConfig::default();
+        index_repository(root.path(), &provider, &config, "model")
+            .await
+            .unwrap();
+        let idx_dir = index_dir(root.path());
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        let context = SearchContext::bm25_only();
+        let filters = crate::types::SearchFilters::default();
+        // Warm the cache first: the marker must be checked even on cache hits.
+        context
+            .search(&idx_dir, "searchable", None, &config, &filters, 5)
+            .await
+            .unwrap();
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        let stats_error = crate::stats::collect_stats(root.path())
+            .unwrap_err()
+            .to_string();
+        let search_error = context
+            .search(&idx_dir, "searchable", None, &config, &filters, 5)
+            .await
+            .unwrap_err()
+            .to_string();
+        for error in [stats_error, search_error] {
+            assert!(error.contains(&idx_dir.display().to_string()));
+            assert!(error.contains("incomplete because an update stopped"));
+            assert!(error.contains("`vera update` to repair it or `vera index` to rebuild"));
+        }
+        let lock = super::super::lock::IndexLock::try_acquire_for_index_dir(&idx_dir)
+            .unwrap()
+            .unwrap();
+        crate::stats::collect_stats(root.path()).unwrap();
+        assert!(
+            !context
+                .search(&idx_dir, "searchable", None, &config, &filters, 5)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        drop(lock);
+        // Update intentionally bypasses the refusal, including a no-op repair.
+        update_repository(root.path(), &provider, &config, "model")
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata
+                .get_index_meta(INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        let connection = rusqlite::Connection::open(idx_dir.join("metadata.db")).unwrap();
+        connection
+            .execute(
+                "DELETE FROM index_metadata WHERE key = ?1",
+                [INDEX_COMPLETE_KEY],
+            )
+            .unwrap();
+        crate::stats::collect_stats(root.path()).unwrap();
+        context
+            .search(&idx_dir, "searchable", None, &config, &filters, 5)
+            .await
+            .unwrap();
     }
 
     #[test]

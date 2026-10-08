@@ -483,6 +483,7 @@ fn test_runtime() -> WatchRuntime {
 #[cfg(test)]
 fn test_summary() -> UpdateSummary {
     UpdateSummary {
+        embeddings_reused: 0,
         files_modified: 0,
         files_added: 0,
         files_deleted: 0,
@@ -578,6 +579,7 @@ mod tests {
         ) -> Result<UpdateSummary, anyhow::Error> {
             self.updates.fetch_add(1, Ordering::SeqCst);
             Ok(UpdateSummary {
+                embeddings_reused: 0,
                 files_modified: 0,
                 files_added: 0,
                 files_deleted: 0,

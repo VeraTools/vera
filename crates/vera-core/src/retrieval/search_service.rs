@@ -194,6 +194,8 @@ impl SearchContext {
     }
 
     fn search_stores(&self, index_dir: &Path) -> Result<Arc<SearchStores>> {
+        // Check on cache hits too: an interrupted update can leave the same inode.
+        crate::indexing::freshness::ensure_index_complete(index_dir)?;
         let mut cached = self
             .stores
             .lock()
