@@ -7,6 +7,41 @@
 //! - Credential management (read from environment, never log)
 //! - Error handling (auth failures, connection errors, rate limits)
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Thread-safe request counters shared by a provider and the embedding queue.
+#[derive(Debug, Default)]
+pub struct EmbeddingStats {
+    pub(crate) requests: AtomicU64,
+    pub(crate) retries: AtomicU64,
+    pub(crate) timeouts: AtomicU64,
+    pub(crate) failed_batches: AtomicU64,
+}
+
+/// Request counters captured at the end of an indexing operation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EmbeddingRequestStats {
+    /// HTTP requests sent to the embedding API, counting every attempt.
+    pub requests: u64,
+    /// requests that repeated a failed request (immediate retries plus requeued resends). `requests - retries` is the number of batches sent.
+    pub retries: u64,
+    /// requests that timed out.
+    pub timeouts: u64,
+    /// times a batch exhausted its immediate retries and was requeued or failed the run.
+    pub failed_batches: u64,
+}
+
+impl EmbeddingStats {
+    pub fn snapshot(&self) -> EmbeddingRequestStats {
+        EmbeddingRequestStats {
+            requests: self.requests.load(Ordering::Relaxed),
+            retries: self.retries.load(Ordering::Relaxed),
+            timeouts: self.timeouts.load(Ordering::Relaxed),
+            failed_batches: self.failed_batches.load(Ordering::Relaxed),
+        }
+    }
+}
+
 mod provider;
 
 pub(crate) use provider::embed_chunks_concurrent_with_progress_and_cancellation;

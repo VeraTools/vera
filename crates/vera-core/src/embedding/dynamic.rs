@@ -1,3 +1,4 @@
+use super::EmbeddingStats;
 use crate::config::{InferenceBackend, VeraConfig};
 use crate::embedding::local_provider::LocalEmbeddingProvider;
 use crate::embedding::model2vec_provider::Model2VecProvider;
@@ -33,6 +34,26 @@ pub enum DynamicProvider {
 }
 
 impl EmbeddingProvider for DynamicProvider {
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        match self {
+            Self::Api(p) => p.stats(),
+            Self::Local(p) => p.stats(),
+            Self::Model2Vec(p) => p.stats(),
+            #[cfg(test)]
+            Self::Stub(p) => p.stats(),
+        }
+    }
+
+    fn requeue_delay(&self, attempt: u32) -> Duration {
+        match self {
+            Self::Api(p) => p.requeue_delay(attempt),
+            Self::Local(p) => p.requeue_delay(attempt),
+            Self::Model2Vec(p) => p.requeue_delay(attempt),
+            #[cfg(test)]
+            Self::Stub(p) => p.requeue_delay(attempt),
+        }
+    }
+
     fn checkpoints_embeddings(&self) -> bool {
         match self {
             Self::Api(p) => p.checkpoints_embeddings(),

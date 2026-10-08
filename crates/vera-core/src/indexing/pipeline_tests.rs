@@ -100,7 +100,8 @@ impl EmbeddingProvider for RecordingProvider {
         };
         if self.fail_on_call == Some(call) {
             return Err(EmbeddingError::ApiError {
-                status: 503,
+                // Keep this failure permanent now that transient batches requeue.
+                status: 400,
                 message: "recording provider failed".to_string(),
             });
         }

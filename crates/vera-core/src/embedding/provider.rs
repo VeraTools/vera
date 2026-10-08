@@ -1,8 +1,10 @@
 //! Embedding provider abstraction and OpenAI-compatible implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque, hash_map::RandomState};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -10,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use super::EmbeddingStats;
 use crate::chunk_text;
 use crate::indexing::checkpoint::EmbeddingCheckpoint;
 use crate::local_models::CODERANK_QUERY_PREFIX;
@@ -39,7 +42,10 @@ pub enum EmbeddingError {
 
     /// Rate limit exceeded.
     #[error("embedding API rate limit exceeded: {message}")]
-    RateLimitError { message: String },
+    RateLimitError {
+        message: String,
+        retry_after: Option<Duration>,
+    },
 
     /// Unexpected response format.
     #[error("unexpected embedding API response: {message}")]
@@ -70,6 +76,16 @@ pub(crate) fn api_err(error: impl std::fmt::Display) -> EmbeddingError {
     reason = "Provider futures retain the existing static-dispatch trait contract; callers await them in their current task."
 )]
 pub trait EmbeddingProvider: Send + Sync {
+    /// API request counters, when this provider sends HTTP embedding requests.
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        None
+    }
+
+    /// Delay before a failed batch is resent from the end of the queue.
+    fn requeue_delay(&self, attempt: u32) -> Duration {
+        retry_delay(attempt, None, &RetryPolicy::default(), retry_jitter())
+    }
+
     /// Persist costly API embeddings across failed indexing attempts.
     fn checkpoints_embeddings(&self) -> bool {
         false
@@ -393,6 +409,68 @@ where
 
 // ── OpenAI-compatible provider ───────────────────────────────────────
 
+#[derive(Clone, Copy)]
+pub(crate) struct RetryPolicy {
+    base_delay: Duration,
+    max_delay: Duration,
+    max_retry_after: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(30),
+            max_retry_after: Duration::from_secs(60),
+        }
+    }
+}
+
+impl RetryPolicy {
+    fn for_error(mut self, error: &EmbeddingError) -> Self {
+        if matches!(error, EmbeddingError::RateLimitError { .. }) {
+            self.base_delay = Duration::from_secs(2);
+        }
+        self
+    }
+}
+
+fn retry_delay(
+    attempt: u32,
+    retry_after: Option<Duration>,
+    policy: &RetryPolicy,
+    jitter: f64,
+) -> Duration {
+    if let Some(wait) = retry_after {
+        return wait.min(policy.max_retry_after);
+    }
+    let delay = 1u32
+        .checked_shl(attempt.saturating_sub(1))
+        .map(|factor| policy.base_delay.saturating_mul(factor))
+        .unwrap_or(policy.max_delay)
+        .min(policy.max_delay);
+    delay.mul_f64(0.5 + jitter * 0.5)
+}
+
+fn retry_jitter() -> f64 {
+    static RANDOM: OnceLock<RandomState> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let bits = RANDOM
+        .get_or_init(RandomState::new)
+        .hash_one(COUNTER.fetch_add(1, Ordering::Relaxed));
+    (bits >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .map(|date| date.duration_since(now).unwrap_or_default())
+}
+
 /// OpenAI-compatible embedding provider.
 ///
 /// Works with any API that implements the OpenAI `/v1/embeddings` endpoint,
@@ -400,6 +478,8 @@ where
 pub struct OpenAiProvider {
     client: reqwest::Client,
     config: EmbeddingProviderConfig,
+    retry_policy: RetryPolicy,
+    stats: Arc<EmbeddingStats>,
 }
 
 impl OpenAiProvider {
@@ -411,7 +491,18 @@ impl OpenAiProvider {
             .build()
             .context("failed to create HTTP client")?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            retry_policy: RetryPolicy::default(),
+            stats: Arc::new(EmbeddingStats::default()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
     }
 
     /// Build the embeddings endpoint URL.
@@ -436,12 +527,14 @@ impl OpenAiProvider {
         loop {
             if retries > 0 {
                 let is_rate_limit = matches!(last_err, Some(EmbeddingError::RateLimitError { .. }));
-                let delay = if is_rate_limit {
-                    // Rate limit: wait 2-4s with exponential backoff.
-                    Duration::from_secs(2 + u64::from(retries.min(2)))
-                } else {
-                    Duration::from_millis(500 * 2u64.pow(retries.min(5) - 1))
+                let policy = self
+                    .retry_policy
+                    .for_error(last_err.as_ref().expect("retry follows a failed request"));
+                let retry_after = match &last_err {
+                    Some(EmbeddingError::RateLimitError { retry_after, .. }) => *retry_after,
+                    _ => None,
                 };
+                let delay = retry_delay(retries, retry_after, &policy, retry_jitter());
                 debug!(
                     attempt = retries + 1,
                     delay_ms = delay.as_millis(),
@@ -449,6 +542,7 @@ impl OpenAiProvider {
                     "retrying embedding API"
                 );
                 tokio::time::sleep(delay).await;
+                self.stats.retries.fetch_add(1, Ordering::Relaxed);
             }
 
             match self.send_request(&url, &body).await {
@@ -484,6 +578,19 @@ impl OpenAiProvider {
         url: &str,
         body: &EmbeddingRequest<'_>,
     ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        self.stats.requests.fetch_add(1, Ordering::Relaxed);
+        let result = self.send_request_inner(url, body).await;
+        if matches!(result, Err(EmbeddingError::TimeoutError { .. })) {
+            self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn send_request_inner(
+        &self,
+        url: &str,
+        body: &EmbeddingRequest<'_>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let response = self
             .client
             .post(url)
@@ -509,6 +616,15 @@ impl OpenAiProvider {
             })?;
 
         let status = response.status().as_u16();
+        let retry_after = if matches!(status, 429 | 503) {
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| parse_retry_after(value, SystemTime::now()))
+        } else {
+            None
+        };
 
         if status == 401 || status == 403 {
             let text =
@@ -519,11 +635,12 @@ impl OpenAiProvider {
             });
         }
 
-        if status == 429 {
+        if status == 429 || (status == 503 && retry_after.is_some()) {
             let text =
                 read_error_response_text(response, "failed to read rate limit response").await?;
             return Err(EmbeddingError::RateLimitError {
                 message: sanitize_error_message(&text),
+                retry_after,
             });
         }
 
@@ -536,6 +653,7 @@ impl OpenAiProvider {
             if status == 400 && text.contains("Unable to process") {
                 return Err(EmbeddingError::RateLimitError {
                     message: sanitize_error_message(&text),
+                    retry_after: None,
                 });
             }
             return Err(EmbeddingError::ApiError {
@@ -593,6 +711,14 @@ async fn read_error_response_text(
 }
 
 impl EmbeddingProvider for OpenAiProvider {
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        Some(&self.stats)
+    }
+
+    fn requeue_delay(&self, attempt: u32) -> Duration {
+        retry_delay(attempt, None, &self.retry_policy, retry_jitter())
+    }
+
     fn checkpoints_embeddings(&self) -> bool {
         true
     }
@@ -752,6 +878,14 @@ impl<P: EmbeddingProvider> CachedEmbeddingProvider<P> {
 }
 
 impl<P: EmbeddingProvider> EmbeddingProvider for CachedEmbeddingProvider<P> {
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        self.inner.stats()
+    }
+
+    fn requeue_delay(&self, attempt: u32) -> Duration {
+        self.inner.requeue_delay(attempt)
+    }
+
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -885,10 +1019,19 @@ fn retry_limit_for_error(error: &EmbeddingError, configured_retries: u32) -> u32
 }
 
 fn is_retryable_error(error: &EmbeddingError) -> bool {
-    !matches!(
+    matches!(
         error,
-        EmbeddingError::AuthError { .. } | EmbeddingError::TimeoutError { .. }
+        EmbeddingError::ConnectionError { .. }
+            | EmbeddingError::RateLimitError { .. }
+            | EmbeddingError::ApiError {
+                status: 408 | 500..=599,
+                ..
+            }
     ) && !is_context_size_error(error)
+}
+
+fn is_transient_batch_error(error: &EmbeddingError) -> bool {
+    matches!(error, EmbeddingError::TimeoutError { .. }) || is_retryable_error(error)
 }
 
 #[derive(Clone)]
@@ -898,13 +1041,21 @@ struct EmbeddingBatchItem {
     text: String,
 }
 
+const MAX_REQUEUES: u32 = 2;
+
+struct PendingBatch {
+    index: usize,
+    requeues: u32,
+    items: Vec<EmbeddingBatchItem>,
+}
+
 fn embedding_error_message(error: &EmbeddingError) -> &str {
     match error {
         EmbeddingError::AuthError { message }
         | EmbeddingError::ConnectionError { message }
         | EmbeddingError::TimeoutError { message }
         | EmbeddingError::ApiError { message, .. }
-        | EmbeddingError::RateLimitError { message }
+        | EmbeddingError::RateLimitError { message, .. }
         | EmbeddingError::ResponseError { message } => message,
         EmbeddingError::Cancelled => "embedding cancelled",
     }
@@ -1257,23 +1408,48 @@ where
         batch_inputs = misses.chunks(batch_size).map(<[_]>::to_vec).collect();
     }
 
-    for group_start in (0..batch_inputs.len()).step_by(max_concurrent) {
-        let group_end = (group_start + max_concurrent).min(batch_inputs.len());
-        let group = &batch_inputs[group_start..group_end];
+    let mut pending: VecDeque<_> = batch_inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, items)| PendingBatch {
+            index,
+            requeues: 0,
+            items,
+        })
+        .collect();
+    while !pending.is_empty() {
+        let group: Vec<_> = pending.drain(..max_concurrent.min(pending.len())).collect();
 
         let futures: Vec<_> = group
             .iter()
-            .enumerate()
-            .map(|(i, items)| {
-                let batch_idx = group_start + i;
-                async move {
-                    debug!(batch = batch_idx + 1, total_batches, "embedding batch");
-                    embed_batch_resilient(provider, items.clone(), cancel).await
+            .map(|batch| async move {
+                if batch.requeues > 0 {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
+                        _ = tokio::time::sleep(provider.requeue_delay(batch.requeues)) => {}
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(EmbeddingError::Cancelled);
+                    }
+                    if let Some(stats) = provider.stats() {
+                        stats.retries.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
+                debug!(batch = batch.index + 1, total_batches, "embedding batch");
+                embed_batch_resilient(provider, batch.items.clone(), cancel).await
             })
             .collect();
 
         let results = futures::future::join_all(futures).await;
+        if let Some(stats) = provider.stats() {
+            let failed = results.iter().filter(|result| {
+                matches!(result, Err(error) if !matches!(error, EmbeddingError::Cancelled))
+            }).count();
+            stats
+                .failed_batches
+                .fetch_add(failed as u64, Ordering::Relaxed);
+        }
         if let Some(checkpoint) = checkpoint {
             // Save every successful sibling before the first provider error wins.
             let saved: Vec<_> = results
@@ -1284,10 +1460,23 @@ where
                 .collect();
             checkpoint.store(&saved).await;
         }
-        for result in results {
+        for (mut batch, result) in group.into_iter().zip(results) {
             // Batch errors (real provider failures or Cancelled) win over a
             // pending cancellation so the caller sees the actual failure.
-            let batch_results = result?;
+            let batch_results = match result {
+                Ok(vectors) => vectors,
+                Err(error) => {
+                    if !cancel.is_cancelled()
+                        && is_transient_batch_error(&error)
+                        && batch.requeues < MAX_REQUEUES
+                    {
+                        batch.requeues += 1;
+                        pending.push_back(batch);
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             if cancel.is_cancelled() {
                 return Err(EmbeddingError::Cancelled);
             }
@@ -1445,8 +1634,12 @@ pub(crate) mod test_helpers {
                         status: *status,
                         message: message.clone(),
                     },
-                    EmbeddingError::RateLimitError { message } => EmbeddingError::RateLimitError {
+                    EmbeddingError::RateLimitError {
+                        message,
+                        retry_after,
+                    } => EmbeddingError::RateLimitError {
                         message: message.clone(),
+                        retry_after: *retry_after,
                     },
                     EmbeddingError::ResponseError { message } => EmbeddingError::ResponseError {
                         message: message.clone(),
@@ -1479,6 +1672,10 @@ pub(crate) mod test_helpers {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1938,6 +2135,7 @@ mod tests {
     fn rate_limits_receive_only_the_documented_extra_retries() {
         let error = EmbeddingError::RateLimitError {
             message: "busy".into(),
+            retry_after: None,
         };
         assert_eq!(retry_limit_for_error(&error, 3), 7);
     }

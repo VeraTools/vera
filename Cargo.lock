@@ -4188,6 +4188,7 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
+ "httpdate",
  "ignore",
  "libc",
  "memmap2",
