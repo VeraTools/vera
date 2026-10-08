@@ -97,7 +97,20 @@ impl MockApi {
                         )
                     };
                 let response = response.to_string();
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                let reply = move || {
+                    let mut stream = stream;
+                    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                };
+                if permanent {
+                    // Answer the failure last, so the sibling and the batch
+                    // that takes its free slot always finish first.
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(2));
+                        reply();
+                    });
+                } else {
+                    reply();
+                }
             }
         });
         Self {
@@ -346,7 +359,7 @@ fn failure_stats_include_successful_siblings_of_a_permanent_failure() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("2 requests, 0 retries, 0 timeouts, 1 failed batches, 1/3 chunks embedded"),
+        stderr.contains("3 requests, 0 retries, 0 timeouts, 1 failed batches, 2/3 chunks embedded"),
         "{stderr}"
     );
     assert!(stderr.lines().last().unwrap().starts_with("Error:"));
