@@ -18,6 +18,7 @@ Wrappers verify exact-version release archives and reuse completed caches offlin
 - A failed API `vera index` keeps finished embeddings in `<repo>/.vera.resume/`, and the next run reuses them (`embeddings_reused`). An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
 - `vera index --json` and `vera update --json` report request, retry, timeout, and failed-batch counts plus per-stage busy time. Slow runs print progress to stderr even when it is not a terminal. On failure, stdout stays empty and the error is the last stderr line.
 - Error messages drop endpoint URLs and redact tokens and credentials from provider responses.
+- Potion Code embeds each chunk on its own, so its vector no longer depends on which chunks shared its batch. Local indexing is faster as a result. Indexes from earlier versions keep working; run `vera index` to refresh their vectors.
 
 ### Search and configuration
 
