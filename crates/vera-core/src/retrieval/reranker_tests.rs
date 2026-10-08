@@ -2,6 +2,29 @@ use super::*;
 use crate::test_env::run_env_test;
 use crate::types::{Language, SymbolType};
 
+#[test]
+fn rerank_outcome_aggregation_table() {
+    use RerankOutcome::{Fallback, NotAttempted, Reranked};
+    let outcomes = [NotAttempted, Reranked, Fallback("first".into())];
+    let incoming = [NotAttempted, Reranked, Fallback("second".into())];
+    let expected = [
+        [NotAttempted, Reranked, Fallback("second".into())],
+        [Reranked, Reranked, Fallback("second".into())],
+        [
+            Fallback("first".into()),
+            Fallback("first".into()),
+            Fallback("first".into()),
+        ],
+    ];
+    for (row, outcome) in outcomes.iter().enumerate() {
+        for (column, next) in incoming.iter().enumerate() {
+            let mut merged = outcome.clone();
+            merged.merge(next);
+            assert_eq!(merged, expected[row][column]);
+        }
+    }
+}
+
 /// Helper to create a SearchResult with given parameters.
 fn make_result(
     file: &str,
@@ -316,33 +339,6 @@ fn format_without_symbol_info() {
     assert!(formatted.contains("File: lib.rs"));
     assert!(formatted.contains("some code"));
     assert!(!formatted.contains("Symbol type:"));
-}
-
-// ── sanitize_error_message tests ─────────────────────────────────
-
-#[test]
-fn sanitize_truncates_long_messages() {
-    let long_msg = "a".repeat(1000);
-    let sanitized = sanitize_error_message(&long_msg);
-    assert!(sanitized.len() <= 500);
-}
-
-#[test]
-fn sanitize_multibyte_utf8_boundary() {
-    // Create a string with multi-byte chars near the 500-byte boundary.
-    // Each '🦀' is 4 bytes. 125 crabs = 500 bytes exactly, but place
-    // the boundary right in the middle of a multi-byte sequence.
-    let msg = "a".repeat(499) + "🦀"; // 499 + 4 = 503 bytes
-    let sanitized = sanitize_error_message(&msg);
-    // Should truncate before the crab emoji, not panic.
-    assert!(sanitized.len() <= 500);
-    assert!(sanitized.is_char_boundary(sanitized.len()));
-}
-
-#[test]
-fn sanitize_empty_message() {
-    let sanitized = sanitize_error_message("");
-    assert_eq!(sanitized, "no details available");
 }
 
 // ── ApiReranker endpoint URL tests ───────────────────────────────

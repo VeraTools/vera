@@ -1946,7 +1946,7 @@ mod tests {
     fn index_staging_dirs_stay_excluded_even_without_default_excludes() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
-        for staging in [".vera.build", ".vera.old"] {
+        for staging in [".vera.build", ".vera.old", ".vera.resume"] {
             let staging_dir = dir.path().join(staging);
             fs::create_dir_all(&staging_dir).unwrap();
             fs::write(staging_dir.join("meta.json"), "{}").unwrap();
@@ -1971,6 +1971,7 @@ mod tests {
         let matcher = ExclusionMatcher::new(&root, &config).unwrap();
         assert!(matcher.is_excluded(&root.join(".vera.build/meta.json")));
         assert!(matcher.is_excluded(&root.join(".vera.old/meta.json")));
+        assert!(matcher.is_excluded(&root.join(".vera.resume/meta.json")));
     }
 
     #[test]

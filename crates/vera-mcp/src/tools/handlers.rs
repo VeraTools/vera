@@ -622,21 +622,18 @@ fn handle_explain_path(args: &Value) -> ToolCallResult {
     config.indexing.no_ignore = args
         .get("no_ignore")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(config.indexing.no_ignore);
     config.indexing.no_default_excludes = args
         .get("no_default_excludes")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    config.indexing.extra_excludes = args
-        .get("exclude")
-        .and_then(|v| v.as_array())
-        .map(|items| {
+        .unwrap_or(config.indexing.no_default_excludes);
+    if let Some(items) = args.get("exclude").and_then(|v| v.as_array()) {
+        config.indexing.extra_excludes.extend(
             items
                 .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+                .filter_map(|item| item.as_str().map(str::to_string)),
+        );
+    }
 
     match vera_core::discovery::explain_path(&cwd, std::path::Path::new(path), &config.indexing) {
         Ok(explanation) => match serde_json::to_string_pretty(&explanation) {

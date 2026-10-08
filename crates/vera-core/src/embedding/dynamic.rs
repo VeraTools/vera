@@ -1,3 +1,4 @@
+use super::EmbeddingStats;
 use crate::config::{InferenceBackend, VeraConfig};
 use crate::embedding::local_provider::LocalEmbeddingProvider;
 use crate::embedding::model2vec_provider::Model2VecProvider;
@@ -33,6 +34,36 @@ pub enum DynamicProvider {
 }
 
 impl EmbeddingProvider for DynamicProvider {
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        match self {
+            Self::Api(p) => p.stats(),
+            Self::Local(p) => p.stats(),
+            Self::Model2Vec(p) => p.stats(),
+            #[cfg(test)]
+            Self::Stub(p) => p.stats(),
+        }
+    }
+
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
+        match self {
+            Self::Api(p) => p.requeue_delay(attempt, error),
+            Self::Local(p) => p.requeue_delay(attempt, error),
+            Self::Model2Vec(p) => p.requeue_delay(attempt, error),
+            #[cfg(test)]
+            Self::Stub(p) => p.requeue_delay(attempt, error),
+        }
+    }
+
+    fn checkpoints_embeddings(&self) -> bool {
+        match self {
+            Self::Api(p) => p.checkpoints_embeddings(),
+            Self::Local(p) => p.checkpoints_embeddings(),
+            Self::Model2Vec(p) => p.checkpoints_embeddings(),
+            #[cfg(test)]
+            Self::Stub(p) => p.checkpoints_embeddings(),
+        }
+    }
+
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         match self {
             Self::Api(p) => p.embed_batch(texts).await,
@@ -133,6 +164,17 @@ pub async fn create_dynamic_provider(
             let provider_config = EmbeddingProviderConfig::from_env()
                 .map_err(|err| anyhow::anyhow!("embedding API not configured: {err}\nHint: set EMBEDDING_MODEL_BASE_URL, EMBEDDING_MODEL_ID, and EMBEDDING_MODEL_API_KEY environment variables, or use --potion-code for local CPU inference."))?;
             let model_name = provider_config.model_id.clone();
+            let mut provider_config = provider_config;
+            provider_config.query_prefix = saved_prefix(
+                provider_config.query_prefix,
+                "EMBEDDING_QUERY_PREFIX",
+                config.embedding.query_prefix.as_deref(),
+            );
+            provider_config.document_prefix = saved_prefix(
+                provider_config.document_prefix,
+                "EMBEDDING_DOCUMENT_PREFIX",
+                config.embedding.document_prefix.as_deref(),
+            );
             let provider_config = provider_config
                 .with_timeout(Duration::from_secs(config.embedding.timeout_secs))
                 .with_max_retries(config.embedding.max_retries);
@@ -143,9 +185,39 @@ pub async fn create_dynamic_provider(
     }
 }
 
+/// A saved `embedding.*_prefix` replaces the model default; a non-empty
+/// environment override still wins, and an empty saved value means no prefix.
+fn saved_prefix(resolved: Option<String>, env_key: &str, saved: Option<&str>) -> Option<String> {
+    let env_override = std::env::var(env_key).is_ok_and(|value| !value.is_empty());
+    match saved {
+        Some(saved) if !env_override => Some(saved.to_owned()).filter(|s| !s.is_empty()),
+        _ => resolved,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_prefix_overrides_model_default_unless_environment_sets_one() {
+        let key = "VERA_TEST_UNSET_EMBEDDING_PREFIX_KEY";
+        let default = || Some("model: ".to_string());
+        assert_eq!(
+            saved_prefix(default(), key, Some("saved: ")).as_deref(),
+            Some("saved: ")
+        );
+        assert_eq!(saved_prefix(default(), key, Some("")), None);
+        assert_eq!(
+            saved_prefix(default(), key, None).as_deref(),
+            Some("model: ")
+        );
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(
+            saved_prefix(Some(path.clone()), "PATH", Some("saved: ")),
+            Some(path)
+        );
+    }
 
     /// Rewrites both sides, so a dispatch arm that stops forwarding is visible:
     /// the trait defaults hand the text back unchanged.
@@ -158,6 +230,10 @@ mod tests {
 
         fn expected_dim(&self) -> Option<usize> {
             Some(1)
+        }
+
+        fn checkpoints_embeddings(&self) -> bool {
+            true
         }
 
         fn prepare_document_text(&self, document: &str) -> String {
@@ -186,5 +262,10 @@ mod tests {
             DynamicProvider::Stub(StubProvider).prepare_query_text("find main"),
             "Query: find main"
         );
+    }
+
+    #[test]
+    fn dynamic_provider_forwards_checkpoint_support() {
+        assert!(DynamicProvider::Stub(StubProvider).checkpoints_embeddings());
     }
 }

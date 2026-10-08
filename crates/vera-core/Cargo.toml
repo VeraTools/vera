@@ -26,6 +26,7 @@ tantivy = { workspace = true }
 
 # HTTP client for embedding/reranker APIs
 reqwest = { workspace = true, features = ["stream"] }
+httpdate = "1.0.3"
 rustls = { workspace = true }
 tree-sitter-rust = "0.24.2"
 tree-sitter-python = "0.25.0"

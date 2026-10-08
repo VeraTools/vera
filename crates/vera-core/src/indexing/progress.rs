@@ -9,6 +9,90 @@
 
 use super::pipeline::IndexProgress;
 use super::update::UpdateProgress;
+use crate::embedding::EmbeddingRequestStats;
+use std::time::Duration;
+
+/// Format a single ANSI-free embedding line. An open parse has no fixed total
+/// or ETA; zero elapsed time has zero rate and no ETA unless no work remains.
+pub fn embedding_message(
+    done: usize,
+    total: Option<usize>,
+    elapsed: Duration,
+    stats: EmbeddingRequestStats,
+    include_zero_counts: bool,
+) -> String {
+    let rate = if elapsed.is_zero() {
+        0.0
+    } else {
+        done as f64 / elapsed.as_secs_f64()
+    };
+    let eta = match total {
+        Some(total) if done >= total => "0s".to_string(),
+        Some(total) if rate > 0.0 => format!("{:.0}s", ((total - done) as f64 / rate).ceil()),
+        _ => "?".to_string(),
+    };
+    let count = total.map_or_else(|| format!("{done}/?"), |total| format!("{done}/{total}"));
+    let mut message = format!("embedding {count} chunks, {rate:.1} chunks/s, ETA {eta}");
+    if include_zero_counts || stats.retries > 0 {
+        message.push_str(&format!(
+            ", {} {}",
+            stats.retries,
+            if stats.retries == 1 {
+                "retry"
+            } else {
+                "retries"
+            }
+        ));
+    }
+    if include_zero_counts || stats.timeouts > 0 {
+        message.push_str(&format!(
+            ", {} {}",
+            stats.timeouts,
+            if stats.timeouts == 1 {
+                "timeout"
+            } else {
+                "timeouts"
+            }
+        ));
+    }
+    message
+}
+
+/// Failure telemetry is separate from the final error so callers can print
+/// the unchanged error last even when stderr is truncated by an agent client.
+pub fn embedding_failure_message(
+    done: usize,
+    total: Option<usize>,
+    stats: EmbeddingRequestStats,
+) -> String {
+    let total = total.map_or_else(|| "?".to_string(), |total| total.to_string());
+    format!(
+        "embedding stats: {} requests, {} retries, {} timeouts, {} failed batches, {done}/{total} chunks embedded",
+        stats.requests, stats.retries, stats.timeouts, stats.failed_batches
+    )
+}
+
+/// Pure ten-second throttle. A final line is allowed only after a periodic one.
+#[derive(Default)]
+pub struct PeriodicProgress {
+    last: Duration,
+    printed: bool,
+}
+
+impl PeriodicProgress {
+    pub fn should_print(&mut self, elapsed: Duration) -> bool {
+        if elapsed.saturating_sub(self.last) < Duration::from_secs(10) {
+            return false;
+        }
+        self.last = elapsed;
+        self.printed = true;
+        true
+    }
+
+    pub fn should_print_final(&self) -> bool {
+        self.printed
+    }
+}
 
 /// What the embedding indicator should display for a given progress event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +322,63 @@ impl UpdateProgressTracker {
 mod tests {
     use super::*;
     use crate::indexing::pipeline::IndexProgress;
+
+    #[test]
+    fn embedding_rate_eta_and_singular_plural_are_plain_text() {
+        let stats = EmbeddingRequestStats {
+            retries: 1,
+            timeouts: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            embedding_message(
+                512,
+                Some(1772),
+                Duration::from_secs_f64(512.0 / 41.2),
+                stats,
+                true
+            ),
+            "embedding 512/1772 chunks, 41.2 chunks/s, ETA 31s, 1 retry, 0 timeouts"
+        );
+        let stats = EmbeddingRequestStats {
+            retries: 2,
+            timeouts: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            embedding_message(4, Some(8), Duration::from_secs(2), stats, false),
+            "embedding 4/8 chunks, 2.0 chunks/s, ETA 2s, 2 retries, 1 timeout"
+        );
+    }
+
+    #[test]
+    fn embedding_zero_total_unknown_total_and_zero_elapsed_have_no_invalid_rate() {
+        let stats = EmbeddingRequestStats::default();
+        assert_eq!(
+            embedding_message(0, Some(0), Duration::ZERO, stats, false),
+            "embedding 0/0 chunks, 0.0 chunks/s, ETA 0s"
+        );
+        assert_eq!(
+            embedding_message(0, Some(10), Duration::ZERO, stats, false),
+            "embedding 0/10 chunks, 0.0 chunks/s, ETA ?"
+        );
+        assert_eq!(
+            embedding_message(5, None, Duration::from_secs(2), stats, false),
+            "embedding 5/? chunks, 2.5 chunks/s, ETA ?"
+        );
+    }
+
+    #[test]
+    fn periodic_embedding_lines_are_throttled_and_fast_runs_have_no_final_line() {
+        let mut throttle = PeriodicProgress::default();
+        assert!(!throttle.should_print(Duration::ZERO));
+        assert!(!throttle.should_print(Duration::from_secs(9)));
+        assert!(!throttle.should_print_final());
+        assert!(throttle.should_print(Duration::from_secs(10)));
+        assert!(!throttle.should_print(Duration::from_secs(19)));
+        assert!(throttle.should_print(Duration::from_secs(20)));
+        assert!(throttle.should_print_final());
+    }
 
     fn ind(done: usize) -> EmbedDisplay {
         EmbedDisplay::Indeterminate { done }

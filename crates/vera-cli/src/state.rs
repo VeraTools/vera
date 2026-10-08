@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StoredConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_format: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<vera_core::config::InferenceBackend>,
@@ -65,9 +67,15 @@ pub struct ApiSetupInput {
 /// side effect of unrelated commands. In particular a repaired `pooling` would
 /// be written to disk and then refuse to parse under an older Vera on the same
 /// machine, whose `FromStr` only knows `mean` and `cls`. Repairs therefore
-/// belong at the points of use, not here.
+/// belong at the points of use, not here. The one exception is moving pre-2.0
+/// pinned embedding defaults forward: the result is plain numbers every Vera
+/// version parses, and it must persist so later saves do not pin them again.
 pub fn load_saved_config() -> Result<StoredConfig> {
-    load_json_file(&config_path()?)
+    let mut config: StoredConfig = load_json_file(&config_path()?)?;
+    if let Some(core) = config.core_config.as_mut() {
+        core.embedding.upgrade_saved_defaults(config.config_format);
+    }
+    Ok(config)
 }
 
 pub fn load_saved_secrets() -> Result<StoredSecrets> {
@@ -242,7 +250,9 @@ fn apply_saved_env_impl(force: bool) -> Result<()> {
 }
 
 fn save_config(config: &StoredConfig) -> Result<()> {
-    write_json_file(&config_path()?, config)
+    let mut config = config.clone();
+    config.config_format = Some(vera_core::config::SAVED_CONFIG_FORMAT);
+    write_json_file(&config_path()?, &config)
 }
 
 fn save_secrets(secrets: &StoredSecrets) -> Result<()> {
@@ -629,6 +639,34 @@ mod tests {
             .as_str()
             .expect("stored config should still carry a pooling field")
             .to_string()
+    }
+
+    #[test]
+    fn pre_v2_pinned_embedding_defaults_upgrade_once_and_explicit_values_stay() {
+        let mut dump = vera_core::config::VeraConfig::default();
+        dump.embedding.max_concurrent_requests = 2;
+        dump.embedding.max_in_flight_inputs = 16;
+        dump.embedding.timeout_secs = 60;
+        let _guard = with_stored_config(&serde_json::json!({ "core_config": dump }).to_string());
+        let current = vera_core::config::EmbeddingConfig::default();
+        let upgraded = load_runtime_config().unwrap().embedding;
+        assert_eq!(upgraded.max_in_flight_inputs, current.max_in_flight_inputs);
+        assert_eq!(upgraded.timeout_secs, current.timeout_secs);
+        assert_eq!(upgraded.max_concurrent_requests, 2);
+
+        let mut explicit = load_runtime_config().unwrap();
+        explicit.embedding.max_in_flight_inputs = 16;
+        explicit.embedding.timeout_secs = 60;
+        save_runtime_config(&explicit).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(raw["config_format"], vera_core::config::SAVED_CONFIG_FORMAT);
+        assert_eq!(raw["core_config"]["embedding"]["max_in_flight_inputs"], 16);
+        let reloaded = load_runtime_config().unwrap().embedding;
+        assert_eq!(
+            (reloaded.max_in_flight_inputs, reloaded.timeout_secs),
+            (16, 60)
+        );
     }
 
     #[test]

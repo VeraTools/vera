@@ -19,6 +19,7 @@ use tracing::{debug, warn};
 
 use crate::chunk_text::{file_name, normalize_path_tokens};
 use crate::config::{RerankerProtocol, RetrievalConfig};
+use crate::http_errors::{describe_transport_error, sanitize_error_body};
 use crate::retrieval::ranking::file_role_label;
 use crate::types::SearchResult;
 
@@ -28,6 +29,32 @@ use crate::types::SearchResult;
 /// parameter, see `docs.vllm.ai/models/pooling_models/scoring`
 /// Cohere Rerank API `instruction` field).
 pub const RERANKER_INSTRUCTION_FIELD: &str = "instruction";
+
+/// Reranking diagnostics for one search or an aggregated request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RerankOutcome {
+    #[default]
+    NotAttempted,
+    Reranked,
+    Fallback(String),
+}
+
+impl RerankOutcome {
+    /// Keep the first fallback, otherwise any successful rerank.
+    pub fn merge(&mut self, incoming: &Self) {
+        if !matches!(self, Self::Fallback(_))
+            && (matches!(incoming, Self::Fallback(_)) || matches!(incoming, Self::Reranked))
+        {
+            *self = incoming.clone();
+        }
+    }
+
+    pub(crate) fn fallback(reason: String) -> Self {
+        warn!(error = %reason, "reranker unavailable, returning unreranked results");
+        eprintln!("Warning: reranker unavailable ({reason}), returning unreranked results.");
+        Self::Fallback(reason)
+    }
+}
 
 // ── Error types ──────────────────────────────────────────────────────
 
@@ -405,15 +432,15 @@ impl ApiReranker {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    RerankerError::ConnectionError {
-                        message: format!("failed to connect to reranker API: {e}"),
-                    }
+                let message = if e.is_connect() || e.is_timeout() {
+                    format!(
+                        "failed to connect to reranker API: {}",
+                        describe_transport_error(e)
+                    )
                 } else {
-                    RerankerError::ConnectionError {
-                        message: format!("request failed: {e}"),
-                    }
-                }
+                    format!("request failed: {}", describe_transport_error(e))
+                };
+                RerankerError::ConnectionError { message }
             })?;
 
         let status = response.status().as_u16();
@@ -421,7 +448,7 @@ impl ApiReranker {
         if status == 401 || status == 403 {
             let text = response.text().await.unwrap_or_default();
             return Err(RerankerError::AuthError {
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
             });
         }
 
@@ -430,7 +457,7 @@ impl ApiReranker {
             let text = response.text().await.unwrap_or_default();
             let retry_after = retry_after.or_else(|| parse_rate_limit_reset(&text));
             return Err(RerankerError::RateLimitError {
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
                 retry_after,
             });
         }
@@ -439,7 +466,7 @@ impl ApiReranker {
             let text = response.text().await.unwrap_or_default();
             return Err(RerankerError::ApiError {
                 status,
-                message: sanitize_error_message(&text),
+                message: sanitize_error_body(&text),
             });
         }
 
@@ -448,7 +475,10 @@ impl ApiReranker {
                 .json()
                 .await
                 .map_err(|e| RerankerError::ResponseError {
-                    message: format!("failed to parse reranker response: {e}"),
+                    message: format!(
+                        "failed to parse reranker response: {}",
+                        describe_transport_error(e)
+                    ),
                 })?;
 
         // Convert to RerankScore, skipping entries without a recognized score field
@@ -695,31 +725,6 @@ fn parse_rate_limit_reset(body: &str) -> Option<Duration> {
 }
 
 // ── Sanitization ─────────────────────────────────────────────────────
-
-/// Remove any potential API key fragments from error messages.
-fn sanitize_error_message(msg: &str) -> String {
-    // Truncate at a safe char boundary to avoid panicking on multi-byte UTF-8.
-    let truncated = if msg.len() > 500 {
-        let end = msg
-            .char_indices()
-            .take_while(|(i, _)| *i < 500)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        &msg[..end]
-    } else {
-        msg
-    };
-    let sanitized = truncated
-        .replace(|c: char| !c.is_ascii_graphic() && c != ' ', " ")
-        .trim()
-        .to_string();
-    if sanitized.is_empty() {
-        "no details available".to_string()
-    } else {
-        sanitized
-    }
-}
 
 // ── Document truncation ──────────────────────────────────────────────
 

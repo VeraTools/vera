@@ -35,7 +35,7 @@ pub async fn execute_iterative_search_with_context(
 ) -> Result<(Vec<SearchResult>, SearchTimings)> {
     let fetch_per_hop = result_limit;
 
-    let (initial_results, timings) = context
+    let (initial_results, mut timings) = context
         .search(index_dir, query, intent, config, filters, fetch_per_hop)
         .await?;
 
@@ -57,7 +57,7 @@ pub async fn execute_iterative_search_with_context(
     let follow_up_symbols = select_follow_up_symbols(&initial_results);
 
     for symbol in &follow_up_symbols {
-        let (hop_results, _) = context
+        let (hop_results, hop_timings) = context
             .search(
                 index_dir,
                 symbol,
@@ -67,6 +67,7 @@ pub async fn execute_iterative_search_with_context(
                 fetch_per_hop / 2,
             )
             .await?;
+        timings.merge(&hop_timings);
 
         for r in hop_results {
             let key = result_key(&r);

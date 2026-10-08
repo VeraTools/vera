@@ -23,6 +23,25 @@ vera index /path/to/repository
 
 Indexes with missing or zero character-cap metadata continue to work. Running `vera update` cannot convert an incompatible index because unchanged files would retain the old chunk boundaries.
 
+## Embedding Request Defaults
+
+API indexing now sends two 128-input requests at a time (`embedding.max_in_flight_inputs` 256, up from 16) with a 120-second timeout (up from 60). Earlier versions wrote every default into `config.json` on any save, so the first v2 load moves a saved `max_in_flight_inputs` of 16 or `timeout_secs` of 60 to the new defaults and marks the file with `config_format`. To keep the old values, set them again after upgrading:
+
+```bash
+vera config set embedding.max_in_flight_inputs 16
+vera config set embedding.timeout_secs 60
+```
+
+## Indexing and Search Behavior
+
+- Saved `embedding.query_prefix` and `embedding.document_prefix` values now reach API requests. Earlier versions ignored them. If you saved a prefix, rebuild with `vera index` so stored vectors match new queries.
+- Saved `indexing.no_ignore`, `indexing.no_default_excludes`, and `indexing.extra_excludes` now apply when the matching flags are absent; earlier versions reset them on every run. `--exclude` adds to saved globs instead of replacing them.
+- A failed API `vera index` leaves `<repo>/.vera.resume/` so the next run can reuse finished embeddings. Add it to `.gitignore` next to `.vera/`.
+- An index left half-written by an interrupted `vera update` is refused until `vera update` or `vera index` repairs it.
+- Index and update summaries gain request, retry, timeout, and phase-time fields. Existing fields are unchanged. Slow runs print progress lines to stderr even when it is not a terminal; `--no-progress` turns them off.
+- When `retrieval.reranking_enabled` is true but no reranker is configured, or the reranker cannot be built, search prints `reranker unavailable` on stderr and returns unreranked results.
+- Error messages from embedding, reranker, and completion APIs no longer include endpoint URLs.
+
 ## Search Scores
 
 Use the returned result ordering. The JSON `score` remains a pipeline-specific ranking value that may be rank-normalized; it is neither a probability nor comparable across queries. [How it works](how-it-works.md) explains the pipeline.

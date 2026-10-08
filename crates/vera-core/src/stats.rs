@@ -117,6 +117,7 @@ pub fn collect_stats(repo_path: &Path) -> Result<IndexStats> {
     let metadata_path = idx_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open_existing(&metadata_path).context("failed to open metadata store")?;
+    crate::indexing::freshness::ensure_index_complete(&idx_dir)?;
 
     // Collect counts.
     let file_count = metadata_store

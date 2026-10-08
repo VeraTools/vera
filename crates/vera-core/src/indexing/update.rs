@@ -28,7 +28,8 @@ use crate::CancellationToken;
 use crate::config::VeraConfig;
 use crate::discovery;
 use crate::embedding::{
-    EmbeddingError, EmbeddingProvider, embed_chunks_concurrent_with_progress_and_cancellation,
+    EmbeddingError, EmbeddingProvider, EmbeddingRequestStats,
+    embed_chunks_concurrent_with_progress_and_cancellation,
 };
 use crate::parsing;
 use crate::storage::bm25::Bm25Index;
@@ -36,8 +37,10 @@ use crate::storage::metadata::{FileIndexState, FileIndexStatus, MetadataStore};
 use crate::storage::vector::VectorStore;
 use crate::types::Language;
 
+use super::checkpoint::EmbeddingCheckpoint;
 use super::pipeline;
 use super::pipeline::FileError;
+use super::telemetry::{PhaseSecs, rounded_secs};
 
 /// Summary of an incremental update run.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -60,6 +63,18 @@ pub struct UpdateSummary {
     pub files_deferred: usize,
     /// Total chunks after the update.
     pub total_chunks: u64,
+    /// Number of vectors reused from a previous failed run.
+    pub embeddings_reused: usize,
+    /// HTTP embedding attempts sent during this run.
+    pub embedding_requests: u64,
+    /// Immediate retries and requeued resends during this run.
+    pub embedding_retries: u64,
+    /// HTTP embedding attempts that timed out during this run.
+    pub embedding_timeouts: u64,
+    /// Batches that exhausted immediate retries during this run.
+    pub embedding_failed_batches: u64,
+    /// Cumulative busy stage times, rounded to milliseconds.
+    pub phase_secs: PhaseSecs,
     /// Wall-clock elapsed time in seconds.
     pub elapsed_secs: f64,
 }
@@ -296,6 +311,10 @@ where
     F: Fn(UpdateProgress) + Send + Sync,
 {
     let start = Instant::now();
+    let initial_stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot());
+    let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
 
     // ── 1. Validate path ─────────────────────────────────────────
@@ -324,14 +343,17 @@ where
     info!(path = %repo_root.display(), "starting incremental update");
 
     // ── 2. Discover current files on disk ────────────────────────
+    let discovery_start = Instant::now();
     let disc =
         discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
             .context("file discovery failed")?;
+    phase_secs.discovery = rounded_secs(discovery_start.elapsed());
     on_progress(UpdateProgress::DiscoveryDone {
         file_count: disc.files.len(),
     });
 
     // ── 3. Load stored hashes and classify files ─────────────────
+    let classification_start = Instant::now();
     let metadata_path = idx_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
@@ -404,6 +426,8 @@ where
     {
         stored_dim = dim;
     }
+
+    let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
 
     let stored_files: HashSet<String> = metadata_store
         .tracked_files()
@@ -494,8 +518,15 @@ where
     deleted.sort();
 
     let pending_files = modified.len() + added.len();
+    // Repairing an interrupted update must not defer files whose data it removed.
+    let repairing = metadata_store
+        .get_index_meta(super::freshness::INDEX_COMPLETE_KEY)
+        .context("failed to read index completeness")?
+        .as_deref()
+        == Some("0");
     let files_to_process = options
         .max_files
+        .filter(|_| !repairing)
         .unwrap_or(pending_files)
         .min(pending_files);
     let modified_to_process = modified.len().min(files_to_process);
@@ -522,8 +553,10 @@ where
         unchanged,
         deferred: files_deferred,
     });
+    phase_secs.classification = Some(rounded_secs(classification_start.elapsed()));
 
     // ── 4. Prepare modifications and additions ───────────────────
+    let parse_start = Instant::now();
     let files_to_index: Vec<(String, String, String, Option<String>, bool)> = modified
         .iter()
         .cloned()
@@ -605,6 +638,7 @@ where
         .iter()
         .map(|file| file.state.clone())
         .collect();
+    phase_secs.parse = rounded_secs(parse_start.elapsed());
 
     if !files_to_index.is_empty() {
         on_progress(UpdateProgress::ParsingDone {
@@ -641,6 +675,8 @@ where
         let progress_cb = |done: usize, total: usize| {
             on_progress(UpdateProgress::EmbeddingProgress { done, total });
         };
+        progress_cb(0, all_chunks.len());
+        let embed_start = Instant::now();
         let embedding_result = embed_chunks_concurrent_with_progress_and_cancellation(
             provider,
             &all_chunks,
@@ -648,16 +684,21 @@ where
             max_concurrent_requests,
             config.indexing.max_chunk_bytes,
             cancellation.as_async_token(),
+            checkpoint.as_ref(),
             progress_cb,
         )
         .await;
+        phase_secs.embed = rounded_secs(embed_start.elapsed());
         let embeddings = match embedding_result {
             Ok(embeddings) => embeddings,
             Err(error) => {
                 if matches!(error, EmbeddingError::Cancelled) {
                     cancellation.check()?;
                 }
-                return Err(error).context("embedding generation failed");
+                return Err(error).context(EmbeddingCheckpoint::failure_context(
+                    checkpoint.as_ref(),
+                    "update",
+                ));
             }
         };
         on_progress(UpdateProgress::EmbeddingDone {
@@ -667,6 +708,7 @@ where
     };
     cancellation.check()?;
 
+    let store_start = Instant::now();
     let final_stored_dim = if embeddings.is_empty() {
         stored_dim
     } else {
@@ -709,6 +751,21 @@ where
         // All parsing, embedding, and read-only cleanup discovery is complete.
         // Writes below publish the prepared update and must run to completion.
         cancellation.check()?;
+        metadata_store
+            .set_index_meta(super::freshness::INDEX_COMPLETE_KEY, "0")
+            .context("failed to mark index update incomplete")?;
+        // A blank hash never matches, so if these writes are interrupted the
+        // next update reprocesses each touched file (or removes it if it is
+        // gone) even when its contents were restored in the meantime.
+        let dirty_hashes: Vec<(&str, &str)> = prepared_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(deleted.iter().map(String::as_str))
+            .map(|path| (path, ""))
+            .collect();
+        metadata_store
+            .set_file_hashes_batch_borrowed(&dirty_hashes)
+            .context("failed to mark changed files for repair")?;
         bm25_index
             .delete_by_files(&bm25_deletions)
             .context("failed to delete BM25 entries for changed files")?;
@@ -784,7 +841,19 @@ where
         .context("failed to count chunks")?;
     super::freshness::record_index_snapshot(&metadata_store, &config.indexing)
         .context("failed to update index freshness metadata")?;
+    let embeddings_reused = checkpoint
+        .as_ref()
+        .map_or(0, EmbeddingCheckpoint::reused_count);
+    drop(checkpoint);
+    if provider.checkpoints_embeddings() {
+        EmbeddingCheckpoint::remove(&idx_dir);
+    }
     on_progress(UpdateProgress::StorageDone);
+    phase_secs.store = rounded_secs(store_start.elapsed());
+    let stats = provider
+        .stats()
+        .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot())
+        .since(initial_stats);
 
     let summary = UpdateSummary {
         files_modified: processed_modified,
@@ -796,6 +865,12 @@ where
         parse_errors,
         files_deferred,
         total_chunks,
+        embeddings_reused,
+        embedding_requests: stats.requests,
+        embedding_retries: stats.retries,
+        embedding_timeouts: stats.timeouts,
+        embedding_failed_batches: stats.failed_batches,
+        phase_secs,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
 
@@ -936,6 +1011,201 @@ fn remove_file_from_index(
 #[cfg(test)]
 #[path = "update_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use crate::embedding::test_helpers::CheckpointProvider;
+    use crate::indexing::index_repository;
+    use tempfile::tempdir;
+
+    fn config() -> VeraConfig {
+        let mut config = VeraConfig::default();
+        config.embedding.batch_size = 1;
+        config.embedding.max_concurrent_requests = 1;
+        config
+    }
+
+    #[tokio::test]
+    async fn failed_update_preserves_live_rows_and_resumes_saved_embeddings() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("old.rs"), "pub fn old() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        let old_chunks = metadata.get_chunks_by_file("old.rs").unwrap();
+        let old_hash = metadata.get_file_hash("old.rs").unwrap();
+        for name in ["one", "two", "three"] {
+            std::fs::write(
+                root.path().join(format!("{name}.rs")),
+                format!("pub fn {name}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let failing = CheckpointProvider::new(Some(3));
+        let error = update_repository(root.path(), &failing, &config(), "model")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("2 embeddings saved"));
+        assert!(error.to_string().contains("`vera update`"));
+        assert!(error.downcast_ref::<EmbeddingError>().is_some());
+        assert_eq!(metadata.chunk_count().unwrap(), old_chunks.len() as u64);
+        assert_eq!(
+            metadata.get_chunks_by_file("old.rs").unwrap()[0].content,
+            old_chunks[0].content
+        );
+        assert_eq!(metadata.get_file_hash("old.rs").unwrap(), old_hash);
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert!(root.path().join(".vera.resume/embeddings.db").exists());
+
+        // Rejected updates must not reset another model's saved checkpoint.
+        assert!(
+            update_repository(
+                root.path(),
+                &CheckpointProvider::new(None),
+                &config(),
+                "wrong-model"
+            )
+            .await
+            .is_err()
+        );
+        let mut wrong_prefix = CheckpointProvider::new(None);
+        wrong_prefix.prefix = "different: ";
+        assert!(
+            update_repository(root.path(), &wrong_prefix, &config(), "model")
+                .await
+                .is_err()
+        );
+        let checkpoint = EmbeddingCheckpoint::open(&idx_dir, "model\npassage:").unwrap();
+        assert_eq!(checkpoint.saved_count(), 2);
+        drop(checkpoint);
+
+        let healthy = CheckpointProvider::new(None);
+        let summary = update_repository(root.path(), &healthy, &config(), "model")
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_reused, 2);
+        assert_eq!(healthy.inputs(), vec![failing.inputs()[2].clone()]);
+        assert_eq!(summary.total_chunks, 4);
+        assert!(!root.path().join(".vera.resume").exists());
+    }
+
+    #[tokio::test]
+    async fn repair_reindexes_a_file_restored_after_an_interrupted_update() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        std::fs::write(root.path().join("other.rs"), "pub fn other() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let connection = rusqlite::Connection::open(idx_dir.join("metadata.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_update BEFORE INSERT ON chunks BEGIN SELECT RAISE(FAIL, 'interrupted live write'); END;").unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn after() {}\n").unwrap();
+        std::fs::write(root.path().join("other.rs"), "pub fn changed() {}\n").unwrap();
+        update_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap_err();
+        connection
+            .execute_batch("DROP TRIGGER fail_update")
+            .unwrap();
+
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        let summary = update_repository_with_options_and_progress(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+            &UpdateOptions { max_files: Some(1) },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.files_deferred, 0);
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        assert!(!metadata.get_chunks_by_file("live.rs").unwrap().is_empty());
+        assert!(!metadata.get_chunks_by_file("other.rs").unwrap().is_empty());
+        super::super::freshness::ensure_index_complete(&idx_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_live_write_marks_index_incomplete_and_update_repairs_it() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let connection = rusqlite::Connection::open(idx_dir.join("metadata.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_update BEFORE INSERT ON chunks BEGIN SELECT RAISE(FAIL, 'interrupted live write'); END;").unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn after() {}\n").unwrap();
+        let error = update_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("interrupted live write"));
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("0")
+        );
+        assert!(super::super::freshness::ensure_index_complete(&idx_dir).is_err());
+        connection
+            .execute_batch("DROP TRIGGER fail_update")
+            .unwrap();
+        let healthy = CheckpointProvider::new(None);
+        let summary = update_repository(root.path(), &healthy, &config(), "model")
+            .await
+            .unwrap();
+        assert_eq!(summary.embeddings_reused, 1);
+        assert_eq!(healthy.request_count(), 0);
+        assert_eq!(
+            metadata
+                .get_index_meta(super::super::freshness::INDEX_COMPLETE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        super::super::freshness::ensure_index_complete(&idx_dir).unwrap();
+        assert!(!root.path().join(".vera.resume").exists());
+    }
+}
 
 #[cfg(test)]
 mod regression_tests {

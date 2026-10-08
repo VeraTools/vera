@@ -6,11 +6,15 @@
 //! - Building vector indexes via sqlite-vec
 //! - Incremental update logic (detect changed files, re-index only those)
 
+pub(crate) mod checkpoint;
 pub mod freshness;
 pub mod lock;
 pub mod pipeline;
 pub mod progress;
+mod telemetry;
 pub mod update;
+
+pub use telemetry::PhaseSecs;
 
 pub use freshness::{IndexFreshness, detect_staleness};
 pub use pipeline::{

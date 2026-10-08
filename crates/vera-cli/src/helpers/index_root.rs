@@ -108,10 +108,17 @@ pub fn find_index_root(start: &Path) -> Option<PathBuf> {
 /// The paste-ready error shown when no `.vera/` index exists in `cwd` or any
 /// parent directory.
 pub fn missing_index_message(cwd: &Path) -> String {
-    format!(
+    let mut message = format!(
         "no index found in {} or any parent directory.\nRun `vera index .` from the repository root, then rerun this command.",
         cwd.display()
-    )
+    );
+    if cwd
+        .ancestors()
+        .any(|root| root.join(".vera.resume/embeddings.db").is_file())
+    {
+        message.push_str("\nA previous indexing run stopped early; `vera index` will resume from its saved embeddings.");
+    }
+    message
 }
 
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
@@ -188,6 +195,17 @@ mod tests {
             "no index found in /repo/sub/dir or any parent directory.\n\
              Run `vera index .` from the repository root, then rerun this command."
         );
+    }
+
+    #[test]
+    fn missing_index_message_explains_saved_embeddings_from_an_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        let resume = root.path().join(".vera.resume");
+        std::fs::create_dir(&resume).unwrap();
+        std::fs::write(resume.join("embeddings.db"), []).unwrap();
+        let message = missing_index_message(&root.path().join("src/nested"));
+        assert!(message.contains("previous indexing run stopped early"));
+        assert!(message.contains("`vera index` will resume from its saved embeddings"));
     }
 
     #[test]

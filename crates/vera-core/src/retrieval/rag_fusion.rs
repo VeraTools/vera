@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use tracing::{debug, warn};
@@ -146,7 +146,7 @@ async fn execute_rag_fusion_with_context(
     for (idx, result) in outcomes.into_iter().enumerate() {
         match result {
             Ok((results, timings)) => {
-                merge_timings(&mut aggregated_timings, &timings);
+                aggregated_timings.merge(&timings);
                 per_query_results[idx] = results;
                 // Original query (idx 0) gets 2x weight.
                 per_query_weights[idx] = if idx == 0 { 2.0 } else { 1.0 };
@@ -186,21 +186,6 @@ fn dedupe_queries_with_original(original: &str, alternatives: Vec<String>) -> Ve
     all.push(original.to_string());
     all.extend(alternatives);
     normalize_queries(&all)
-}
-
-fn merge_timings(target: &mut SearchTimings, incoming: &SearchTimings) {
-    add_duration(&mut target.embedding, incoming.embedding);
-    add_duration(&mut target.bm25, incoming.bm25);
-    add_duration(&mut target.vector, incoming.vector);
-    add_duration(&mut target.fusion, incoming.fusion);
-    add_duration(&mut target.reranking, incoming.reranking);
-    add_duration(&mut target.augmentation, incoming.augmentation);
-}
-
-fn add_duration(target: &mut Option<Duration>, incoming: Option<Duration>) {
-    if let Some(delta) = incoming {
-        *target = Some(target.unwrap_or_default() + delta);
-    }
 }
 
 /// Run a quick BM25 search and extract deduplicated symbol names and file
@@ -243,6 +228,7 @@ fn bm25_context_hints(index_dir: &Path, query: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn dedupe_preserves_original_first() {
@@ -274,6 +260,7 @@ mod tests {
     fn merge_timings_sums() {
         let mut target = SearchTimings::default();
         let incoming = SearchTimings {
+            rerank_outcome: super::super::RerankOutcome::Reranked,
             embedding: Some(Duration::from_millis(10)),
             bm25: Some(Duration::from_millis(20)),
             vector: Some(Duration::from_millis(30)),
@@ -282,9 +269,10 @@ mod tests {
             augmentation: Some(Duration::from_millis(60)),
             total: None,
         };
-        merge_timings(&mut target, &incoming);
-        merge_timings(&mut target, &incoming);
+        target.merge(&incoming);
+        target.merge(&incoming);
         assert_eq!(target.embedding, Some(Duration::from_millis(20)));
         assert_eq!(target.bm25, Some(Duration::from_millis(40)));
+        assert_eq!(target.rerank_outcome, super::super::RerankOutcome::Reranked);
     }
 }

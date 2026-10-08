@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use model2vec_rs::model::StaticModel;
+use rayon::prelude::*;
 use tokio::task;
 
 use crate::embedding::provider::{EmbeddingError, EmbeddingProvider};
@@ -66,12 +67,22 @@ impl Model2VecProvider {
         let texts = texts.to_vec();
         let input_len = texts.len();
         let max_length = self.max_length;
-        let batch_size = self.batch_size;
         let expected_dim = self.dim;
 
         let vectors = task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                model.encode_with_args(&texts, Some(max_length), batch_size)
+                // The tokenizer pads each batch to its longest text and the
+                // pad tokens are pooled, so a vector would depend on its batch
+                // neighbors. One-text batches match how queries are embedded.
+                texts
+                    .par_iter()
+                    .map(|text| {
+                        model
+                            .encode_with_args(std::slice::from_ref(text), Some(max_length), 1)
+                            .pop()
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
             }))
             .map_err(|_| EmbeddingError::ResponseError {
                 message: "potion-code tokenization failed".to_string(),
@@ -146,5 +157,27 @@ impl EmbeddingProvider for Model2VecProvider {
 
     fn max_batch_size(&self) -> Option<usize> {
         Some(self.batch_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the cached Potion Code model"]
+    async fn vectors_do_not_depend_on_batch_neighbors() {
+        let model_dir = crate::local_models::potion_code_model_dir().unwrap();
+        let provider = Model2VecProvider::from_cached_potion_code_dir(model_dir)
+            .await
+            .unwrap();
+        let short = "fn add(a: i32) -> i32".to_string();
+        let long = "pub fn parse_configuration_file(path: &Path) -> Result<Config> { ".repeat(20);
+        let alone = provider
+            .embed_batch(std::slice::from_ref(&short))
+            .await
+            .unwrap();
+        let batched = provider.embed_batch(&[long, short]).await.unwrap();
+        assert_eq!(alone[0], batched[1]);
     }
 }

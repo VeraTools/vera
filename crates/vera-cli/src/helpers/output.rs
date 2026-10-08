@@ -9,6 +9,14 @@ use super::runtime::is_cancel_error;
 
 // ── Shared progress rendering (deduplicated for index + update) ─────────
 
+pub fn print_embedding_request_summary(requests: u64, retries: u64, timeouts: u64) {
+    if requests > 0 {
+        println!(
+            "  Embedding API:       {requests} requests, {retries} retries, {timeouts} timeouts"
+        );
+    }
+}
+
 /// Render an embed progress display into the shared spinner/bar widgets.
 ///
 /// This is the deduplicated core of `vera index` and `vera update` progress
@@ -18,19 +26,20 @@ use super::runtime::is_cancel_error;
 /// `UpdateProgressTracker`; the widget handling is identical.
 pub fn render_embed_display(
     display: Option<EmbedDisplay>,
+    message: String,
     embed_spinner: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
     embed_bar: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
     multi: &cliclack::MultiProgress,
 ) {
     match display {
-        Some(EmbedDisplay::Indeterminate { done }) => {
+        Some(EmbedDisplay::Indeterminate { .. }) => {
             let mut guard = embed_spinner.lock().unwrap();
             if guard.is_none() {
                 let w = Arc::new(multi.add(cliclack::spinner()));
-                w.start(format!("Generating embeddings ({} chunks so far)", done));
+                w.start(message);
                 *guard = Some(w);
             } else if let Some(w) = guard.as_ref() {
-                w.set_message(format!("Generating embeddings ({} chunks so far)", done));
+                w.set_message(message);
             }
         }
         Some(EmbedDisplay::Determinate { done, total }) => {
@@ -45,15 +54,28 @@ pub fn render_embed_display(
             let mut guard = embed_bar.lock().unwrap();
             if guard.is_none() {
                 let w = Arc::new(multi.add(cliclack::progress_bar(total as u64)));
-                w.start(format!("Generating embeddings ({}/{})", done, total));
+                w.start(message);
                 w.set_position(done as u64);
                 *guard = Some(w);
             } else if let Some(w) = guard.as_ref() {
                 w.set_position(done as u64);
-                w.set_message(format!("Generating embeddings ({}/{})", done, total));
+                w.set_message(message);
             }
         }
         Some(EmbedDisplay::Done { .. }) | None => {}
+    }
+}
+
+/// Refresh active embedding widgets while the provider awaits a response.
+pub fn refresh_embed_message(
+    message: String,
+    embed_spinner: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
+    embed_bar: &Arc<Mutex<Option<Arc<cliclack::ProgressBar>>>>,
+) {
+    for widget in [embed_spinner, embed_bar] {
+        if let Some(widget) = widget.lock().unwrap().as_ref() {
+            widget.set_message(message.clone());
+        }
     }
 }
 
@@ -151,6 +173,18 @@ pub fn output_results(
     compact: bool,
     budget: usize,
 ) {
+    output_search_results(results, json_output, raw, compact, budget, None);
+}
+
+/// Search-only opt-in diagnostics; the results use the unchanged serializer.
+pub fn output_search_results(
+    results: &[vera_core::types::SearchResult],
+    json_output: bool,
+    raw: bool,
+    compact: bool,
+    budget: usize,
+    rerank_status: Option<(&vera_core::retrieval::RerankOutcome, Option<&str>)>,
+) {
     use vera_core::parsing::signatures::extract_signature_for_path;
 
     // When compact mode is on, pre-compute signature-only content for each result.
@@ -175,7 +209,12 @@ pub fn output_results(
         .collect();
 
     if json_output {
-        println!("{}", json_within_budget(results, &contents, budget));
+        let json = json_within_budget(results, &contents, budget);
+        if let Some((outcome, kind)) = rerank_status {
+            println!("{}", json_with_rerank_status(&json, outcome, kind));
+        } else {
+            println!("{json}");
+        }
     } else if raw {
         if results.is_empty() {
             println!("No results found.");
@@ -201,6 +240,24 @@ pub fn output_results(
             println!("```");
         }
     }
+}
+
+fn json_with_rerank_status(
+    results_json: &str,
+    outcome: &vera_core::retrieval::RerankOutcome,
+    kind: Option<&str>,
+) -> String {
+    use vera_core::retrieval::RerankOutcome;
+    let reason = match outcome {
+        RerankOutcome::Fallback(reason) => Some(reason.as_str()),
+        _ => None,
+    };
+    format!(
+        "{{\"results\":{results_json},\"reranked\":{},\"reranker\":{},\"rerank_fallback_reason\":{}}}",
+        matches!(outcome, RerankOutcome::Reranked),
+        serde_json::json!(kind),
+        serde_json::json!(reason),
+    )
 }
 
 fn result_info_line(r: &vera_core::types::SearchResult) -> String {
@@ -353,6 +410,11 @@ pub fn print_human_summary(summary: &vera_core::indexing::IndexSummary, verbose:
     println!("  Chunks created:      {}", summary.chunks_created);
     println!("  Embeddings generated: {}", summary.embeddings_generated);
     println!("  Elapsed time:        {:.2}s", summary.elapsed_secs);
+    print_embedding_request_summary(
+        summary.embedding_requests,
+        summary.embedding_retries,
+        summary.embedding_timeouts,
+    );
 
     if summary.files_with_tree_sitter_errors > 0 || summary.files_using_tier0_fallback > 0 {
         println!();
@@ -416,6 +478,28 @@ pub fn print_human_summary(summary: &vera_core::indexing::IndexSummary, verbose:
 mod tests {
     use super::*;
     use vera_core::types::Language;
+
+    #[test]
+    fn rerank_envelope_preserves_the_exact_results_json() {
+        use vera_core::retrieval::RerankOutcome;
+        let results = two_results();
+        let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+        for budget in [0, 120, 300] {
+            let array = json_within_budget(&results, &contents, budget);
+            let envelope = json_with_rerank_status(
+                &array,
+                &RerankOutcome::Fallback("failure \"quoted\"\n".into()),
+                Some("api"),
+            );
+            assert!(envelope.starts_with(&format!("{{\"results\":{array},")));
+            let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+            assert_eq!(
+                parsed["results"],
+                serde_json::from_str::<serde_json::Value>(&array).unwrap()
+            );
+            assert_eq!(parsed["rerank_fallback_reason"], "failure \"quoted\"\n");
+        }
+    }
 
     /// Two results whose combined content far exceeds a small budget.
     fn two_results() -> Vec<vera_core::types::SearchResult> {

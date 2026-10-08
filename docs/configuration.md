@@ -10,14 +10,14 @@
 |---|---:|---|
 | `embedding.batch_size` | 4 local, 128 API | Number of inputs in an embedding request. |
 | `embedding.max_concurrent_requests` | 1 local, 8 API | Maximum concurrent embedding requests. |
-| `embedding.max_in_flight_inputs` | 16 | Bounds active embedding inputs across requests. |
-| `embedding.timeout_secs` | 60 | Embedding request timeout. |
+| `embedding.max_in_flight_inputs` | 256 | Bounds active embedding inputs across requests; with API defaults this sends two 128-input requests at a time. |
+| `embedding.timeout_secs` | 120 | Embedding request timeout. |
 | `embedding.max_retries` | 3 | Retries transient embedding errors. |
 | `embedding.max_stored_dim` | 1024 | Truncates stored vectors above this dimension; `0` stores full vectors. |
 | `embedding.gpu_mem_limit_mb` | 0 | ONNX CUDA memory limit in MB; `0` uses the runtime default. |
 | `embedding.low_vram` | `false` | Uses conservative GPU settings. |
-| `embedding.query_prefix` | `null` | Overrides the API query prefix. |
-| `embedding.document_prefix` | `null` | Overrides the API document prefix. |
+| `embedding.query_prefix` | `null` | Overrides the API model's query prefix; `""` disables it. A non-empty `EMBEDDING_QUERY_PREFIX` wins. |
+| `embedding.document_prefix` | `null` | Overrides the API model's document prefix; `""` disables it. A non-empty `EMBEDDING_DOCUMENT_PREFIX` wins. |
 | `embedding.model_aliases` | `[]` | Groups provider model names that have verified-compatible embeddings. |
 
 ### Environment variables
@@ -55,7 +55,7 @@
 | `retrieval.default_limit` | 5 | Number of results returned by default. |
 | `retrieval.rrf_k` | 60.0 | Reciprocal Rank Fusion constant. |
 | `retrieval.rerank_candidates` | 50 | Candidates passed to the reranker. |
-| `retrieval.reranking_enabled` | `false` | Enables reranking when credentials are available. |
+| `retrieval.reranking_enabled` | `false` | Enables reranking. Uses the API reranker when `RERANKER_MODEL_*` is configured; otherwise local backends download and run the bundled local reranker, and the API backend warns that no reranker is configured. |
 | `retrieval.max_output_chars` | 0 | Total search-output character budget; `0` is unlimited. |
 | `retrieval.max_rerank_batch` | 20 | Documents per reranker request; `0` disables batching. |
 | `retrieval.reranker_protocol` (`rerank_protocol`) | auto | Selects `generic` or `voyage` wire format. |
@@ -101,7 +101,7 @@
 | `indexing.max_chunk_lines` | 200 | Maximum lines in a chunk before splitting. |
 | `indexing.max_file_size_bytes` | 1000000 | Skips files larger than this size. |
 | `indexing.default_excludes` | built-in list | Adds default exclusions to `.gitignore` rules. |
-| `indexing.extra_excludes` | `[]` | Adds exclusion globs from CLI configuration. |
+| `indexing.extra_excludes` | `[]` | Exclusion globs; `--exclude` adds to them. |
 | `indexing.no_ignore` | `false` | Disables `.gitignore` and `.veraignore` parsing. |
 | `indexing.no_default_excludes` | `false` | Disables smart default exclusions. |
 | `indexing.max_chunk_bytes` | 24576 | Splits oversized embedding chunks at line boundaries; `0` disables this cap. |
@@ -111,7 +111,7 @@
 | Name | Default | What it does |
 |---|---:|---|
 | `VERA_MAX_CHUNK_BYTES` | 24576 | Overrides the byte chunk cap. |
-| `VERA_MAX_IN_FLIGHT_INPUTS` | 0 | Caps the number of embedding inputs held in flight. |
+| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Default for `embedding.max_in_flight_inputs` when the config does not set it. |
 | `VERA_OVERCAP_FIXTURE` | unset | Selects the filter-scan over-cap test fixture. |
 
 ## Runtime/misc

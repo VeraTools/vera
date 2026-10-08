@@ -8,7 +8,7 @@ use vera_core::config::{InferenceBackend, VeraConfig};
 use vera_core::retrieval::search_service::{SearchContext, SearchTimings};
 use vera_core::types::{SearchFilters, SearchResult};
 
-use crate::helpers::{output_results, prepare_indexed_search, should_offer_auto_index};
+use crate::helpers::{output_search_results, prepare_indexed_search, should_offer_auto_index};
 use crate::state;
 
 /// Run the `vera search <query>` command.
@@ -22,6 +22,7 @@ pub fn run(
     limit: Option<usize>,
     filters: &vera_core::types::SearchFilters,
     json_output: bool,
+    rerank_status: bool,
     raw: bool,
     timing: bool,
     deep: bool,
@@ -83,12 +84,18 @@ pub fn run(
         runner.execute_multi_query_search(&queries, intent)?
     };
 
-    output_results(
+    output_search_results(
         &results,
         json_output,
         raw,
         compact,
         config.retrieval.max_output_chars,
+        rerank_status.then(|| {
+            (
+                &timings.rerank_outcome,
+                vera_core::retrieval::reranker_kind(&config, backend),
+            )
+        }),
     );
 
     if results.is_empty() && !json_output {
@@ -158,7 +165,7 @@ impl SearchRunner<'_> {
                 ..*self
             };
             let (results, query_timings) = query_runner.execute_query(query, intent)?;
-            merge_timings(&mut timings, &query_timings);
+            timings.merge(&query_timings);
             result_sets.push(results);
         }
 
@@ -176,21 +183,6 @@ impl SearchRunner<'_> {
         )?;
         timings.total = Some(overall_start.elapsed());
         Ok((fused, timings))
-    }
-}
-
-fn merge_timings(target: &mut SearchTimings, incoming: &SearchTimings) {
-    add_duration(&mut target.embedding, incoming.embedding);
-    add_duration(&mut target.bm25, incoming.bm25);
-    add_duration(&mut target.vector, incoming.vector);
-    add_duration(&mut target.fusion, incoming.fusion);
-    add_duration(&mut target.reranking, incoming.reranking);
-    add_duration(&mut target.augmentation, incoming.augmentation);
-}
-
-fn add_duration(target: &mut Option<Duration>, incoming: Option<Duration>) {
-    if let Some(incoming) = incoming {
-        *target = Some(target.unwrap_or_default() + incoming);
     }
 }
 

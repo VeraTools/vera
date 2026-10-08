@@ -7,7 +7,7 @@ mod indexing;
 mod retrieval;
 
 pub use backend::{InferenceBackend, OnnxExecutionProvider, is_local_mode, resolve_backend};
-pub use embedding::{EmbeddingConfig, model_names_match_with_aliases};
+pub use embedding::{EmbeddingConfig, SAVED_CONFIG_FORMAT, model_names_match_with_aliases};
 pub use hardware::{GpuInfo, detect_gpu_info};
 pub(crate) use indexing::DEFAULT_MAX_FILE_SIZE_BYTES;
 pub use indexing::IndexingConfig;

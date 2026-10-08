@@ -9,8 +9,8 @@ use vera_core::config::InferenceBackend;
 use vera_core::indexing::{UpdateOptions, UpdateProgress};
 
 use crate::helpers::{
-    cancel_task_on_signal, finalize_progress_ui, handle_embedding_done, render_embed_display,
-    stop_embed_spinner_on_parsing_done, wait_for_interrupt,
+    EmbeddingReporter, cancel_task_on_signal, finalize_progress_ui, handle_embedding_done,
+    render_embed_display, stop_embed_spinner_on_parsing_done, wait_for_interrupt,
 };
 use crate::state;
 
@@ -69,9 +69,9 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
 
     let mut config = state::load_runtime_config()?;
     config.adjust_for_backend(backend);
-    config.indexing.extra_excludes = exclude;
-    config.indexing.no_ignore = no_ignore;
-    config.indexing.no_default_excludes = no_default_excludes;
+    config.indexing.extra_excludes.extend(exclude);
+    config.indexing.no_ignore |= no_ignore;
+    config.indexing.no_default_excludes |= no_default_excludes;
 
     let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
         &config, backend,
@@ -116,6 +116,8 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     }
 
     let show_progress = !json_output && !no_progress && std::io::stderr().is_terminal();
+    let provider = Arc::new(provider);
+    let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
     let options = UpdateOptions { max_files };
     let cancellation = vera_core::CancellationToken::new();
     let operation_cancellation = cancellation.clone();
@@ -143,11 +145,14 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         let embed_spinner_ref = Arc::clone(&embed_spinner);
         let embed_bar_ref = Arc::clone(&embed_bar);
         let multi_ref = multi.clone();
+        let progress_reporter = reporter.clone();
 
         let on_progress = move |event: UpdateProgress| {
             let display = {
                 let mut guard = tracker_ref.lock().unwrap();
-                guard.handle(&event)
+                let display = guard.handle(&event);
+                progress_reporter.observe(display.clone(), guard.fixed_total());
+                display
             };
             match event {
                 UpdateProgress::DiscoveryDone { file_count } => {
@@ -182,7 +187,13 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
                     );
                 }
                 UpdateProgress::EmbeddingProgress { .. } => {
-                    render_embed_display(display, &embed_spinner_ref, &embed_bar_ref, &multi_ref);
+                    render_embed_display(
+                        display,
+                        progress_reporter.message(false).unwrap_or_default(),
+                        &embed_spinner_ref,
+                        &embed_bar_ref,
+                        &multi_ref,
+                    );
                 }
                 UpdateProgress::EmbeddingDone { .. } => {
                     let is_done = matches!(
@@ -205,7 +216,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         let task = rt.handle().spawn(async move {
             vera_core::indexing::update_repository_with_options_and_progress_and_cancellation(
                 &task_repo_path,
-                &provider,
+                provider.as_ref(),
                 &config,
                 &model_name,
                 &options,
@@ -214,26 +225,43 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
             )
             .await
         });
-        let result = rt.block_on(cancel_task_on_signal(task, signal, cancellation, "update"));
+        let result = rt.block_on(reporter.wait(
+            cancel_task_on_signal(task, signal, cancellation, "update"),
+            true,
+            |message| crate::helpers::refresh_embed_message(message, &embed_spinner, &embed_bar),
+        ));
         finalize_progress_ui(&result, &parse_spinner, &embed_spinner, &embed_bar, &multi);
+        reporter.print_failure(&result);
         result.context("update failed")?
     } else {
         let task_repo_path = repo_path.to_path_buf();
         let signal = wait_for_interrupt(rt.handle())?;
+        let progress_reporter = reporter.clone();
+        let tracker =
+            std::sync::Mutex::new(vera_core::indexing::progress::UpdateProgressTracker::new());
         let task = rt.handle().spawn(async move {
             vera_core::indexing::update_repository_with_options_and_progress_and_cancellation(
                 &task_repo_path,
-                &provider,
+                provider.as_ref(),
                 &config,
                 &model_name,
                 &options,
-                |_| {},
+                move |event| {
+                    let mut tracker = tracker.lock().unwrap();
+                    let display = tracker.handle(&event);
+                    progress_reporter.observe(display, tracker.fixed_total());
+                },
                 &operation_cancellation,
             )
             .await
         });
-        rt.block_on(cancel_task_on_signal(task, signal, cancellation, "update"))
-            .context("update failed")?
+        let result = rt.block_on(reporter.wait(
+            cancel_task_on_signal(task, signal, cancellation, "update"),
+            false,
+            |_| {},
+        ));
+        reporter.print_failure(&result);
+        result.context("update failed")?
     };
 
     // Output results.
@@ -269,6 +297,11 @@ fn print_update_summary(summary: &vera_core::indexing::UpdateSummary) {
     println!("  Files deferred:  {}", summary.files_deferred);
     println!("  Total chunks:    {}", summary.total_chunks);
     println!("  Elapsed time:    {:.2}s", summary.elapsed_secs);
+    crate::helpers::print_embedding_request_summary(
+        summary.embedding_requests,
+        summary.embedding_retries,
+        summary.embedding_timeouts,
+    );
 
     if !summary.parse_errors.is_empty() {
         println!();

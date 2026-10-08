@@ -433,6 +433,7 @@ fn compute_bm25_candidates(query: &str, limit: usize) -> usize {
 /// Per-stage timing data from hybrid search.
 #[derive(Debug, Default)]
 pub struct HybridTimings {
+    pub rerank_outcome: super::RerankOutcome,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -1052,6 +1053,7 @@ async fn search_hybrid_reranked_inner(
     match rerank_results(reranker, vector_query, &hybrid_results, rerank_candidates).await {
         Ok(mut reranked) => {
             timings.reranking = Some(rerank_start.elapsed());
+            timings.rerank_outcome = super::RerankOutcome::Reranked;
             info!(
                 query = vector_query,
                 candidates = hybrid_results.len(),
@@ -1070,13 +1072,7 @@ async fn search_hybrid_reranked_inner(
                 return Err(HybridSearchError::Cancelled);
             }
             timings.reranking = Some(rerank_start.elapsed());
-            warn!(
-                error = %rerank_err,
-                "reranker unavailable, returning unreranked results"
-            );
-            eprintln!(
-                "Warning: reranker unavailable ({rerank_err}), returning unreranked results."
-            );
+            timings.rerank_outcome = super::RerankOutcome::fallback(rerank_err.to_string());
             let mut results = hybrid_results;
             results.truncate(fetch_limit);
             Ok((results, timings))

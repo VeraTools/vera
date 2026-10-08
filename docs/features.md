@@ -108,7 +108,19 @@ Vera respects `.gitignore` by default. For more control, `.veraignore` (gitignor
 
 ### Progress Reporting
 
-Indexing and updating show an interactive progress display with file discovery, classification, parsing, and embedding generation phases. Pass `--no-progress` to disable interactive progress bars, or use `--json` for machine consumption.
+Indexing and updating show an interactive progress display with file discovery, classification, parsing, and embedding generation phases. The embedding line includes the rate, an ETA, and any retries or timeouts. Pass `--no-progress` to turn progress off.
+
+When stderr is not a terminal (CI, agents, `--json` runs), slow embedding runs print a plain line to stderr at most every 10 seconds, plus a final line:
+
+```text
+embedding 512/1772 chunks, 41.2 chunks/s, ETA 31s, 1 retry, 0 timeouts
+```
+
+Runs that finish within 10 seconds print nothing. Stdout carries only the summary, so `--json` output stays one JSON object. Besides the file and chunk counts, the `vera index --json` and `vera update --json` summaries include `embeddings_reused`, `embedding_requests`, `embedding_retries`, `embedding_timeouts`, `embedding_failed_batches`, and `phase_secs` (busy seconds per stage; stages overlap, so they do not add up to `elapsed_secs`). Request counters are 0 for local backends.
+
+### Resumable API Indexing
+
+If an API-backed `vera index` fails partway, the embeddings it already received are kept in `<repo>/.vera.resume/`. The next `vera index` reuses the ones whose chunk text, model, and document prefix still match, and reports them as `embeddings_reused`. The live `.vera/` index is not touched until a build finishes, and a successful full build deletes `.vera.resume/`.
 
 ### Verbose Indexing
 
@@ -228,6 +240,7 @@ Output is progressively truncated to fit a total character budget (`retrieval.ma
 |------|--------|
 | *(default)* | Markdown codeblocks with file path, line range, and symbol metadata |
 | `--json` | Compact single-line JSON |
+| `--json --rerank-status` | Search-only object with `results`, `reranked`, `reranker` (`api`, `local`, or null), and `rerank_fallback_reason` (string or null). Without `--rerank-status`, search JSON stays a bare results array. |
 | `--raw` | Verbose human-readable output for `search`, `grep`, and `references`. Works before or after the subcommand. |
 | `--timing` | Timing info to stderr (`search`: per-stage, `grep`: total). Works before or after the subcommand. |
 

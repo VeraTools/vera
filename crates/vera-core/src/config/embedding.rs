@@ -64,7 +64,7 @@ impl Default for EmbeddingConfig {
             batch_size: if is_local { 4 } else { 128 },
             max_concurrent_requests: if is_local { 1 } else { 8 },
             max_in_flight_inputs: default_max_in_flight_inputs(),
-            timeout_secs: 60,
+            timeout_secs: 120,
             max_retries: 3,
             max_stored_dim: 1024,
             gpu_mem_limit_mb: 0,
@@ -77,10 +77,33 @@ impl Default for EmbeddingConfig {
 }
 
 fn default_max_in_flight_inputs() -> usize {
-    env_usize("VERA_MAX_IN_FLIGHT_INPUTS", 16).max(1)
+    env_usize("VERA_MAX_IN_FLIGHT_INPUTS", 256).max(1)
 }
 
+/// Saved-config format written by this version. Configs saved without it
+/// predate 2.0, when every save pinned the embedding defaults below.
+pub const SAVED_CONFIG_FORMAT: u32 = 2;
+const V1_MAX_IN_FLIGHT_INPUTS: usize = 16;
+const V1_TIMEOUT_SECS: u64 = 60;
+
 impl EmbeddingConfig {
+    /// Move values still equal to the pre-2.0 defaults (16 in-flight inputs,
+    /// 60 s timeout) to the current defaults in a config saved without
+    /// `SAVED_CONFIG_FORMAT`. Those defaults sent one 16-input API request at a
+    /// time and failed whole runs on a single slow response.
+    pub fn upgrade_saved_defaults(&mut self, format: Option<u32>) {
+        if format.is_some() {
+            return;
+        }
+        let current = Self::default();
+        if self.max_in_flight_inputs == V1_MAX_IN_FLIGHT_INPUTS {
+            self.max_in_flight_inputs = current.max_in_flight_inputs;
+        }
+        if self.timeout_secs == V1_TIMEOUT_SECS {
+            self.timeout_secs = current.timeout_secs;
+        }
+    }
+
     /// Clamp configured batching so the product of batch size and concurrency
     /// never exceeds `max_in_flight_inputs`.
     pub fn bounded_parallelism(&self) -> (usize, usize) {
@@ -166,6 +189,51 @@ mod tests {
         };
 
         assert_eq!(config.bounded_parallelism(), (16, 1));
+    }
+
+    #[test]
+    fn api_defaults_send_two_full_batches_at_once() {
+        let config = EmbeddingConfig {
+            batch_size: 128,
+            max_concurrent_requests: 8,
+            ..EmbeddingConfig::default()
+        };
+
+        assert_eq!(config.bounded_parallelism(), (128, 2));
+    }
+
+    #[test]
+    fn unversioned_saved_config_moves_only_old_defaults() {
+        let mut legacy = EmbeddingConfig {
+            max_in_flight_inputs: 16,
+            timeout_secs: 60,
+            ..EmbeddingConfig::default()
+        };
+        legacy.upgrade_saved_defaults(None);
+        assert_eq!(legacy.max_in_flight_inputs, default_max_in_flight_inputs());
+        assert_eq!(legacy.timeout_secs, 120);
+
+        let mut custom = EmbeddingConfig {
+            max_in_flight_inputs: 128,
+            timeout_secs: 90,
+            ..EmbeddingConfig::default()
+        };
+        custom.upgrade_saved_defaults(None);
+        assert_eq!(
+            (custom.max_in_flight_inputs, custom.timeout_secs),
+            (128, 90)
+        );
+
+        let mut current = EmbeddingConfig {
+            max_in_flight_inputs: 16,
+            timeout_secs: 60,
+            ..EmbeddingConfig::default()
+        };
+        current.upgrade_saved_defaults(Some(SAVED_CONFIG_FORMAT));
+        assert_eq!(
+            (current.max_in_flight_inputs, current.timeout_secs),
+            (16, 60)
+        );
     }
 
     #[test]
