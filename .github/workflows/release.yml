@@ -290,14 +290,14 @@ jobs:
         shell: bash
         run: |
           TAG="$RELEASE_TAG"
-          # Find the previous tag by version order (the one just below current)
-          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1)
-          # If grep matched only the tag itself, there's no previous
-          if [ "$PREV_TAG" = "$TAG" ]; then PREV_TAG=""; fi
+          # Find the previous tag by version order. A rehearsal's tag may not
+          # exist yet, so rank it alongside the existing tags.
+          PREV_TAG=$({ git tag --list 'v*'; echo "$TAG"; } | sort -uV | awk -v tag="$TAG" '$0 == tag { print previous; exit } { previous = $0 }')
+          # HEAD is the tagged commit when publishing and the revision when rehearsing.
           if [ -z "$PREV_TAG" ]; then
             RANGE="HEAD"
           else
-            RANGE="${PREV_TAG}..${TAG}"
+            RANGE="${PREV_TAG}..HEAD"
           fi
 
           BODY=""
@@ -321,6 +321,7 @@ jobs:
             BODY="Maintenance release — see commit history for details.\n"
           fi
 
+          BODY="${BODY}**Release notes and upgrade steps**: https://github.com/${{ github.repository }}/blob/${TAG}/docs/whats-new.md\n\n"
           BODY="${BODY}**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
 
           # Write to file for the release step

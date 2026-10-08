@@ -14,6 +14,7 @@ These are the main technical choices behind Vera's current architecture. Earlier
 | Filter-scan default | Filtered vector scans enabled by default after profiling | [008](008-filter-during-scan-default.md) |
 | Filter-scan profiling | Persistent-index query-latency profile and bounded resident state | [009](009-filter-scan-profiling.md) |
 | Reranker batching | Client-side batch setting retained as the batching contract | [010](010-reranker-server-batching.md) |
+| Indexing reliability | Resumable API builds, completeness marker, request window, additive JSON contract | [011](011-indexing-reliability.md) |
 
 ADR 003 records the original spike evaluation. Its default-model conclusion was superseded in v1.1.0; the table above reflects the current default.
 
