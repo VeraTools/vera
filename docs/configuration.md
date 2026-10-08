@@ -16,8 +16,8 @@
 | `embedding.max_stored_dim` | 1024 | Truncates stored vectors above this dimension; `0` stores full vectors. |
 | `embedding.gpu_mem_limit_mb` | 0 | ONNX CUDA memory limit in MB; `0` uses the runtime default. |
 | `embedding.low_vram` | `false` | Uses conservative GPU settings. |
-| `embedding.query_prefix` | `null` | Overrides the API query prefix. |
-| `embedding.document_prefix` | `null` | Overrides the API document prefix. |
+| `embedding.query_prefix` | `null` | Overrides the API model's query prefix; `""` disables it. A non-empty `EMBEDDING_QUERY_PREFIX` wins. |
+| `embedding.document_prefix` | `null` | Overrides the API model's document prefix; `""` disables it. A non-empty `EMBEDDING_DOCUMENT_PREFIX` wins. |
 | `embedding.model_aliases` | `[]` | Groups provider model names that have verified-compatible embeddings. |
 
 ### Environment variables

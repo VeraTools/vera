@@ -32,6 +32,15 @@ vera config set embedding.max_in_flight_inputs 16
 vera config set embedding.timeout_secs 60
 ```
 
+## Indexing and Search Behavior
+
+- Saved `embedding.query_prefix` and `embedding.document_prefix` values now reach API requests. Earlier versions ignored them. If you saved a prefix, rebuild with `vera index` so stored vectors match new queries.
+- A failed API `vera index` leaves `<repo>/.vera.resume/` so the next run can reuse finished embeddings. Add it to `.gitignore` next to `.vera/`.
+- An index left half-written by an interrupted `vera update` is refused until `vera update` or `vera index` repairs it.
+- Index and update summaries gain request, retry, timeout, and phase-time fields. Existing fields are unchanged. Slow runs print progress lines to stderr even when it is not a terminal; `--no-progress` turns them off.
+- When `retrieval.reranking_enabled` is true but no reranker is configured, or the reranker cannot be built, search prints `reranker unavailable` on stderr and returns unreranked results.
+- Error messages from embedding, reranker, and completion APIs no longer include endpoint URLs.
+
 ## Search Scores
 
 Use the returned result ordering. The JSON `score` remains a pipeline-specific ranking value that may be rank-normalized; it is neither a probability nor comparable across queries. [How it works](how-it-works.md) explains the pipeline.

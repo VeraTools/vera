@@ -57,7 +57,7 @@ vera watch .
 Add the project index to `.gitignore`:
 
 ```bash
-echo '.vera/' >> .gitignore
+printf '.vera/\n.vera.resume/\n' >> .gitignore
 git rm -r --cached .vera
 ```
 
@@ -114,7 +114,29 @@ vera config set embedding.batch_size 100
 
 Vera clamps known provider limits automatically. Gemini embedding endpoints are capped at 100 inputs per request.
 
+Embedding requests retry connection errors, 408, 429, and 5xx responses with jittered backoff, honoring `Retry-After` up to 60 seconds. A batch that times out or keeps failing goes to the back of the queue and is resent up to twice. Other 4xx responses and authentication errors fail at once. When indexing fails, stdout stays empty and stderr ends with a line of request, retry, and timeout counts followed by the error. Run `vera index` again: an API build resumes from the embeddings it already received.
+
+Error messages never include the endpoint URL or bearer tokens. They name the underlying cause instead, such as `tcp connect error: Connection refused`.
+
 If the provider returns `429` or `quota exceeded`, that is a provider-side limit. `embedding.max_concurrent_requests` only reduces how many requests Vera sends in parallel; it does not raise your API quota. Lower concurrency if you are hitting short burst limits, or wait for quota reset / enable billing if the project is out of quota.
+
+## Index is incomplete
+
+```text
+the index at ... is incomplete because an update stopped before it finished writing
+```
+
+A `vera update` was interrupted while writing. Search and `vera stats` refuse the index instead of reading partial data. Run `vera update` to repair it, or `vera index` to rebuild.
+
+## Reranker unavailable
+
+`Warning: reranker unavailable (...)` on stderr means search returned unreranked results. The text in parentheses gives the cause. If reranking is enabled but no reranker is configured, configure an endpoint or turn reranking off:
+
+```bash
+vera config set retrieval.reranking_enabled false
+```
+
+`vera search --json --rerank-status` reports `reranked`, `reranker`, and `rerank_fallback_reason` alongside the results.
 
 ## ONNX Runtime errors
 
