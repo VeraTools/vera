@@ -518,8 +518,15 @@ where
     deleted.sort();
 
     let pending_files = modified.len() + added.len();
+    // Repairing an interrupted update must not defer files whose data it removed.
+    let repairing = metadata_store
+        .get_index_meta(super::freshness::INDEX_COMPLETE_KEY)
+        .context("failed to read index completeness")?
+        .as_deref()
+        == Some("0");
     let files_to_process = options
         .max_files
+        .filter(|_| !repairing)
         .unwrap_or(pending_files)
         .min(pending_files);
     let modified_to_process = modified.len().min(files_to_process);
@@ -747,6 +754,18 @@ where
         metadata_store
             .set_index_meta(super::freshness::INDEX_COMPLETE_KEY, "0")
             .context("failed to mark index update incomplete")?;
+        // A blank hash never matches, so if these writes are interrupted the
+        // next update reprocesses each touched file (or removes it if it is
+        // gone) even when its contents were restored in the meantime.
+        let dirty_hashes: Vec<(&str, &str)> = prepared_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(deleted.iter().map(String::as_str))
+            .map(|path| (path, ""))
+            .collect();
+        metadata_store
+            .set_file_hashes_batch_borrowed(&dirty_hashes)
+            .context("failed to mark changed files for repair")?;
         bm25_index
             .delete_by_files(&bm25_deletions)
             .context("failed to delete BM25 entries for changed files")?;
@@ -1082,6 +1101,55 @@ mod checkpoint_tests {
         assert_eq!(healthy.inputs(), vec![failing.inputs()[2].clone()]);
         assert_eq!(summary.total_chunks, 4);
         assert!(!root.path().join(".vera.resume").exists());
+    }
+
+    #[tokio::test]
+    async fn repair_reindexes_a_file_restored_after_an_interrupted_update() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        std::fs::write(root.path().join("other.rs"), "pub fn other() {}\n").unwrap();
+        index_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap();
+        let idx_dir = pipeline::index_dir(root.path());
+        let connection = rusqlite::Connection::open(idx_dir.join("metadata.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_update BEFORE INSERT ON chunks BEGIN SELECT RAISE(FAIL, 'interrupted live write'); END;").unwrap();
+        std::fs::write(root.path().join("live.rs"), "pub fn after() {}\n").unwrap();
+        std::fs::write(root.path().join("other.rs"), "pub fn changed() {}\n").unwrap();
+        update_repository(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+        )
+        .await
+        .unwrap_err();
+        connection
+            .execute_batch("DROP TRIGGER fail_update")
+            .unwrap();
+
+        std::fs::write(root.path().join("live.rs"), "pub fn before() {}\n").unwrap();
+        let summary = update_repository_with_options_and_progress(
+            root.path(),
+            &CheckpointProvider::new(None),
+            &config(),
+            "model",
+            &UpdateOptions { max_files: Some(1) },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.files_deferred, 0);
+        let metadata = MetadataStore::open(&idx_dir.join("metadata.db")).unwrap();
+        assert!(!metadata.get_chunks_by_file("live.rs").unwrap().is_empty());
+        assert!(!metadata.get_chunks_by_file("other.rs").unwrap().is_empty());
+        super::super::freshness::ensure_index_complete(&idx_dir).unwrap();
     }
 
     #[tokio::test]
