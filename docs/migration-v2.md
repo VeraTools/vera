@@ -42,6 +42,17 @@ vera config set embedding.timeout_secs 60
 - When `retrieval.reranking_enabled` is true but no reranker is configured, or the reranker cannot be built, search prints `reranker unavailable` on stderr and returns unreranked results.
 - Error messages from embedding, reranker, and completion APIs no longer include endpoint URLs.
 
+## Docker Images
+
+Each image now sets `VERA_BACKEND`: Potion Code for `cpu`, and the matching Jina ONNX backend for `cuda`, `rocm`, and `openvino`. Earlier images ran Jina ONNX on the CPU in every variant. GPU images keep the same model, so their indexes still work. Indexes built with an older `cpu` image used Jina, so rebuild them or keep Jina:
+
+```bash
+docker run --rm -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu index /workspace
+docker run --rm -i -e VERA_BACKEND=onnx-jina-cpu -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu
+```
+
+The image setting wins over a backend saved with `vera setup`; pass `-e VERA_BACKEND=<backend>` to override it.
+
 ## Search Scores
 
 See [Search scores](how-it-works.md#search-scores) for interpreting returned ranking values.
