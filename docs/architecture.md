@@ -33,7 +33,7 @@ Data flow: file → grammar lookup → tree-sitter parse (+ diagnostics) → nod
 1. Query enters `search_service.rs`
 2. BM25 (`bm25.rs`) and vector search (`vector.rs`) run in parallel
 3. Results fused via RRF (`hybrid.rs`, k=60). `fuse_rrf_multi_weighted` generalizes fusion to N ranked lists.
-4. Query-aware ranking and candidate shaping apply deterministic priors (`ranking.rs`, `search_service.rs`)
+4. Query-aware ranking and candidate shaping apply deterministic priors (`ranking/`, `search_service.rs`). `ranking/score.rs` orchestrates the stages; `path.rs` and `content.rs` hold path and content signals, `query.rs` classifies queries, and `diversification.rs` limits same-file crowding.
 5. Top candidates optionally reranked by cross-encoder (`reranker.rs` or `local_reranker.rs`)
 6. Final `Vec<SearchResult>` returned
 
@@ -78,11 +78,11 @@ All stored in `.vera/` at the project root.
 
 ## vera-cli
 
-`main.rs` parses args via clap. `commands/` contains the CLI subcommand implementations and helpers: `agent`, `backend`, `config`, `doctor`, `explain_path`, `grep`, `index`, `mcp`, `overview`, `references` (also used by `dead-code`), `repair`, `search`, `serve`, `setup`, `stats`, `structural`, `uninstall`, `update`, `upgrade`, and `watch`.
+`main.rs` parses args via clap. `commands/` contains the CLI subcommand implementations: `agent`, `backend`, `config`, `doctor`, `explain_path`, `grep`, `index`, `mcp`, `overview`, `references` (also used by `dead-code`), `repair`, `search`, `serve`, `setup`, `stats`, `structural`, `uninstall`, `update`, `upgrade`, and `watch`. `helpers.rs` re-exports shared helpers from `helpers/`: `filters.rs` (search filters and git scopes), `index_root.rs` (index discovery and staleness warnings), `output.rs` (result rendering, output budgets, and progress display), and `runtime.rs` (backend flags and interrupt handling).
 
 ## vera-mcp
 
-`server.rs` routes JSON-RPC requests. `tools.rs` implements seven MCP tools: `search_code`, `get_stats`, `get_overview`, `regex_search`, `structural_search`, `find_references`, and `explain_path`. `search_code`, `structural_search`, and `find_references` auto-index and start a file watcher on first use. Search, references, and overview tools also accept changed-file git scopes.
+`server.rs` routes JSON-RPC requests. `tools.rs` exposes seven MCP tools: `search_code`, `get_stats`, `get_overview`, `regex_search`, `structural_search`, `find_references`, and `explain_path`. `tools/schemas.rs` defines their input schemas, `tools/handlers.rs` handles calls, and `tools/runtime.rs` holds the shared Tokio runtime, cached search context, and per-repository file watchers. `search_code`, `structural_search`, and `find_references` auto-index and start a file watcher on first use. Search, references, and overview tools also accept changed-file git scopes.
 
 ## Adding a new language
 
