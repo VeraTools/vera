@@ -143,7 +143,7 @@ impl EmbeddingCheckpoint {
         vec![None; keys.len()]
     }
 
-    /// One transaction per completed concurrency group, off the async executor.
+    /// One transaction per completed batch, off the async executor.
     pub(crate) async fn store(&self, vectors: &[(EmbeddingKey, &[f32])]) {
         if vectors.is_empty() || self.0.disabled.load(Ordering::Relaxed) {
             return;

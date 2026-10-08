@@ -301,6 +301,157 @@ fn assert_output_order(output: &[(String, Vec<f32>)], chunks: &[Chunk]) {
     assert_eq!(output, expected);
 }
 
+#[tokio::test(start_paused = true)]
+async fn sliding_window_completes_other_batches_before_a_slow_first_batch() {
+    struct SlowFirstProvider(Mutex<Vec<String>>);
+
+    impl EmbeddingProvider for SlowFirstProvider {
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if texts[0].contains("fn chunk_0") {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            self.0.lock().unwrap().extend_from_slice(texts);
+            Ok(texts.iter().map(|text| vector_for(text)).collect())
+        }
+
+        fn expected_dim(&self) -> Option<usize> {
+            Some(2)
+        }
+    }
+
+    let provider = SlowFirstProvider(Mutex::new(Vec::new()));
+    let chunks = chunks(5);
+    let output = embed_chunks_concurrent(&provider, &chunks, 1, 2, 0)
+        .await
+        .unwrap();
+    let expected: Vec<_> = [1, 2, 3, 4, 0]
+        .map(|index| chunk_to_embedding_text(&chunks[index], 0))
+        .into();
+    assert_eq!(*provider.0.lock().unwrap(), expected);
+    assert_output_order(&output, &chunks);
+}
+
+#[derive(Default)]
+struct TerminalDrainProvider {
+    stats: EmbeddingStats,
+    hang: bool,
+    draining: Notify,
+}
+
+impl EmbeddingProvider for TerminalDrainProvider {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        self.stats.requests.fetch_add(1, Ordering::Relaxed);
+        if texts[0].contains("fn chunk_0") {
+            return Err(EmbeddingError::ApiError {
+                status: 400,
+                message: "first terminal error".into(),
+            });
+        }
+        if self.hang {
+            self.draining.notify_one();
+            return std::future::pending().await;
+        }
+        let transient = texts[0].contains("fn chunk_2");
+        tokio::time::sleep(Duration::from_secs(if transient { 2 } else { 1 })).await;
+        if transient {
+            Err(EmbeddingError::ApiError {
+                status: 500,
+                message: "later error".into(),
+            })
+        } else {
+            Ok(texts.iter().map(|text| vector_for(text)).collect())
+        }
+    }
+
+    fn expected_dim(&self) -> Option<usize> {
+        Some(2)
+    }
+
+    fn stats(&self) -> Option<&EmbeddingStats> {
+        Some(&self.stats)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_failure_drains_started_batches_and_keeps_the_first_error() {
+    let provider = TerminalDrainProvider::default();
+    let root = tempfile::tempdir().unwrap();
+    let checkpoint = EmbeddingCheckpoint::open(&root.path().join(".vera"), "test-model").unwrap();
+    let chunks = chunks(5);
+    let progress = Mutex::new(Vec::new());
+    let result = embed_chunks_concurrent_with_progress_and_cancellation(
+        &provider,
+        &chunks,
+        1,
+        3,
+        0,
+        &CancellationToken::new(),
+        Some(&checkpoint),
+        |done, total| progress.lock().unwrap().push((done, total)),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(EmbeddingError::ApiError { status: 400, message })
+        if message == "first terminal error")
+    );
+    assert_eq!(
+        provider.stats.snapshot(),
+        EmbeddingRequestStats {
+            requests: 3,
+            failed_batches: 2,
+            ..Default::default()
+        }
+    );
+    assert_eq!(*progress.lock().unwrap(), vec![(1, 5)]);
+    let text = chunk_to_embedding_text(&chunks[1], 0);
+    assert_eq!(checkpoint.saved_count(), 1);
+    assert_eq!(
+        checkpoint.lookup(&[EmbeddingCheckpoint::key(&text)]),
+        vec![Some(vector_for(&text))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_during_terminal_drain_returns_the_first_error_at_once() {
+    let provider = TerminalDrainProvider {
+        hang: true,
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let chunks = chunks(5);
+    let future = embed_chunks_concurrent_with_progress_and_cancellation(
+        &provider,
+        &chunks,
+        1,
+        3,
+        0,
+        &cancel,
+        None,
+        |_, _| panic!("cancelled batches must not report progress"),
+    );
+    tokio::pin!(future);
+    tokio::select! {
+        result = &mut future => panic!("embedding ended before drain: {result:?}"),
+        _ = provider.draining.notified() => {}
+    }
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_millis(1), future)
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Err(EmbeddingError::ApiError { status: 400, .. })),
+        "{result:?}"
+    );
+    assert_eq!(
+        provider.stats.snapshot(),
+        EmbeddingRequestStats {
+            requests: 3,
+            failed_batches: 1,
+            ..Default::default()
+        }
+    );
+}
+
 #[tokio::test]
 async fn server_errors_retry_then_succeed_with_exact_counters() {
     for status in [

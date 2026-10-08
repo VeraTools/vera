@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -1422,87 +1423,101 @@ where
             items,
         })
         .collect();
-    while !pending.is_empty() {
-        let group: Vec<_> = pending.drain(..max_concurrent.min(pending.len())).collect();
-
-        let futures: Vec<_> = group
-            .iter()
-            .map(|batch| async move {
-                if batch.requeues > 0 {
+    let run_batch = |batch: PendingBatch| async move {
+        let result = async {
+            if batch.requeues > 0 {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
+                    _ = tokio::time::sleep(provider.requeue_delay(batch.requeues)) => {}
+                }
+                if cancel.is_cancelled() {
+                    return Err(EmbeddingError::Cancelled);
+                }
+                if let Some(stats) = provider.stats() {
+                    stats.retries.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            debug!(batch = batch.index + 1, total_batches, "embedding batch");
+            embed_batch_resilient(provider, batch.items.clone(), cancel).await
+        }
+        .await;
+        (batch, result)
+    };
+    let mut in_flight = FuturesUnordered::new();
+    let mut terminal_error = None;
+    // A provider error already received wins over cancellation, so the caller
+    // sees the real failure; cancellation still stops without draining.
+    let stop = |terminal_error: Option<EmbeddingError>| {
+        Err(terminal_error.unwrap_or(EmbeddingError::Cancelled))
+    };
+    loop {
+        if cancel.is_cancelled() {
+            return stop(terminal_error);
+        }
+        // Refill each freed slot, rather than waiting for the slowest batch.
+        // A terminal failure drains only the already-launched siblings.
+        if terminal_error.is_none() {
+            while in_flight.len() < max_concurrent {
+                let Some(batch) = pending.pop_front() else {
+                    break;
+                };
+                in_flight.push(run_batch(batch));
+            }
+        }
+        let completed = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return stop(terminal_error),
+            completed = in_flight.next() => completed,
+        };
+        let Some((mut batch, result)) = completed else {
+            break;
+        };
+        if matches!(result, Err(EmbeddingError::Cancelled)) {
+            return stop(terminal_error);
+        }
+        if result.is_err()
+            && let Some(stats) = provider.stats()
+        {
+            stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+        }
+        match result {
+            Ok(_) if cancel.is_cancelled() => return stop(terminal_error),
+            Ok(batch_results) => {
+                if let Some(checkpoint) = checkpoint {
+                    let saved: Vec<_> = batch_results
+                        .iter()
+                        .map(|(index, _, vector)| (keys[*index], vector.as_slice()))
+                        .collect();
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
-                        _ = tokio::time::sleep(provider.requeue_delay(batch.requeues)) => {}
-                    }
-                    if cancel.is_cancelled() {
-                        return Err(EmbeddingError::Cancelled);
-                    }
-                    if let Some(stats) = provider.stats() {
-                        stats.retries.fetch_add(1, Ordering::Relaxed);
+                        _ = cancel.cancelled() => return stop(terminal_error),
+                        _ = checkpoint.store(&saved) => {}
                     }
                 }
-                debug!(batch = batch.index + 1, total_batches, "embedding batch");
-                embed_batch_resilient(provider, batch.items.clone(), cancel).await
-            })
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-        if let Some(stats) = provider.stats() {
-            let failed = results.iter().filter(|result| {
-                matches!(result, Err(error) if !matches!(error, EmbeddingError::Cancelled))
-            }).count();
-            stats
-                .failed_batches
-                .fetch_add(failed as u64, Ordering::Relaxed);
-        }
-        if let Some(checkpoint) = checkpoint {
-            // Save every successful sibling before the first provider error wins.
-            let saved: Vec<_> = results
-                .iter()
-                .filter_map(|result| result.as_ref().ok())
-                .flatten()
-                .map(|(index, _, vector)| (keys[*index], vector.as_slice()))
-                .collect();
-            checkpoint.store(&saved).await;
-        }
-        let mut unreported_successes: usize = results
-            .iter()
-            .filter_map(|result| result.as_ref().ok())
-            .map(Vec::len)
-            .sum();
-        for (mut batch, result) in group.into_iter().zip(results) {
-            // Batch errors (real provider failures or Cancelled) win over a
-            // pending cancellation so the caller sees the actual failure.
-            let batch_results = match result {
-                Ok(vectors) => vectors,
-                Err(error) => {
-                    if !cancel.is_cancelled()
-                        && is_transient_batch_error(&error)
-                        && batch.requeues < MAX_REQUEUES
-                    {
-                        batch.requeues += 1;
-                        pending.push_back(batch);
-                        continue;
-                    }
-                    // These siblings were already completed and checkpointed,
-                    // even when their positions follow the terminal failure.
-                    if !cancel.is_cancelled()
-                        && !matches!(error, EmbeddingError::Cancelled)
-                        && unreported_successes > 0
-                    {
-                        on_progress(done_count + unreported_successes, total);
-                    }
-                    return Err(error);
+                if cancel.is_cancelled() {
+                    return stop(terminal_error);
                 }
-            };
-            unreported_successes -= batch_results.len();
-            if cancel.is_cancelled() {
-                return Err(EmbeddingError::Cancelled);
+                done_count += batch_results.len();
+                all_results.extend(batch_results);
+                on_progress(done_count, total);
             }
-            done_count += batch_results.len();
-            all_results.extend(batch_results);
-            on_progress(done_count, total);
+            Err(error) if terminal_error.is_none() => {
+                if !cancel.is_cancelled()
+                    && is_transient_batch_error(&error)
+                    && batch.requeues < MAX_REQUEUES
+                {
+                    batch.requeues += 1;
+                    pending.push_back(batch);
+                } else {
+                    terminal_error = Some(error);
+                }
+            }
+            Err(_) => {}
         }
+    }
+    if let Some(error) = terminal_error {
+        return Err(error);
     }
 
     all_results.sort_by_key(|(orig_idx, _, _)| *orig_idx);
