@@ -109,6 +109,7 @@ pub fn embedding_execution_provider(
 pub(super) const ORT_VERSION: &str = "1.24.4";
 pub(super) const DEFAULT_CUDA_MAJOR: u32 = 12;
 pub(super) const CUDA_13_ORT_MIN_MAJOR: u32 = 13;
+#[cfg(any(target_os = "linux", test))]
 pub(super) const CUDA_RUNTIME_LIBRARY_PREFIXES: [&str; 3] =
     ["libcudart.so.", "libcublas.so.", "libcublasLt.so."];
 
