@@ -11,6 +11,7 @@ Vera reports `vera-graded-2-1-task-mean-v1`: primary targets have relevance 2, s
 ## Limits And Caveats
 
 - The current release benchmark is deterministic and fully local, which makes it better for regression gating.
+- Queries over a fixed index return identical results. Rebuilding indexes can reorder chunks with tied scores, so two fresh rebuilds of the same code differ by about 0.0004 nDCG@10 on the full suite. Treat smaller deltas as noise, and compare chunk and result output directly when a change should be ranking-neutral.
 - The legacy public snapshot is still useful for older comparisons, but it should not be treated as the current retrieval baseline.
 - Benchmark numbers in this repository show comparative behavior, not a promise that another machine or codebase will land on the same values.
 
