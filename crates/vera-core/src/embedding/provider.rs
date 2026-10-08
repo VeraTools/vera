@@ -83,9 +83,10 @@ pub trait EmbeddingProvider: Send + Sync {
         None
     }
 
-    /// Delay before a failed batch is resent from the end of the queue.
-    fn requeue_delay(&self, attempt: u32) -> Duration {
-        retry_delay(attempt, None, &RetryPolicy::default(), retry_jitter())
+    /// Delay before a batch that failed with `error` is resent from the end
+    /// of the queue.
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
+        delay_after_error(attempt, error, RetryPolicy::default())
     }
 
     /// Persist costly API embeddings across failed indexing attempts.
@@ -437,6 +438,21 @@ impl RetryPolicy {
     }
 }
 
+/// Backoff after `error`: its `Retry-After` when given, else the policy
+/// (slower for rate limits).
+fn delay_after_error(attempt: u32, error: &EmbeddingError, policy: RetryPolicy) -> Duration {
+    let retry_after = match error {
+        EmbeddingError::RateLimitError { retry_after, .. } => *retry_after,
+        _ => None,
+    };
+    retry_delay(
+        attempt,
+        retry_after,
+        &policy.for_error(error),
+        retry_jitter(),
+    )
+}
+
 fn retry_delay(
     attempt: u32,
     retry_after: Option<Duration>,
@@ -529,14 +545,11 @@ impl OpenAiProvider {
         loop {
             if retries > 0 {
                 let is_rate_limit = matches!(last_err, Some(EmbeddingError::RateLimitError { .. }));
-                let policy = self
-                    .retry_policy
-                    .for_error(last_err.as_ref().expect("retry follows a failed request"));
-                let retry_after = match &last_err {
-                    Some(EmbeddingError::RateLimitError { retry_after, .. }) => *retry_after,
-                    _ => None,
-                };
-                let delay = retry_delay(retries, retry_after, &policy, retry_jitter());
+                let delay = delay_after_error(
+                    retries,
+                    last_err.as_ref().expect("retry follows a failed request"),
+                    self.retry_policy,
+                );
                 debug!(
                     attempt = retries + 1,
                     delay_ms = delay.as_millis(),
@@ -721,8 +734,8 @@ impl EmbeddingProvider for OpenAiProvider {
         Some(&self.stats)
     }
 
-    fn requeue_delay(&self, attempt: u32) -> Duration {
-        retry_delay(attempt, None, &self.retry_policy, retry_jitter())
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
+        delay_after_error(attempt, error, self.retry_policy)
     }
 
     fn checkpoints_embeddings(&self) -> bool {
@@ -888,8 +901,8 @@ impl<P: EmbeddingProvider> EmbeddingProvider for CachedEmbeddingProvider<P> {
         self.inner.stats()
     }
 
-    fn requeue_delay(&self, attempt: u32) -> Duration {
-        self.inner.requeue_delay(attempt)
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
+        self.inner.requeue_delay(attempt, error)
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -1052,6 +1065,8 @@ const MAX_REQUEUES: u32 = 2;
 struct PendingBatch {
     index: usize,
     requeues: u32,
+    /// Wait before resending, chosen from the error that requeued the batch.
+    delay: Duration,
     items: Vec<EmbeddingBatchItem>,
 }
 
@@ -1420,6 +1435,7 @@ where
         .map(|(index, items)| PendingBatch {
             index,
             requeues: 0,
+            delay: Duration::ZERO,
             items,
         })
         .collect();
@@ -1429,7 +1445,7 @@ where
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
-                    _ = tokio::time::sleep(provider.requeue_delay(batch.requeues)) => {}
+                    _ = tokio::time::sleep(batch.delay) => {}
                 }
                 if cancel.is_cancelled() {
                     return Err(EmbeddingError::Cancelled);
@@ -1508,6 +1524,7 @@ where
                     && batch.requeues < MAX_REQUEUES
                 {
                     batch.requeues += 1;
+                    batch.delay = provider.requeue_delay(batch.requeues, &error);
                     pending.push_back(batch);
                 } else {
                     terminal_error = Some(error);
@@ -2134,6 +2151,24 @@ mod tests {
         assert_eq!(info.max_tokens, 8192);
         assert_eq!(info.input_tokens, None);
         assert!(is_context_size_error(&err));
+    }
+
+    #[test]
+    fn requeue_delay_keeps_retry_after_and_the_rate_limit_base() {
+        let policy = RetryPolicy::default();
+        let limited = |retry_after| EmbeddingError::RateLimitError {
+            message: "busy".into(),
+            retry_after,
+        };
+        assert_eq!(
+            delay_after_error(1, &limited(Some(Duration::from_secs(7))), policy),
+            Duration::from_secs(7)
+        );
+        assert!(delay_after_error(1, &limited(None), policy) >= Duration::from_secs(1));
+        let refused = EmbeddingError::ConnectionError {
+            message: "refused".into(),
+        };
+        assert!(delay_after_error(1, &refused, policy) <= Duration::from_millis(500));
     }
 
     #[test]

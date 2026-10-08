@@ -44,13 +44,13 @@ impl EmbeddingProvider for DynamicProvider {
         }
     }
 
-    fn requeue_delay(&self, attempt: u32) -> Duration {
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
         match self {
-            Self::Api(p) => p.requeue_delay(attempt),
-            Self::Local(p) => p.requeue_delay(attempt),
-            Self::Model2Vec(p) => p.requeue_delay(attempt),
+            Self::Api(p) => p.requeue_delay(attempt, error),
+            Self::Local(p) => p.requeue_delay(attempt, error),
+            Self::Model2Vec(p) => p.requeue_delay(attempt, error),
             #[cfg(test)]
-            Self::Stub(p) => p.requeue_delay(attempt),
+            Self::Stub(p) => p.requeue_delay(attempt, error),
         }
     }
 

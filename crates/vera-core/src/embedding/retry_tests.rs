@@ -749,9 +749,9 @@ impl EmbeddingProvider for WaitObserver {
         self.provider.stats()
     }
 
-    fn requeue_delay(&self, attempt: u32) -> Duration {
+    fn requeue_delay(&self, attempt: u32, error: &EmbeddingError) -> Duration {
         self.waiting.notify_one();
-        self.provider.requeue_delay(attempt)
+        self.provider.requeue_delay(attempt, error)
     }
 }
 
