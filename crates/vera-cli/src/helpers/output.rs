@@ -261,12 +261,30 @@ fn json_within_budget(
             return shorter;
         }
     }
-    // One result still exceeds the budget: shorten its content instead.
+    // One result still exceeds the budget: keep the longest content prefix
+    // whose serialized form fits. Escaping makes raw byte counts unreliable,
+    // so measure the serialized document itself.
     let head = &results[..1];
-    let overhead = json_results_string(head, &[""]).len();
-    let room = budget.saturating_sub(overhead).max(1);
-    let trimmed = truncate_to_budget(contents[0], room);
-    json_results_string(head, &[trimmed.as_ref()])
+    let render = |allowed: usize| {
+        let trimmed = truncate_to_budget(contents[0], allowed);
+        Some(json_results_string(head, &[trimmed.as_ref()])).filter(|json| json.len() <= budget)
+    };
+    let Some(mut best) = render(0) else {
+        // Metadata alone exceeds the budget.
+        return "[]".to_string();
+    };
+    let (mut low, mut high) = (1, contents[0].len());
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        match render(mid) {
+            Some(json) => {
+                best = json;
+                low = mid + 1;
+            }
+            None => high = mid - 1,
+        }
+    }
+    best
 }
 
 /// Numbered verbose listing, one block per result. With a budget, each result's
@@ -453,9 +471,30 @@ mod tests {
         let results = two_results();
         let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
         let budgeted = json_within_budget(&results[..1], &contents[..1], 120);
+        assert!(budgeted.len() <= 120, "{} bytes", budgeted.len());
         let parsed: serde_json::Value =
             serde_json::from_str(&budgeted).expect("budgeted JSON must parse");
         assert_eq!(parsed.as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn json_budget_counts_escaped_content() {
+        let mut results = two_results();
+        results.truncate(1);
+        results[0].content = "\"quoted\"\n".repeat(120);
+        let contents = [results[0].content.as_str()];
+        let budgeted = json_within_budget(&results, &contents, 120);
+        assert!(budgeted.len() <= 120, "{} bytes", budgeted.len());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&budgeted).expect("budgeted JSON must parse");
+        assert_eq!(parsed.as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn json_budget_smaller_than_metadata_returns_empty_array() {
+        let results = two_results();
+        let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(json_within_budget(&results, &contents, 10), "[]");
     }
 
     #[test]
