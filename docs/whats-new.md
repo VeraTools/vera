@@ -5,7 +5,7 @@ Release highlights from v1.0 onward. For the current benchmark tables and method
 ## v2.0.1
 
 - Environment variables now override saved settings at runtime and are never written to `config.json`. Before, running `vera config set` with a variable such as `VERA_MAX_OUTPUT_CHARS` set saved that value permanently, and once a value was saved, the matching variable was ignored. If an earlier `config set` saved an override you did not intend, set the key again or remove it from `config.json`.
-- GPU indexing uses batches of at most 16 inputs again, as v1 did. v2.0.0 let cards with 8 GB or more run batches of 64 to 128, which used about 4x the GPU memory and indexed 4 to 12% slower on an RTX 4080.
+- GPU indexing uses batches of at most 16 inputs again, as v1 did. v2.0.0 let cards with 8 GB or more run batches of 64 to 128, which used up to 4x the GPU memory and indexed 4 to 12% slower on an RTX 4080.
 - When an API batch is split for exceeding the model context and a later part fails, the finished parts are kept for resume, and a retry resends only the unfinished inputs.
 
 ## v2.0.0
