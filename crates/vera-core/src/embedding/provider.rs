@@ -1237,59 +1237,60 @@ fn shrink_text_for_context_limit(
     shrunk
 }
 
+/// Embed `items`, splitting batches that exceed the provider context.
+///
+/// Finished vectors are appended to `completed` as they arrive. On failure,
+/// `items` holds every item not yet embedded, so callers can keep the finished
+/// sub-batches and resend only the rest.
 async fn embed_batch_resilient<P: EmbeddingProvider>(
     provider: &P,
-    items: Vec<EmbeddingBatchItem>,
+    items: &mut Vec<EmbeddingBatchItem>,
+    completed: &mut Vec<(usize, String, Vec<f32>)>,
     cancel: &CancellationToken,
-) -> Result<Vec<(usize, String, Vec<f32>)>, EmbeddingError> {
-    let mut pending = vec![items];
-    let mut completed = Vec::new();
+) -> Result<(), EmbeddingError> {
+    let mut pending = vec![std::mem::take(items)];
 
     while let Some(batch) = pending.pop() {
-        if cancel.is_cancelled() {
-            return Err(EmbeddingError::Cancelled);
-        }
-        let texts: Vec<String> = batch.iter().map(|item| item.text.clone()).collect();
-
-        let result = tokio::select! {
-            biased;
-            result = provider.embed_batch_cancellable(&texts, cancel) => result,
-            _ = cancel.cancelled() => Err(EmbeddingError::Cancelled),
-        };
-
-        match result {
-            Ok(vectors) => {
-                completed.extend(
-                    batch
-                        .into_iter()
-                        .zip(vectors)
-                        .map(|(item, vector)| (item.original_index, item.chunk_id, vector)),
-                );
-            }
-            Err(error) => {
-                let Some(info) = context_size_info(&error) else {
-                    return Err(error);
-                };
-
-                if batch.len() > 1 {
-                    let mid = batch.len() / 2;
-                    debug!(
-                        batch_size = batch.len(),
-                        token_limit = info.max_tokens,
-                        "embedding batch exceeded provider context limit, retrying in smaller batches"
+        let error = if cancel.is_cancelled() {
+            EmbeddingError::Cancelled
+        } else {
+            let texts: Vec<String> = batch.iter().map(|item| item.text.clone()).collect();
+            let result = tokio::select! {
+                biased;
+                result = provider.embed_batch_cancellable(&texts, cancel) => result,
+                _ = cancel.cancelled() => Err(EmbeddingError::Cancelled),
+            };
+            match result {
+                Ok(vectors) => {
+                    completed.extend(
+                        batch
+                            .into_iter()
+                            .zip(vectors)
+                            .map(|(item, vector)| (item.original_index, item.chunk_id, vector)),
                     );
-                    pending.push(batch[mid..].to_vec());
-                    pending.push(batch[..mid].to_vec());
                     continue;
                 }
+                Err(error) => error,
+            }
+        };
 
-                let item = batch.into_iter().next().expect("single-item batch");
-                let shrunk_text =
-                    shrink_text_for_context_limit(&item.text, info.max_tokens, info.input_tokens);
-                if shrunk_text == item.text {
-                    return Err(error);
-                }
+        if let Some(info) = context_size_info(&error) {
+            if batch.len() > 1 {
+                let mid = batch.len() / 2;
+                debug!(
+                    batch_size = batch.len(),
+                    token_limit = info.max_tokens,
+                    "embedding batch exceeded provider context limit, retrying in smaller batches"
+                );
+                pending.push(batch[mid..].to_vec());
+                pending.push(batch[..mid].to_vec());
+                continue;
+            }
 
+            let item = &batch[0];
+            let shrunk_text =
+                shrink_text_for_context_limit(&item.text, info.max_tokens, info.input_tokens);
+            if shrunk_text != item.text {
                 warn!(
                     chunk_id = %item.chunk_id,
                     token_limit = info.max_tokens,
@@ -1300,14 +1301,19 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
                 );
                 pending.push(vec![EmbeddingBatchItem {
                     text: shrunk_text,
-                    ..item
+                    ..item.clone()
                 }]);
+                continue;
             }
         }
-    }
 
-    completed.sort_by_key(|(original_index, _, _)| *original_index);
-    Ok(completed)
+        *items = batch
+            .into_iter()
+            .chain(pending.into_iter().flatten())
+            .collect();
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Embed all chunks using the given provider with concurrent batch processing.
@@ -1439,7 +1445,8 @@ where
             items,
         })
         .collect();
-    let run_batch = |batch: PendingBatch| async move {
+    let run_batch = |mut batch: PendingBatch| async move {
+        let mut embedded = Vec::new();
         let result = async {
             if batch.requeues > 0 {
                 tokio::select! {
@@ -1455,10 +1462,10 @@ where
                 }
             }
             debug!(batch = batch.index + 1, total_batches, "embedding batch");
-            embed_batch_resilient(provider, batch.items.clone(), cancel).await
+            embed_batch_resilient(provider, &mut batch.items, &mut embedded, cancel).await
         }
         .await;
-        (batch, result)
+        (batch, embedded, result)
     };
     let mut in_flight = FuturesUnordered::new();
     let mut terminal_error = None;
@@ -1486,39 +1493,18 @@ where
             _ = cancel.cancelled() => return stop(terminal_error),
             completed = in_flight.next() => completed,
         };
-        let Some((mut batch, result)) = completed else {
+        let Some((mut batch, embedded, result)) = completed else {
             break;
         };
         if matches!(result, Err(EmbeddingError::Cancelled)) {
             return stop(terminal_error);
         }
-        if result.is_err()
-            && let Some(stats) = provider.stats()
-        {
-            stats.failed_batches.fetch_add(1, Ordering::Relaxed);
-        }
-        match result {
-            Ok(_) if cancel.is_cancelled() => return stop(terminal_error),
-            Ok(batch_results) => {
-                if let Some(checkpoint) = checkpoint {
-                    let saved: Vec<_> = batch_results
-                        .iter()
-                        .map(|(index, _, vector)| (keys[*index], vector.as_slice()))
-                        .collect();
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => return stop(terminal_error),
-                        _ = checkpoint.store(&saved) => {}
-                    }
-                }
-                if cancel.is_cancelled() {
-                    return stop(terminal_error);
-                }
-                done_count += batch_results.len();
-                all_results.extend(batch_results);
-                on_progress(done_count, total);
+        if let Err(error) = result {
+            if let Some(stats) = provider.stats() {
+                stats.failed_batches.fetch_add(1, Ordering::Relaxed);
             }
-            Err(error) if terminal_error.is_none() => {
+            if terminal_error.is_none() {
+                // Only the items still unembedded go back on the queue.
                 if !cancel.is_cancelled()
                     && is_transient_batch_error(&error)
                     && batch.requeues < MAX_REQUEUES
@@ -1530,7 +1516,29 @@ where
                     terminal_error = Some(error);
                 }
             }
-            Err(_) => {}
+        }
+        // Keep sub-batches that finished before a split batch failed.
+        if !embedded.is_empty() {
+            if cancel.is_cancelled() {
+                return stop(terminal_error);
+            }
+            if let Some(checkpoint) = checkpoint {
+                let saved: Vec<_> = embedded
+                    .iter()
+                    .map(|(index, _, vector)| (keys[*index], vector.as_slice()))
+                    .collect();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return stop(terminal_error),
+                    _ = checkpoint.store(&saved) => {}
+                }
+            }
+            if cancel.is_cancelled() {
+                return stop(terminal_error);
+            }
+            done_count += embedded.len();
+            all_results.extend(embedded);
+            on_progress(done_count, total);
         }
     }
     if let Some(error) = terminal_error {
@@ -1712,19 +1720,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let checkpoint =
             EmbeddingCheckpoint::open(&root.path().join(".vera"), "model\npassage:").unwrap();
-        let chunks: Vec<_> = (0..3)
-            .map(|index| Chunk {
-                id: format!("chunk-{index}"),
-                file_path: "test.rs".into(),
-                line_start: index + 1,
-                line_end: index + 1,
-                content: format!("fn item_{index}() {{}}"),
-                language: crate::types::Language::Rust,
-                symbol_type: None,
-                symbol_name: None,
-                part_index: None,
-            })
-            .collect();
+        let chunks = checkpoint_test_chunks(3);
         let failing = CheckpointProvider::new(Some(1));
         let error = embed_chunks_concurrent_with_progress_and_cancellation(
             &failing,
@@ -1780,6 +1776,88 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["chunk-0", "chunk-1", "chunk-2"]
         );
+    }
+
+    fn checkpoint_test_chunks(count: u32) -> Vec<Chunk> {
+        (0..count)
+            .map(|index| Chunk {
+                id: format!("chunk-{index}"),
+                file_path: "test.rs".into(),
+                line_start: index + 1,
+                line_end: index + 1,
+                content: format!("fn item_{index}() {{}}"),
+                language: crate::types::Language::Rust,
+                symbol_type: None,
+                symbol_name: None,
+                part_index: None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn checkpoint_keeps_finished_halves_of_a_split_batch_that_fails() {
+        use crate::embedding::test_helpers::CheckpointProvider;
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint =
+            EmbeddingCheckpoint::open(&root.path().join(".vera"), "model\npassage:").unwrap();
+        let chunks = checkpoint_test_chunks(4);
+        // Call 1 splits on context size, call 2 embeds the first half, call 3 fails.
+        let mut failing = CheckpointProvider::new(Some(3));
+        failing.max_batch = 2;
+        let cancel = CancellationToken::new();
+        let embed = |provider, checkpoint| {
+            embed_chunks_concurrent_with_progress_and_cancellation(
+                provider,
+                &chunks,
+                4,
+                1,
+                200,
+                &cancel,
+                checkpoint,
+                |_, _| {},
+            )
+        };
+        let error = embed(&failing, Some(&checkpoint)).await.unwrap_err();
+        assert!(matches!(
+            error,
+            EmbeddingError::ApiError { status: 400, .. }
+        ));
+        assert_eq!(failing.request_count(), 3);
+        assert_eq!(checkpoint.saved_count(), 2);
+
+        let healthy = CheckpointProvider::new(None);
+        let resumed = embed(&healthy, Some(&checkpoint)).await.unwrap();
+        let failed_half = failing.inputs()[6..].to_vec();
+        assert_eq!(healthy.inputs(), failed_half);
+        assert_eq!(
+            resumed,
+            embed(&CheckpointProvider::new(None), None).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn requeue_resends_only_the_unfinished_part_of_a_split_batch() {
+        use crate::embedding::test_helpers::CheckpointProvider;
+        let chunks = checkpoint_test_chunks(4);
+        let mut provider = CheckpointProvider::new(Some(3));
+        provider.max_batch = 2;
+        provider.fail_status = 503;
+        let results = embed_chunks_concurrent_with_progress_and_cancellation(
+            &provider,
+            &chunks,
+            4,
+            1,
+            200,
+            &CancellationToken::new(),
+            None,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 4);
+        let inputs = provider.inputs();
+        assert_eq!(provider.request_count(), 4);
+        assert_eq!(inputs[8..], inputs[6..8]);
     }
 
     async fn provider_with_truncated_error_body(
