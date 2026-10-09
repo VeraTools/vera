@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::types::{BenchmarkTask, LaneProvenance, TaskSetIdentity};
-use vera_core::config::{InferenceBackend, OnnxExecutionProvider};
+use vera_core::config::{CONFIG_ENV_OVERRIDE_KEYS, InferenceBackend, OnnxExecutionProvider};
 use vera_core::local_models::{
     LOCAL_EMBEDDING_DIM_ENV, LOCAL_EMBEDDING_DIR_ENV, LOCAL_EMBEDDING_DOCUMENT_PREFIX_ENV,
     LOCAL_EMBEDDING_MAX_LENGTH_ENV, LOCAL_EMBEDDING_ONNX_DATA_FILE_ENV,
@@ -42,10 +42,6 @@ const PROVENANCE_ENV_KEYS: &[&str] = &[
     "RERANKER_MODEL_ID",
     "VERA_BACKEND",
     "VERA_LOCAL",
-    "VERA_MAX_RERANK_BATCH",
-    "VERA_RANKING_DEFINITION_BOOST",
-    "VERA_RANKING_FILENAME_STEM_BOOST",
-    "VERA_RANKING_RECALL_POOL_EXPANSION",
 ];
 
 /// Key used to record the host CPU model in the environment provenance block.
@@ -603,6 +599,7 @@ pub fn apply_environment(lane: &ResolvedLane) -> LaneEnvGuard {
     let mut keys: Vec<String> = LOCAL_MODEL_ENV_KEYS
         .iter()
         .chain(PROVENANCE_ENV_KEYS.iter())
+        .chain(CONFIG_ENV_OVERRIDE_KEYS.iter())
         .map(|key| (*key).to_string())
         .chain(lane.spec.environment.keys().cloned())
         .collect();
@@ -758,6 +755,7 @@ pub fn environment_summary(lane: &ResolvedLane, host_cpu_model: &str) -> BTreeMa
     let keys: HashSet<&str> = PROVENANCE_ENV_KEYS
         .iter()
         .copied()
+        .chain(CONFIG_ENV_OVERRIDE_KEYS.iter().copied())
         .chain(lane.spec.environment.keys().map(String::as_str))
         .chain(LOCAL_MODEL_ENV_KEYS.iter().copied())
         .collect();
@@ -770,6 +768,7 @@ pub fn process_environment_summary(host_cpu_model: &str) -> BTreeMap<String, Str
         PROVENANCE_ENV_KEYS
             .iter()
             .copied()
+            .chain(CONFIG_ENV_OVERRIDE_KEYS.iter().copied())
             .chain(LOCAL_MODEL_ENV_KEYS.iter().copied())
             .collect(),
         host_cpu_model,
@@ -1169,12 +1168,18 @@ mod tests {
                 "reranker key {key} must be present when rerank enabled"
             );
         }
-        assert_eq!(map.get("retrieval.rerank_candidates").unwrap(), "50");
-        assert_eq!(map.get("retrieval.reranker_max_doc_chars").unwrap(), "4800");
-        assert_eq!(map.get("retrieval.max_rerank_batch").unwrap(), "20");
-        assert_eq!(map.get("rerank_candidates").unwrap(), "50");
-        assert_eq!(map.get("reranker_max_doc_chars").unwrap(), "4800");
-        assert_eq!(map.get("max_rerank_batch").unwrap(), "20");
+        let retrieval = vera_core::config::VeraConfig::default()
+            .with_env_overrides()
+            .retrieval;
+        for (key, value) in [
+            ("rerank_candidates", retrieval.rerank_candidates),
+            ("reranker_max_doc_chars", retrieval.reranker_max_doc_chars),
+            ("max_rerank_batch", retrieval.max_rerank_batch),
+        ] {
+            let expected = value.to_string();
+            assert_eq!(map.get(key), Some(&expected));
+            assert_eq!(map.get(&format!("retrieval.{key}")), Some(&expected));
+        }
 
         let no_rerank_spec = LaneSpec {
             name: "api-no-rerank".to_string(),
@@ -1251,20 +1256,16 @@ microcode\t: 0xb404038
     }
 
     #[test]
-    fn environment_block_records_ranking_overrides_with_effective_values() {
+    fn environment_block_records_config_overrides_with_effective_values() {
         if !env_probe(
-            "lanes::tests::environment_block_records_ranking_overrides_with_effective_values",
+            "lanes::tests::environment_block_records_config_overrides_with_effective_values",
         ) {
             return;
         }
-        // Guard the three ranking env keys **** the host key via the shared ENV_LOCK.
+        // This fixture runs alone in a subprocess.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Remember prior values to restore deterministically.
-        let keys = [
-            "VERA_RANKING_FILENAME_STEM_BOOST",
-            "VERA_RANKING_DEFINITION_BOOST",
-            "VERA_RANKING_RECALL_POOL_EXPANSION",
-        ];
+        let keys = CONFIG_ENV_OVERRIDE_KEYS;
         let prev: Vec<(String, Option<OsString>)> = keys
             .iter()
             .map(|k| (k.to_string(), std::env::var_os(k)))
@@ -1272,45 +1273,45 @@ microcode\t: 0xb404038
         let host_cpu = host_cpu_model();
 
         // Case 1: when set to 0, the environment block records "0".
-        for k in keys {
+        for &k in keys {
             // SAFETY: This environment fixture runs alone in a child process and
             // neither initializes native models nor mutates while a runtime exists.
             unsafe { std::env::set_var(k, "0") };
         }
         let lane = resolve(preset("vera-potion").unwrap()).unwrap();
-        let env = environment_summary(&lane, &host_cpu);
-        for k in keys {
-            assert_eq!(
-                env.get(k).map(String::as_str),
-                Some("0"),
-                "ranking key {k} should be 0 when set"
-            );
+        for env in [
+            environment_summary(&lane, &host_cpu),
+            process_environment_summary(&host_cpu),
+        ] {
+            for &k in keys {
+                assert_eq!(
+                    env.get(k).map(String::as_str),
+                    Some("0"),
+                    "config key {k} should be 0 when set"
+                );
+            }
+            assert!(!env[HOST_CPU_MODEL_KEY].is_empty());
         }
-        // Host CPU is always present alongside the ranking keys.
-        assert!(
-            env.contains_key(HOST_CPU_MODEL_KEY),
-            "environment must contain {HOST_CPU_MODEL_KEY}"
-        );
-        assert!(!env[HOST_CPU_MODEL_KEY].is_empty());
 
         // Case 2: when unset, the block records "<unset>" (existing pattern).
-        for k in keys {
+        for &k in keys {
             // SAFETY: This environment fixture runs alone in a child process and
             // neither initializes native models nor mutates while a runtime exists.
             unsafe { std::env::remove_var(k) };
         }
-        let env2 = environment_summary(&lane, &host_cpu);
-        for k in keys {
-            assert_eq!(
-                env2.get(k).map(String::as_str),
-                Some("<unset>"),
-                "ranking key {k} should be <unset> when not set"
-            );
+        for env in [
+            environment_summary(&lane, &host_cpu),
+            process_environment_summary(&host_cpu),
+        ] {
+            for &k in keys {
+                assert_eq!(
+                    env.get(k).map(String::as_str),
+                    Some("<unset>"),
+                    "config key {k} should be <unset> when not set"
+                );
+            }
+            assert!(env.contains_key(HOST_CPU_MODEL_KEY));
         }
-        assert!(
-            env2.contains_key(HOST_CPU_MODEL_KEY),
-            "host CPU key must still be present when ranking keys unset"
-        );
 
         // Restore.
         for (k, v) in prev {
@@ -1327,7 +1328,7 @@ microcode\t: 0xb404038
 
     #[test]
     fn environment_block_follows_existing_key_value_pattern() {
-        // Verifies the new ranking keys use the exact same "<unset>"/value
+        // Verifies config overrides use the exact same "<unset>"/value
         // contract as the existing PROVENANCE_ENV_KEYS, and that the host CPU
         // key follows the dot-notation precedent.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1337,12 +1338,11 @@ microcode\t: 0xb404038
         // Existing key still present and uses "<unset>" when not set.
         assert!(env.contains_key("VERA_BACKEND"));
         // New keys exist.
-        for k in [
-            "VERA_RANKING_FILENAME_STEM_BOOST",
-            "VERA_RANKING_DEFINITION_BOOST",
-            "VERA_RANKING_RECALL_POOL_EXPANSION",
-            HOST_CPU_MODEL_KEY,
-        ] {
+        for k in CONFIG_ENV_OVERRIDE_KEYS
+            .iter()
+            .copied()
+            .chain([HOST_CPU_MODEL_KEY])
+        {
             assert!(
                 env.contains_key(k),
                 "expected provenance key {k} in environment block"

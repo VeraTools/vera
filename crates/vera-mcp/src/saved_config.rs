@@ -14,7 +14,8 @@ struct StoredConfig {
 
 /// Load the saved runtime config from Vera's home config.json.
 ///
-/// Returns default config on any read or parse failure so MCP stays usable.
+/// Returns defaults plus runtime environment overrides on any read or parse
+/// failure so MCP stays usable.
 pub fn load_saved_runtime_config() -> vera_core::config::VeraConfig {
     let config_path = match vera_core::local_models::vera_home_dir() {
         Ok(dir) => dir.join("config.json"),
@@ -131,9 +132,13 @@ mod tests {
         let json = serde_json::json!({ "core_config": cfg });
         std::fs::write(tmp.path().join("config.json"), json.to_string()).unwrap();
 
+        let expected = cfg.with_env_overrides();
         let config = load_runtime_config_from_path(&tmp.path().join("config.json"));
         assert_eq!(config.indexing.max_chunk_lines, 99);
-        assert_eq!(config.indexing.max_chunk_bytes, 1800);
+        assert_eq!(
+            config.indexing.max_chunk_bytes,
+            expected.indexing.max_chunk_bytes
+        );
         assert_eq!(config.retrieval.default_limit, 17);
     }
 
@@ -145,7 +150,9 @@ mod tests {
         cfg.embedding.timeout_secs = 60;
         let path = tmp.path().join("config.json");
         std::fs::write(&path, serde_json::json!({ "core_config": cfg }).to_string()).unwrap();
-        let current = vera_core::config::EmbeddingConfig::default();
+        let current = vera_core::config::VeraConfig::default()
+            .with_env_overrides()
+            .embedding;
         let upgraded = load_runtime_config_from_path(&path).embedding;
         assert_eq!(upgraded.max_in_flight_inputs, current.max_in_flight_inputs);
         assert_eq!(upgraded.timeout_secs, current.timeout_secs);
@@ -156,8 +163,12 @@ mod tests {
             serde_json::json!({ "config_format": format, "core_config": cfg }).to_string(),
         )
         .unwrap();
+        let expected = cfg.with_env_overrides().embedding;
         let kept = load_runtime_config_from_path(&path).embedding;
-        assert_eq!((kept.max_in_flight_inputs, kept.timeout_secs), (16, 60));
+        assert_eq!(
+            (kept.max_in_flight_inputs, kept.timeout_secs),
+            (expected.max_in_flight_inputs, expected.timeout_secs)
+        );
     }
 
     #[test]

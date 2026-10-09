@@ -1214,6 +1214,7 @@ mod tests {
                 .args(["--exact", "commands::setup::tests::api_preset_switch_persists_reranker_settings_without_losing_other_config", "--nocapture"])
                 .env(CHILD_HOME, home.path())
                 .env("VERA_HOME", home.path())
+                .env_remove("VERA_MAX_OUTPUT_CHARS")
                 .status().unwrap();
             assert!(status.success());
             return;

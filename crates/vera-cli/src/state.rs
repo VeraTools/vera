@@ -753,7 +753,9 @@ mod tests {
         dump.embedding.max_in_flight_inputs = 16;
         dump.embedding.timeout_secs = 60;
         let _guard = with_stored_config(&serde_json::json!({ "core_config": dump }).to_string());
-        let current = vera_core::config::EmbeddingConfig::default();
+        let current = vera_core::config::VeraConfig::default()
+            .with_env_overrides()
+            .embedding;
         let upgraded = load_runtime_config().unwrap().embedding;
         assert_eq!(upgraded.max_in_flight_inputs, current.max_in_flight_inputs);
         assert_eq!(upgraded.timeout_secs, current.timeout_secs);
@@ -767,10 +769,11 @@ mod tests {
             serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
         assert_eq!(raw["config_format"], vera_core::config::SAVED_CONFIG_FORMAT);
         assert_eq!(raw["core_config"]["embedding"]["max_in_flight_inputs"], 16);
+        let expected = explicit.with_env_overrides().embedding;
         let reloaded = load_runtime_config().unwrap().embedding;
         assert_eq!(
             (reloaded.max_in_flight_inputs, reloaded.timeout_secs),
-            (16, 60)
+            (expected.max_in_flight_inputs, expected.timeout_secs)
         );
     }
 

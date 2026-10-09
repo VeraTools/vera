@@ -26,6 +26,24 @@ pub struct VeraConfig {
     pub embedding: EmbeddingConfig,
 }
 
+/// Environment variables applied by [`VeraConfig::with_env_overrides`].
+pub const CONFIG_ENV_OVERRIDE_KEYS: &[&str] = &[
+    "VERA_MAX_OUTPUT_CHARS",
+    "VERA_MAX_RERANK_BATCH",
+    "VERA_MAX_RERANK_DOC_CHARS",
+    "VERA_RERANK_TIMEOUT_SECS",
+    "VERA_RERANK_MAX_RETRIES",
+    "VERA_RERANK_RATE_LIMIT_WAIT_SECS",
+    "VERA_RANKING_FILENAME_STEM_BOOST",
+    "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
+    "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
+    "VERA_RANKING_DEFINITION_BOOST",
+    "VERA_RANKING_RECALL_POOL_EXPANSION",
+    "VERA_VECTOR_FILTER_DURING_SCAN",
+    "VERA_MAX_IN_FLIGHT_INPUTS",
+    "VERA_MAX_CHUNK_BYTES",
+];
+
 impl VeraConfig {
     /// Apply valid environment overrides for runtime use, never for saving.
     pub fn with_env_overrides(mut self) -> Self {
@@ -117,114 +135,67 @@ mod tests {
     use super::*;
     use crate::test_env::run_env_test;
 
-    // Environment key, config path, built-in default, saved value, override.
-    const OVERRIDES: &[(&str, &str, &str, &str, &str)] = &[
+    // Config path, built-in default, saved value, override, in key-list order.
+    const OVERRIDES: &[(&str, &str, &str, &str)] = &[
+        ("retrieval.max_output_chars", "0", "111", "777"),
+        ("retrieval.max_rerank_batch", "20", "8", "7"),
+        ("retrieval.reranker_max_doc_chars", "4800", "1200", "9999"),
+        ("retrieval.reranker_timeout_secs", "30", "42", "9"),
+        ("retrieval.reranker_max_retries", "2", "5", "3"),
         (
-            "VERA_MAX_OUTPUT_CHARS",
-            "retrieval.max_output_chars",
-            "0",
-            "111",
-            "777",
-        ),
-        (
-            "VERA_MAX_RERANK_BATCH",
-            "retrieval.max_rerank_batch",
-            "20",
-            "8",
-            "7",
-        ),
-        (
-            "VERA_MAX_RERANK_DOC_CHARS",
-            "retrieval.reranker_max_doc_chars",
-            "4800",
-            "1200",
-            "9999",
-        ),
-        (
-            "VERA_RERANK_TIMEOUT_SECS",
-            "retrieval.reranker_timeout_secs",
-            "30",
-            "42",
-            "9",
-        ),
-        (
-            "VERA_RERANK_MAX_RETRIES",
-            "retrieval.reranker_max_retries",
-            "2",
-            "5",
-            "3",
-        ),
-        (
-            "VERA_RERANK_RATE_LIMIT_WAIT_SECS",
             "retrieval.reranker_rate_limit_wait_secs",
             "null",
             "10",
             "99",
         ),
         (
-            "VERA_RANKING_FILENAME_STEM_BOOST",
             "retrieval.ranking_filename_stem_boost",
             "true",
             "false",
             "true",
         ),
         (
-            "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
             "retrieval.ranking_filename_stem_min_ratio",
             "0.05",
             "0.5",
             "0.75",
         ),
         (
-            "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
             "retrieval.ranking_filename_stem_skip_symbol_queries",
             "false",
             "true",
             "false",
         ),
         (
-            "VERA_RANKING_DEFINITION_BOOST",
             "retrieval.ranking_definition_boost",
             "true",
             "false",
             "true",
         ),
         (
-            "VERA_RANKING_RECALL_POOL_EXPANSION",
             "retrieval.ranking_recall_pool_expansion",
             "true",
             "false",
             "true",
         ),
         (
-            "VERA_VECTOR_FILTER_DURING_SCAN",
             "retrieval.vector_filter_during_scan",
             "true",
             "false",
             "true",
         ),
-        (
-            "VERA_MAX_IN_FLIGHT_INPUTS",
-            "embedding.max_in_flight_inputs",
-            "256",
-            "64",
-            "32",
-        ),
-        (
-            "VERA_MAX_CHUNK_BYTES",
-            "indexing.max_chunk_bytes",
-            "24576",
-            "1000",
-            "2000",
-        ),
+        ("embedding.max_in_flight_inputs", "256", "64", "32"),
+        ("indexing.max_chunk_bytes", "24576", "1000", "2000"),
     ];
 
     #[test]
     fn environment_override_precedence() {
+        assert_eq!(CONFIG_ENV_OVERRIDE_KEYS.len(), OVERRIDES.len());
         for mode in ["valid", "unset", "invalid", "zero"] {
-            let mut vars: Vec<_> = OVERRIDES
+            let mut vars: Vec<_> = CONFIG_ENV_OVERRIDE_KEYS
                 .iter()
-                .map(|&(key, _, _, _, value)| {
+                .zip(OVERRIDES)
+                .map(|(&key, &(_, _, _, value))| {
                     let value = match mode {
                         "valid" => Some(value),
                         "invalid" => Some("invalid"),
@@ -256,7 +227,7 @@ mod tests {
         let defaults = serde_json::to_value(VeraConfig::default()).unwrap();
         let mut legacy = defaults.clone();
         let mut saved = defaults.clone();
-        for &(_, path, default, value, _) in OVERRIDES {
+        for &(path, default, value, _) in OVERRIDES {
             let (section, field) = path.split_once('.').unwrap();
             assert_eq!(
                 defaults[section][field],
@@ -270,7 +241,9 @@ mod tests {
         assert_eq!(serde_json::to_value(legacy).unwrap(), defaults);
         let config: VeraConfig = serde_json::from_value(saved.clone()).unwrap();
         let runtime = serde_json::to_value(config.with_env_overrides()).unwrap();
-        for &(key, path, _, value, override_value) in OVERRIDES {
+        for (&key, &(path, _, value, override_value)) in
+            CONFIG_ENV_OVERRIDE_KEYS.iter().zip(OVERRIDES)
+        {
             let (section, field) = path.split_once('.').unwrap();
             let expected = match mode.as_str() {
                 "valid" => override_value,
