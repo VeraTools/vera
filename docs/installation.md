@@ -15,6 +15,8 @@ pip install vera-ai && vera-ai install  # Python (pip)
 
 The installer downloads the `vera` binary for your platform, writes a shim to a user bin directory, and delegates to `vera agent install`, which launches an interactive scope and client selector to install skill files. After that, `vera` is a standalone command.
 
+Without a terminal on stdin and stderr, a bare `install` skips the agent step and succeeds. Run `vera agent install` later in a terminal, or `vera agent install --client all --scope global` without one. Extra arguments to the installer are passed to `vera agent install`.
+
 <details>
 <summary>Other install methods</summary>
 
@@ -172,15 +174,17 @@ vera upgrade --apply      # applies the update
 
 After an upgrade, Vera automatically syncs stale agent skill installs. Set `VERA_NO_UPDATE_CHECK=1` to disable the automatic check.
 
+`--apply` runs the installer for the new version without a terminal, so it skips the agent selector. It does not change a global npm or Bun package; update that yourself if you use its `vera-ai` command.
+
 If you are having trouble updating, reinstall with the package manager you originally used:
 
 ```bash
 # Bun
-bun install -g @vera-ai/cli && bunx @vera-ai/cli install
+bunx @vera-ai/cli@latest install
 # npm
-npm install -g @vera-ai/cli && npx @vera-ai/cli install
+npx -y @vera-ai/cli@latest install
 # uv
-uvx vera-ai install
+uvx vera-ai@latest install
 # pip
 pip install --upgrade vera-ai && vera-ai install
 ```
@@ -188,8 +192,10 @@ pip install --upgrade vera-ai && vera-ai install
 ## Uninstalling
 
 ```bash
-vera uninstall   # removes the entire Vera data directory (config, skill files, binary caches, downloaded model weights) and the PATH shim it installed
+vera uninstall   # removes Vera data, agent skills, and its PATH shim
 ```
+
+A data directory containing files Vera did not create is left in place and reported.
 
 ## Troubleshooting
 

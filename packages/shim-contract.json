@@ -1,0 +1,34 @@
+{
+  "unix": [
+    {
+      "binary_path": "/home/u/.vera/bin/2.0.1/x/vera",
+      "shim": "#!/bin/sh\nexec '/home/u/.vera/bin/2.0.1/x/vera' \"$@\"\n"
+    },
+    {
+      "binary_path": "/home/space here/.vera/bin/vera",
+      "shim": "#!/bin/sh\nexec '/home/space here/.vera/bin/vera' \"$@\"\n"
+    },
+    {
+      "binary_path": "/home/single'quote\"$literal/.vera/bin/vera",
+      "shim": "#!/bin/sh\nexec '/home/single'\"'\"'quote\"$literal/.vera/bin/vera' \"$@\"\n"
+    },
+    {
+      "binary_path": "/home/''/.vera/bin/vera'",
+      "shim": "#!/bin/sh\nexec '/home/'\"'\"''\"'\"'/.vera/bin/vera'\"'\"'' \"$@\"\n"
+    }
+  ],
+  "windows": [
+    {
+      "binary_path": "C:\\Users\\u\\AppData\\Roaming\\vera\\bin\\2.0.1\\x\\vera.exe",
+      "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\u\\AppData\\Roaming\\vera\\bin\\2.0.1\\x\\vera.exe\" %*\r\n"
+    },
+    {
+      "binary_path": "C:\\Users\\space ' $ %USERPROFILE% !\\vera\\bin\\vera.exe",
+      "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\space ' $ %%USERPROFILE%% !\\vera\\bin\\vera.exe\" %*\r\n"
+    },
+    {
+      "binary_path": "C:\\Users\\%%!\\vera\\bin\\vera.exe",
+      "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\%%%%!\\vera\\bin\\vera.exe\" %*\r\n"
+    }
+  ]
+}

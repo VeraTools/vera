@@ -87,49 +87,80 @@ impl LaunchEntry {
     }
 }
 
-/// The launcher the installers write, with the binary path left as a hole.
-///
-/// `packages/npm-cli/bin/vera.js` and `packages/python-cli/.../__main__.py`
-/// emit these two forms and nothing else, character for character. Matching
-/// them is the whole of shim recognition: uninstall never has to understand
-/// shell or batch, only to recognize what it wrote.
-const UNIX_SHIM: (&str, &str) = ("#!/bin/sh\nexec \"", "\" \"$@\"\n");
-const WINDOWS_SHIM: (&str, &str) = ("@echo off\r\n\"", "\" %*\r\n");
-
-/// The binary path a shim launches, if the file is one of the two templates.
-///
-/// A byte comparison with one hole, rather than a parse. Nothing about
-/// quoting, escaping, comments, separators or dialects can change the answer,
-/// because a file that is not exactly one of these shapes is not ours.
-fn shim_target(text: &str) -> Option<&str> {
-    [UNIX_SHIM, WINDOWS_SHIM]
-        .into_iter()
-        .find_map(|(head, tail)| {
-            text.strip_prefix(head)
-                .and_then(|rest| rest.strip_suffix(tail))
-                // Both ends are anchored, so whatever lies between them is the
-                // path, quote characters included: a unix path may contain one and
-                // the installer writes it through verbatim.
-                .filter(|target| !target.is_empty())
-        })
+/// Decode only the anchored launcher forms shipped by the wrappers.
+/// Canonical output is specified in `packages/shim-contract.json`; older
+/// releases used verbatim double quotes or Python's safe bare shell words.
+fn shim_target(text: &str) -> Option<String> {
+    if let Some(word) = text
+        .strip_prefix("#!/bin/sh\nexec ")
+        .and_then(|rest| rest.strip_suffix(" \"$@\"\n"))
+    {
+        let target = if let Some(quoted) = word
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+        {
+            let parts: Vec<_> = quoted.split("'\"'\"'").collect();
+            if parts.iter().any(|part| part.contains('\'')) {
+                return None;
+            }
+            parts.join("'")
+        } else if let Some(quoted) = word
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            // Legacy shims wrote paths verbatim; reject anything sh would
+            // expand or that would end the quoted word early.
+            if quoted.contains(['$', '`', '\\', '"']) {
+                return None;
+            }
+            quoted.to_owned()
+        } else if word
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || b"@%+=:,./_-".contains(&ch))
+        {
+            word.to_owned()
+        } else {
+            return None;
+        };
+        return (!target.is_empty()).then_some(target);
+    }
+    let rest = text.strip_prefix("@echo off\r\n")?;
+    let (rest, escaped) = match rest.strip_prefix("setlocal DisableDelayedExpansion\r\n") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let target = rest.strip_prefix('"')?.strip_suffix("\" %*\r\n")?;
+    // cmd expands a lone `%`; only the escaped form may carry a literal one.
+    let decoded = if escaped {
+        target.replace("%%", "")
+    } else {
+        target.to_owned()
+    };
+    (!target.is_empty() && !target.contains('"') && !decoded.contains('%')).then(|| {
+        if escaped {
+            target.replace("%%", "%")
+        } else {
+            target.to_owned()
+        }
+    })
 }
 
 /// Whether a launcher path is one this installation put there.
 ///
 /// Two ways to qualify, and either is enough. The recorded path is
 /// authoritative: `install.json` carries `binary_path`, which is what `upgrade`
-/// already uses to find the installed executable. Containment in the Vera home
-/// qualifies as well, and not only as a fallback when nothing was recorded.
+/// already uses to find the installed executable. Containment in the guarded
+/// binary cache qualifies as well, even without a recorded path.
 ///
 /// That second arm carries weight: step 2 removes the Vera home before this
 /// runs, so a chain through an intermediate link inside it, such as
-/// `PATH/vera -> ~/.vera/current -> <recorded binary>`, resolves only as far as
+/// `PATH/vera -> ~/.vera/bin/current -> <recorded binary>`, resolves only as far as
 /// the link that has just been deleted. Requiring an exact match against the
-/// recorded path would leave that alias on PATH. A path inside our own
-/// directory is ours whether or not it is the one we wrote down.
-fn is_our_binary(target: &Path, recorded: Option<&Path>, vera_home: &Path) -> bool {
+/// recorded path would leave that alias on PATH. A rejected data directory
+/// grants no ownership through containment.
+fn is_our_binary(target: &Path, recorded: Option<&Path>, bin_root: Option<&Path>) -> bool {
     recorded.is_some_and(|recorded| lexically_normalize(target) == lexically_normalize(recorded))
-        || is_inside(target, vera_home)
+        || bin_root.is_some_and(|root| is_inside(target, root))
 }
 
 /// Recognizes a candidate path as a removable Vera launcher or a launcher that
@@ -144,7 +175,7 @@ fn is_our_binary(target: &Path, recorded: Option<&Path>, vera_home: &Path) -> bo
 fn classify_launch_entry(
     entry: &Path,
     cargo_bin: &Path,
-    vera_home: &Path,
+    bin_root: Option<&Path>,
     recorded: Option<&Path>,
 ) -> Option<LaunchEntry> {
     let read_as_text = fs::read_to_string(entry);
@@ -152,7 +183,7 @@ fn classify_launch_entry(
         .as_deref()
         .ok()
         .and_then(shim_target)
-        .is_some_and(|target| is_our_binary(Path::new(target), recorded, vera_home));
+        .is_some_and(|target| is_our_binary(Path::new(&target), recorded, bin_root));
     if launches_vera {
         return Some(LaunchEntry::Shim);
     }
@@ -160,7 +191,7 @@ fn classify_launch_entry(
     // A symlink is classified by its complete target chain, not by the text
     // reached through it. This keeps a dangling link into Vera's home
     // removable after step 2 and lets a foreign Vera-looking link be reported.
-    if symlink_points_at_vera(entry, vera_home, recorded) {
+    if symlink_points_at_vera(entry, bin_root, recorded) {
         return Some(LaunchEntry::Shim);
     }
     if let Some(resolved) = resolve_symlink_chain(entry) {
@@ -327,10 +358,8 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// Whether `path` sits inside `root`, compared component-wise so that
 /// `/opt/vera-extra` is not read as being inside `/opt/vera`.
 fn is_inside(path: &Path, root: &Path) -> bool {
-    if root.as_os_str().is_empty() {
-        return false;
-    }
-    lexically_normalize(path).starts_with(lexically_normalize(root))
+    let root = lexically_normalize(root);
+    root.components().next().is_some() && lexically_normalize(path).starts_with(root)
 }
 
 /// How many links to follow before giving up, so a cycle cannot hang the run.
@@ -367,9 +396,9 @@ fn resolve_symlink_chain(entry: &Path) -> Option<PathBuf> {
 /// The whole chain is followed, so an alias that reaches Vera through another
 /// link is still ours. Stopping at the first hop left such an alias on PATH
 /// while the run reported a complete uninstall.
-fn symlink_points_at_vera(entry: &Path, vera_home: &Path, recorded: Option<&Path>) -> bool {
+fn symlink_points_at_vera(entry: &Path, bin_root: Option<&Path>, recorded: Option<&Path>) -> bool {
     resolve_symlink_chain(entry)
-        .is_some_and(|resolved| is_our_binary(&resolved, recorded, vera_home))
+        .is_some_and(|resolved| is_our_binary(&resolved, recorded, bin_root))
 }
 
 /// Whether any target in a symlink chain mentions Vera.
@@ -470,6 +499,7 @@ pub fn run(json_output: bool) -> Result<()> {
         .and_then(|provenance| provenance.binary_path)
         .map(PathBuf::from);
     let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    let vera_home = absolutize(&cwd, vera_home);
     // A relative override would otherwise be compared against absolute paths
     // when a symlink chain is resolved, so an owned relative link survives.
     let user_bin_dir = configured_user_bin_dir().map(|dir| absolutize(&cwd, dir));
@@ -504,6 +534,66 @@ struct InstallLayout<'a> {
     cargo_bin: &'a Path,
 }
 
+fn is_vera_data_file(name: &str) -> bool {
+    const FILES: &[&str] = &[
+        "config.json",
+        "credentials.json",
+        "install.json",
+        "update-check.json",
+        "adaptive-batch-scaler.json",
+    ];
+    if name == ".DS_Store" || FILES.contains(&name) {
+        return true;
+    }
+    let Some((base, digits)) = name.rsplit_once(".tmp.") else {
+        return false;
+    };
+    !digits.is_empty()
+        && digits.bytes().all(|ch| ch.is_ascii_digit())
+        && (FILES.contains(&base)
+            || FILES
+                .iter()
+                .any(|file| file.strip_suffix(".json") == Some(base)))
+}
+
+/// The installers keep each release in `bin/<version>/<target>/`, so any other
+/// entry there belongs to something else, such as a shared `~/bin`.
+fn holds_only_versioned_releases(bin: &Path) -> Result<bool> {
+    for entry in fs::read_dir(bin)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir() || semver::Version::parse(&name.to_string_lossy()).is_err()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// An override may name a shared directory. Delete it only when every entry
+/// has a name and file type Vera creates, including its atomic-write temps.
+fn contains_only_vera_files(dir: &Path) -> Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = if kind.is_dir() && name == "bin" {
+            holds_only_versioned_releases(&entry.path())?
+        } else if kind.is_dir() {
+            matches!(name.as_ref(), "models" | "lib" | "venv")
+        } else if kind.is_file() {
+            is_vera_data_file(&name)
+        } else {
+            false
+        };
+        if !ours {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn run_at(
     layout: InstallLayout<'_>,
     json_output: bool,
@@ -519,6 +609,10 @@ fn run_at(
         cargo_bin,
     } = layout;
     let mut removed = Vec::new();
+    let mut left_in_place: Vec<(PathBuf, &'static str)> = Vec::new();
+    let data_exists = vera_home.exists();
+    let owned_data = !data_exists || contains_only_vera_files(vera_home)?;
+    let bin_root = owned_data.then(|| vera_home.join("bin"));
 
     // 1. Remove agent skill files (all clients, all scopes).
     let skill_removal = fold_skill_removal(agent::remove_all_skills(cwd, home));
@@ -543,11 +637,23 @@ fn run_at(
     }
 
     // 2. Remove Vera data directory (binary cache, models, libs, config, credentials).
-    if vera_home.exists() {
-        fs::remove_dir_all(vera_home)?;
-        removed.push("vera data dir");
-        if !json_output {
-            writeln!(stderr, "  Removed {}", vera_home.display())?;
+    if data_exists {
+        if owned_data {
+            // `remove_dir_all` would unlink a symlinked home and keep the data
+            // the guard just read, so remove the target and then the link.
+            fs::remove_dir_all(fs::canonicalize(vera_home)?)?;
+            if vera_home.symlink_metadata().is_ok() {
+                // Windows directory links are removed as directories.
+                fs::remove_file(vera_home).or_else(|_| fs::remove_dir(vera_home))?;
+            }
+            removed.push("vera data dir");
+            if !json_output {
+                writeln!(stderr, "  Removed {}", vera_home.display())?;
+            }
+        } else {
+            let reason = "contains files Vera did not create";
+            writeln!(stderr, "  Left in place: {}: {reason}", vera_home.display())?;
+            left_in_place.push((vera_home.to_path_buf(), reason));
         }
     }
 
@@ -558,7 +664,6 @@ fn run_at(
     let mut leftover_failures: Vec<(PathBuf, anyhow::Error)> = Vec::new();
     // Entries whose ownership cannot be proven are deliberately never passed
     // to `remove_file`, but they still make the uninstall incomplete.
-    let mut left_in_place: Vec<(PathBuf, &'static str)> = Vec::new();
     for dir in shim_candidates(home, user_bin_dir, cargo_bin) {
         for name in entry_names() {
             let entry = dir.join(name);
@@ -568,7 +673,8 @@ fn run_at(
             if entry.symlink_metadata().is_err() {
                 continue;
             }
-            let Some(kind) = classify_launch_entry(&entry, cargo_bin, vera_home, recorded_binary)
+            let Some(kind) =
+                classify_launch_entry(&entry, cargo_bin, bin_root.as_deref(), recorded_binary)
             else {
                 // Not ours: leave it alone silently, as before.
                 continue;
@@ -602,7 +708,7 @@ fn run_at(
     }
 
     // Completion covers every phase that can strand files on disk: agent
-    // skills and PATH entries.
+    // skills, the data directory, and PATH entries.
     let complete = skill_removal.failures.is_empty()
         && leftover_failures.is_empty()
         && left_in_place.is_empty();
@@ -645,7 +751,7 @@ fn run_at(
             if !skill_removal.failures.is_empty() {
                 writeln!(stderr, "  Some skills could not be removed.")?;
             }
-            if !left_in_place.is_empty() {
+            if left_in_place.iter().any(|(path, _)| path != vera_home) {
                 writeln!(stderr, "  A Vera binary is still on your PATH.")?;
             }
         }
@@ -807,6 +913,354 @@ mod tests {
         assert_eq!(document["removed"], serde_json::json!([]));
         assert_eq!(document["skills"], serde_json::json!([]));
         assert!(document.get("left_in_place").is_none(), "{stdout}");
+    }
+
+    #[test]
+    fn a_vera_home_with_foreign_files_is_untouched_and_reported() {
+        for json_output in [true, false] {
+            let mut roots = roots();
+            // The dangerous override: VERA_HOME=$HOME.
+            roots.vera_home = roots.home.clone();
+            let foreign = roots.vera_home.join("notes.txt");
+            fs::write(&foreign, "keep me").unwrap();
+            fs::create_dir_all(roots.vera_home.join("models")).unwrap();
+            fs::write(roots.vera_home.join("install.json.tmp.9"), "keep this too").unwrap();
+
+            let (stdout, stderr) = uninstall(&roots, json_output);
+
+            assert_eq!(fs::read_to_string(&foreign).unwrap(), "keep me");
+            assert!(roots.vera_home.join("models").exists());
+            assert!(roots.vera_home.join("install.json.tmp.9").exists());
+            assert!(
+                stderr.contains("contains files Vera did not create"),
+                "{stderr}"
+            );
+            assert!(
+                stderr.contains(&roots.vera_home.display().to_string()),
+                "{stderr}"
+            );
+            if json_output {
+                let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(document["complete"], false);
+                assert_eq!(document["removed"], serde_json::json!([]));
+                assert_eq!(
+                    document["left_in_place"],
+                    serde_json::json!([roots.vera_home.display().to_string()])
+                );
+            } else {
+                assert!(
+                    stderr.contains("Vera was partially uninstalled."),
+                    "{stderr}"
+                );
+                assert!(!stderr.contains("still on your PATH"), "{stderr}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_vera_home_with_only_vera_entries_and_temp_files_is_removed() {
+        let roots = roots();
+        for name in ["bin/2.0.1/x", "models", "lib", "venv"] {
+            fs::create_dir_all(roots.vera_home.join(name)).unwrap();
+            fs::write(roots.vera_home.join(name).join("payload"), "data").unwrap();
+        }
+        for name in [
+            "config.json",
+            "credentials.json",
+            "install.json",
+            "update-check.json",
+            "adaptive-batch-scaler.json",
+            "config.tmp.123",
+            "install.tmp.9",
+            "install.json.tmp.9",
+            ".DS_Store",
+        ] {
+            fs::write(roots.vera_home.join(name), "data").unwrap();
+        }
+
+        let (stdout, _) = uninstall(&roots, true);
+
+        assert!(!roots.vera_home.exists());
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["complete"], true);
+        assert_eq!(document["removed"], serde_json::json!(["vera data dir"]));
+    }
+
+    #[test]
+    fn the_data_dir_guard_checks_types_and_exact_names() {
+        for (name, directory) in [
+            ("config", true),
+            ("bin", false),
+            (".hidden", false),
+            ("models-extra", true),
+        ] {
+            let temp = tempdir().unwrap();
+            if directory {
+                fs::create_dir(temp.path().join(name)).unwrap();
+            } else {
+                fs::write(temp.path().join(name), "foreign").unwrap();
+            }
+            assert!(!contains_only_vera_files(temp.path()).unwrap(), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_vera_home_is_removed_with_its_target() {
+        let roots = roots();
+        let target = roots.home.join("vera-data");
+        fs::create_dir_all(target.join("models")).unwrap();
+        fs::write(target.join("config.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&target, &roots.vera_home).unwrap();
+
+        let (stdout, _) = uninstall(&roots, true);
+
+        assert!(!target.exists());
+        assert!(roots.vera_home.symlink_metadata().is_err());
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["complete"], true);
+    }
+
+    #[test]
+    fn a_bin_directory_holding_other_tools_is_left_in_place() {
+        let roots = roots();
+        let tool = roots.vera_home.join("bin").join("other-tool");
+        fs::create_dir_all(roots.vera_home.join("models").join("foreign")).unwrap();
+        fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        fs::write(&tool, "foreign tool").unwrap();
+
+        let (stdout, _) = uninstall(&roots, true);
+
+        assert_eq!(fs::read_to_string(tool).unwrap(), "foreign tool");
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["complete"], false);
+    }
+
+    #[test]
+    fn a_shared_directory_with_bin_and_config_py_is_left_in_place() {
+        let roots = roots();
+        fs::create_dir_all(roots.vera_home.join("bin")).unwrap();
+        let config = roots.vera_home.join("config.py");
+        fs::write(&config, "foreign app config").unwrap();
+
+        let (stdout, stderr) = uninstall(&roots, true);
+
+        assert!(roots.vera_home.join("bin").exists());
+        assert_eq!(fs::read_to_string(config).unwrap(), "foreign app config");
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["removed"], serde_json::json!([]));
+        assert_eq!(document["complete"], false);
+        assert_eq!(
+            document["left_in_place"],
+            serde_json::json!([roots.vera_home.display().to_string()])
+        );
+        assert!(
+            stderr.contains("contains files Vera did not create"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn only_known_json_files_and_numeric_atomic_write_temps_are_owned() {
+        for stem in [
+            "config",
+            "credentials",
+            "install",
+            "update-check",
+            "adaptive-batch-scaler",
+        ] {
+            for suffix in [".json", ".tmp.123", ".json.tmp.9"] {
+                assert!(is_vera_data_file(&format!("{stem}{suffix}")));
+            }
+            for suffix in [
+                "",
+                ".py",
+                ".toml",
+                ".json.bak",
+                ".tmp.",
+                ".tmp.x",
+                ".tmp.1x",
+                ".json.tmp.-1",
+                ".py.tmp.123",
+                ".json.tmp.1.tmp.2",
+            ] {
+                assert!(
+                    !is_vera_data_file(&format!("{stem}{suffix}")),
+                    "{stem}{suffix}"
+                );
+            }
+        }
+        assert!(is_vera_data_file(".DS_Store"));
+        assert!(!is_vera_data_file(".DS_Store.tmp.9"));
+    }
+
+    #[test]
+    fn an_empty_normalized_root_never_contains_a_target() {
+        for root in ["", ".", "child/.."] {
+            assert!(
+                !is_inside(Path::new("/elsewhere/vera"), Path::new(root)),
+                "{root}"
+            );
+        }
+        let cwd = Path::new("/work/project");
+        let absolute = absolutize(cwd, PathBuf::from("."));
+        assert!(absolute.is_absolute());
+        assert!(is_inside(&cwd.join("bin/vera"), &absolute));
+        assert!(!is_inside(Path::new("/elsewhere/vera"), &absolute));
+    }
+
+    #[test]
+    fn a_rejected_home_grants_ownership_only_to_the_recorded_binary() {
+        let mut roots = roots();
+        roots.vera_home = roots.home.clone();
+        fs::create_dir_all(roots.home.join("tools")).unwrap();
+        fs::create_dir_all(roots.home.join("bin")).unwrap();
+        let foreign = roots.user_bin_dir.join(entry_names()[0]);
+        fs::write(
+            &foreign,
+            format!(
+                "#!/bin/sh\nexec '{}' \"$@\"\n",
+                roots.home.join("tools/other").display()
+            ),
+        )
+        .unwrap();
+        let cargo_bin = roots.home.join(".cargo/bin");
+        let dirs = platform_shim_dirs(&roots.home, &cargo_bin);
+        let bin_foreign_dir = &dirs[0];
+        fs::create_dir_all(bin_foreign_dir).unwrap();
+        let bin_foreign = bin_foreign_dir.join(entry_names()[0]);
+        fs::write(
+            &bin_foreign,
+            format!(
+                "#!/bin/sh\nexec '{}' \"$@\"\n",
+                roots.home.join("bin/unrecorded").display()
+            ),
+        )
+        .unwrap();
+        let recorded = roots.home.join("tools/recorded");
+        fs::create_dir_all(&dirs[1]).unwrap();
+        let ours = dirs[1].join(entry_names()[0]);
+        fs::write(
+            &ours,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", recorded.display()),
+        )
+        .unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        run_at(
+            InstallLayout {
+                home: &roots.home,
+                vera_home: &roots.vera_home,
+                cwd: &roots.cwd,
+                user_bin_dir: Some(&roots.user_bin_dir),
+                recorded_binary: Some(&recorded),
+                cargo_bin: &cargo_bin,
+            },
+            true,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert!(
+            foreign.exists(),
+            "a target outside the binary cache was claimed"
+        );
+        assert!(
+            bin_foreign.exists(),
+            "a rejected data dir granted cache ownership"
+        );
+        assert!(
+            !ours.exists(),
+            "the recorded binary did not grant ownership"
+        );
+        assert!(roots.home.join("tools").exists());
+    }
+
+    fn shim_contract() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../../packages/shim-contract.json")).unwrap()
+    }
+
+    #[test]
+    fn every_wrapper_shim_decodes_to_its_binary_path() {
+        let contract = shim_contract();
+        for platform in ["unix", "windows"] {
+            for case in contract[platform].as_array().unwrap() {
+                assert_eq!(
+                    shim_target(case["shim"].as_str().unwrap()).as_deref(),
+                    case["binary_path"].as_str(),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_shims_decode_without_changing_verbatim_paths() {
+        for (body, path) in [
+            (
+                "#!/bin/sh\nexec /home/u/.vera/bin/2.0.1/x/vera \"$@\"\n",
+                "/home/u/.vera/bin/2.0.1/x/vera",
+            ),
+            (
+                "#!/bin/sh\nexec /a@%+=:,./_-09Z/vera \"$@\"\n",
+                "/a@%+=:,./_-09Z/vera",
+            ),
+            (
+                "@echo off\r\n\"C:\\Users\\u !\\vera.exe\" %*\r\n",
+                "C:\\Users\\u !\\vera.exe",
+            ),
+        ] {
+            assert_eq!(shim_target(body).as_deref(), Some(path));
+        }
+    }
+
+    #[test]
+    fn windows_shims_must_not_expand_a_percent_sign() {
+        for body in [
+            "@echo off\r\n\"C:\\bin\\%UP%\\vera.exe\" %*\r\n",
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\bin\\%UP%\\vera.exe\" %*\r\n",
+        ] {
+            assert!(shim_target(body).is_none(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_double_quotes_must_not_expand_the_target() {
+        for path in [
+            "/home/u/.vera/bin/$OTHER",
+            "/home/u/.vera/bin/`other`",
+            "/home/u/.vera/bin/back\\slash",
+            "/home/u/.vera/bin/\"\"..\"/\"../..\"/\"other",
+        ] {
+            assert!(shim_target(&format!("#!/bin/sh\nexec \"{path}\" \"$@\"\n")).is_none());
+            assert_eq!(
+                shim_target(&format!("#!/bin/sh\nexec '{path}' \"$@\"\n")).as_deref(),
+                Some(path)
+            );
+        }
+    }
+
+    #[test]
+    fn shim_recognition_rejects_near_misses() {
+        let canonical = "#!/bin/sh\nexec '/home/u/.vera/bin/vera' \"$@\"\n";
+        assert_eq!(
+            shim_target(canonical).as_deref(),
+            Some("/home/u/.vera/bin/vera")
+        );
+        for body in [
+            format!("# comment\n{canonical}"),
+            format!("{canonical}echo extra\n"),
+            canonical.replace("' \"$@\"", "' --extra \"$@\""),
+            canonical.replace("'/home/u/.vera/bin/vera'", "'/home/u/'$VERA'/bin/vera'"),
+            canonical.replace("'/home/u/.vera/bin/vera'", "/home/u/$VERA/bin/vera"),
+            canonical.replace("'/home/u/.vera/bin/vera'", "/home/u/space here/bin/vera"),
+            canonical.replace("'/home/u/.vera/bin/vera'", "''"),
+            "@echo off\r\nsetlocal\r\n\"C:\\vera.exe\" %*\r\n".to_owned(),
+        ] {
+            assert!(shim_target(&body).is_none(), "{body:?}");
+        }
     }
 
     #[test]
@@ -1103,7 +1557,7 @@ mod tests {
             &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", target.display()),
         );
         assert!(matches!(
-            classify_launch_entry(&ours, &cargo_bin, &roots.vera_home, None),
+            classify_launch_entry(&ours, &cargo_bin, Some(&roots.vera_home.join("bin")), None),
             Some(LaunchEntry::Shim)
         ));
 
@@ -1117,13 +1571,26 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            classify_launch_entry(&ambiguous, &cargo_bin, &roots.vera_home, None),
+            classify_launch_entry(
+                &ambiguous,
+                &cargo_bin,
+                Some(&roots.vera_home.join("bin")),
+                None
+            ),
             Some(LaunchEntry::Ambiguous(_))
         ));
 
         let unrelated = roots.user_bin_dir.join("unrelated");
         fs::write(&unrelated, "#!/bin/sh\necho hello\n").unwrap();
-        assert!(classify_launch_entry(&unrelated, &cargo_bin, &roots.vera_home, None).is_none());
+        assert!(
+            classify_launch_entry(
+                &unrelated,
+                &cargo_bin,
+                Some(&roots.vera_home.join("bin")),
+                None
+            )
+            .is_none()
+        );
     }
 
     #[cfg(unix)]
@@ -1143,11 +1610,16 @@ mod tests {
         }
 
         assert!(matches!(
-            classify_launch_entry(&cargo, &cargo_bin, &roots.vera_home, None),
+            classify_launch_entry(&cargo, &cargo_bin, Some(&roots.vera_home.join("bin")), None),
             Some(LaunchEntry::CargoBinary)
         ));
         assert!(matches!(
-            classify_launch_entry(&foreign, &cargo_bin, &roots.vera_home, None),
+            classify_launch_entry(
+                &foreign,
+                &cargo_bin,
+                Some(&roots.vera_home.join("bin")),
+                None
+            ),
             Some(LaunchEntry::ForeignBinary)
         ));
     }
@@ -1182,7 +1654,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         assert!(matches!(
-            classify_launch_entry(&link, &cargo_bin, &vera_home, None),
+            classify_launch_entry(&link, &cargo_bin, Some(&vera_home.join("bin")), None),
             Some(LaunchEntry::Ambiguous(_))
         ));
     }
@@ -1219,18 +1691,31 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uninstall_removes_the_shim_the_installers_write() {
-        for template in [
-            "#!/bin/sh\nexec \"{bin}\" \"$@\"\n",
-            "@echo off\r\n\"{bin}\" %*\r\n",
-        ] {
+        let contract = shim_contract();
+        for platform in ["unix", "windows"] {
             let roots = roots();
             let binary = roots
                 .vera_home
                 .join("bin")
                 .join("1.3.0")
-                .join("aarch64-apple-darwin")
+                // Windows file names cannot contain a double quote.
+                .join(if platform == "unix" {
+                    "space ' \" $ % !"
+                } else {
+                    "space ' $ % !"
+                })
                 .join("vera");
-            let body = template.replace("{bin}", &binary.display().to_string());
+            let case = &contract[platform][0];
+            let path = binary.display().to_string();
+            let encoded = if platform == "unix" {
+                path.replace('\'', "'\"'\"'")
+            } else {
+                path.replace('%', "%%")
+            };
+            let body = case["shim"]
+                .as_str()
+                .unwrap()
+                .replace(case["binary_path"].as_str().unwrap(), &encoded);
             let shim = install_shim(&roots.home.join(".local").join("bin"), &body);
 
             let (_, stderr) = uninstall(&roots, false);
@@ -1261,8 +1746,8 @@ mod tests {
         );
     }
 
-    /// A path may contain a quote character, and the installer writes it into
-    /// the shim verbatim. Rejecting such a target left the shim on PATH.
+    /// A double quote in the home path must not hide the canonical shim. The
+    /// legacy double-quoted form cannot carry one safely, so it is not decoded.
     #[cfg(unix)]
     #[test]
     fn a_quote_in_the_home_path_does_not_hide_the_shim() {
@@ -1275,7 +1760,7 @@ mod tests {
         let binary = vera_home.join("bin").join("1.3.0").join("x").join("vera");
         let shim = install_shim(
             &bin,
-            &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", binary.display()),
+            &format!("#!/bin/sh\nexec '{}' \"$@\"\n", binary.display()),
         );
 
         let mut stdout = Vec::new();
@@ -1338,8 +1823,8 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(recorded.parent().unwrap()).unwrap();
         fs::write(&recorded, "binary").unwrap();
-        // PATH/vera -> <vera_home>/current -> <recorded binary>
-        let middle = roots.vera_home.join("current");
+        // PATH/vera -> <vera_home>/bin/1.3.0/current -> <recorded binary>
+        let middle = roots.vera_home.join("bin").join("1.3.0").join("current");
         std::os::unix::fs::symlink(&recorded, &middle).unwrap();
         let entry = bin.join("vera");
         std::os::unix::fs::symlink(&middle, &entry).unwrap();
@@ -1708,11 +2193,12 @@ mod tests {
     fn the_recorded_binary_path_decides_when_it_exists() {
         let recorded = Path::new("/opt/custom/vera");
         let vera_home = Path::new("/home/u/.vera");
-        assert!(is_our_binary(recorded, Some(recorded), vera_home));
+        let bin_root = vera_home.join("bin");
+        assert!(is_our_binary(recorded, Some(recorded), Some(&bin_root)));
         assert!(!is_our_binary(
             Path::new("/opt/other/vera"),
             Some(recorded),
-            vera_home
+            Some(&bin_root)
         ));
         // Containment qualifies on its own, with or without a record: an
         // intermediate link inside the Vera home has already been deleted by
@@ -1720,18 +2206,25 @@ mod tests {
         assert!(is_our_binary(
             &vera_home.join("bin/1.3.0/x/vera"),
             None,
-            vera_home
+            Some(&bin_root)
         ));
         assert!(is_our_binary(
-            &vera_home.join("current"),
+            &bin_root.join("current"),
             Some(recorded),
-            vera_home
+            Some(&bin_root)
         ));
         assert!(!is_our_binary(
             Path::new("/opt/custom/vera"),
             None,
-            vera_home
+            Some(&bin_root)
         ));
+        assert!(!is_our_binary(
+            &vera_home.join("tools/other"),
+            None,
+            Some(&bin_root)
+        ));
+        assert!(!is_our_binary(&bin_root.join("vera"), None, None));
+        assert!(is_our_binary(recorded, Some(recorded), None));
     }
 
     #[cfg(unix)]

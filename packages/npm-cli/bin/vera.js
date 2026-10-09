@@ -84,7 +84,19 @@ function manifestUrl(version) {
 }
 
 function defaultVeraHome() {
-  return process.env.VERA_HOME || path.join(os.homedir(), ".vera");
+  if (process.env.VERA_HOME && process.env.VERA_HOME.trim()) return path.resolve(process.env.VERA_HOME);
+  const home = os.homedir();
+  const legacy = path.join(home, ".vera");
+  try {
+    if (fs.readdirSync(legacy).some((name) => !name.startsWith(".") && name !== "update-check.json")) return legacy;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const data = process.platform === "win32" ? process.env.APPDATA : process.platform === "darwin"
+    ? path.join(home, "Library", "Application Support")
+    : process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME)
+      ? process.env.XDG_DATA_HOME : path.join(home, ".local", "share");
+  return data ? path.join(data, "vera") : legacy;
 }
 
 function installMetadataPath() {
@@ -367,21 +379,66 @@ async function extractArchive(archivePath, destination, target) {
   }
 }
 
+function shimContents(binaryPath, platform) {
+  if (platform === "win32") {
+    return `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${binaryPath.replace(/%/g, "%%")}" %*\r\n`;
+  }
+  return `#!/bin/sh\nexec '${binaryPath.replace(/'/g, "'\"'\"'")}' "$@"\n`;
+}
+
+function shimTarget(text) {
+  if (text.startsWith("#!/bin/sh\nexec ") && text.endsWith(' "$@"\n')) {
+    const word = text.slice(15, -6);
+    if (word.startsWith("'") && word.endsWith("'")) {
+      const parts = word.slice(1, -1).split("'\"'\"'");
+      if (parts.every((part) => !part.includes("'"))) return parts.join("'") || null;
+    } else if (word.startsWith('"') && word.endsWith('"')) {
+      const target = word.slice(1, -1);
+      return target && !/[$`\\"]/.test(target) ? target : null;
+    } else if (/^[A-Za-z0-9@%+=:,./_-]+$/.test(word)) return word;
+  }
+  for (const setlocal of [true, false]) {
+    const head = '@echo off\r\n' + (setlocal ? 'setlocal DisableDelayedExpansion\r\n' : '') + '"';
+    if (text.startsWith(head) && text.endsWith('" %*\r\n')) {
+      const target = text.slice(head.length, -6);
+      // cmd expands a lone `%`; only the escaped form may carry a literal one.
+      if (target.includes('"') || (setlocal ? target.replace(/%%/g, "") : target).includes("%")) return null;
+      return (setlocal ? target.replace(/%%/g, "%") : target) || null;
+    }
+  }
+  return null;
+}
+
 async function createShim(binaryPath) {
   const binDir = pickUserBinDir();
   await fsp.mkdir(binDir, { recursive: true });
   const shimPath = path.join(binDir, shimName());
   if (path.join(await fsp.realpath(binDir), shimName()) === await fsp.realpath(binaryPath)) return shimPath;
+  const contents = shimContents(binaryPath, process.platform);
+  try {
+    const stat = await fsp.lstat(shimPath);
+    const current = stat.isFile() ? await fsp.readFile(shimPath, "utf8").catch(() => "") : "";
+    const target = shimTarget(current);
+    const normalized = target && path.isAbsolute(target) ? path.resolve(target) : null;
+    // Releases live at <home>/bin/<version>/<target>/<binary>. The legacy home
+    // counts too: an older uninstall could leave its shim behind.
+    const owned = normalized && [defaultVeraHome(), path.join(os.homedir(), ".vera")].some((home) => {
+      const relative = path.relative(path.resolve(home, "bin"), normalized);
+      const parts = relative.split(path.sep);
+      return !path.isAbsolute(relative) && parts.length === 3 && parts[0] !== ".." && parts[2] === binaryName();
+    });
+    if (!owned) {
+      console.error(`Left ${shimPath} in place because Vera did not create it. Run ${binaryPath} directly, or remove that file and install again.`);
+      return null;
+    }
+    if (current === contents) return shimPath;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   const staging = await fsp.mkdtemp(path.join(binDir, ".vera-shim-"));
   const stagedShim = path.join(staging, shimName());
   try {
-    if (process.platform === "win32") {
-      const contents = `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${binaryPath.replace(/%/g, "%%")}" %*\r\n`;
-      await fsp.writeFile(stagedShim, contents, "utf8");
-    } else {
-      const quoted = "'" + binaryPath.replace(/'/g, "'\"'\"'") + "'";
-      await fsp.writeFile(stagedShim, `#!/bin/sh\nexec ${quoted} "$@"\n`, { mode: 0o755 });
-    }
+    await fsp.writeFile(stagedShim, contents, { mode: 0o755 });
     await fsp.rename(stagedShim, shimPath);
   } finally {
     await fsp.rm(staging, { recursive: true, force: true });
@@ -426,20 +483,23 @@ async function cachedBinary(target) {
   return null;
 }
 
-async function finishInstall(binaryPath, version, target, announce = false) {
-  const shimPath = await createShim(binaryPath);
-  if (announce && !isOnPath(path.dirname(shimPath))) {
-    console.error(`Added Vera to ${path.dirname(shimPath)}. Add that directory to PATH to run \`vera\` directly.`);
+async function finishInstall(binaryPath, version, target, install, downloaded = false) {
+  const writeLauncher = install || !fs.lstatSync(path.join(pickUserBinDir(), shimName()), { throwIfNoEntry: false });
+  if (writeLauncher) {
+    const shimPath = await createShim(binaryPath);
+    if (downloaded && shimPath && !isOnPath(path.dirname(shimPath))) {
+      console.error(`Added Vera to ${path.dirname(shimPath)}. Add that directory to PATH to run \`vera\` directly.`);
+    }
   }
-  await writeInstallMetadata({ installMethod: currentInstallMethod(), version, binaryPath, target });
+  if (writeLauncher || downloaded) await writeInstallMetadata({ installMethod: currentInstallMethod(), version, binaryPath, target });
   return { binaryPath, version };
 }
 
-async function ensureBinaryInstalled() {
+async function ensureBinaryInstalled(install = false) {
   const target = resolveTarget(process.platform, process.arch);
   if (!/^[A-Za-z0-9_-]+$/.test(target)) throw new Error("invalid release target");
   const cached = await cachedBinary(target);
-  if (cached) return finishInstall(cached.binaryPath, cached.version, target);
+  if (cached) return finishInstall(cached.binaryPath, cached.version, target, install);
   const manifest = await loadManifest();
   const asset = manifest.assets && manifest.assets[target];
   if (!asset) throw new Error(`no release asset for target ${target}`);
@@ -470,7 +530,7 @@ async function ensureBinaryInstalled() {
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
-  return finishInstall(binaryPath, version, target, true);
+  return finishInstall(binaryPath, version, target, install, true);
 }
 
 async function runBinary(binaryPath, args) {
@@ -494,19 +554,14 @@ async function runBinary(binaryPath, args) {
 async function main() {
   const { command, rest } = parseArgs(process.argv.slice(2));
 
-  if (command === "_record-install-method") {
-    await writeInstallMetadata({
-      installMethod: "npm",
-      version: packageVersion,
-      binaryPath: null,
-    });
-    return;
-  }
-
-  const { binaryPath, version } = await ensureBinaryInstalled();
+  const { binaryPath, version } = await ensureBinaryInstalled(command === "install");
 
   if (command === "install") {
     console.error(`Vera ${version} installed.`);
+    if (rest.length === 0 && (!process.stdin.isTTY || !process.stderr.isTTY)) {
+      console.error("Run `vera agent install` in a terminal or `vera agent install --client all --scope global` to install agent skills.");
+      return;
+    }
     await runBinary(binaryPath, ["agent", "install", ...rest]);
     return;
   }
@@ -526,4 +581,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { detectMusl, fetchText, downloadFile, extractArchive, ensureBinaryInstalled, createShim, runBinary };
+module.exports = { defaultVeraHome, shimContents, shimTarget, detectMusl, fetchText, downloadFile, extractArchive, ensureBinaryInstalled, createShim, runBinary };

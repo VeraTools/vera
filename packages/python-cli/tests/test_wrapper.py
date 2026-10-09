@@ -22,6 +22,7 @@ wrapper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wrapper)
 TARGET = "x86_64-unknown-linux-gnu"
 MEMBER = f"vera-{TARGET}/{wrapper.binary_name()}"
+SHIM_CONTRACT = json.loads((Path(__file__).parents[2] / "shim-contract.json").read_text())
 
 
 def tar(entries):
@@ -33,6 +34,69 @@ def tar(entries):
             info.size = len(contents)
             archive.addfile(info, io.BytesIO(contents))
     return output.getvalue()
+
+
+class Contracts(unittest.TestCase):
+    def test_both_platform_helpers_match_every_shared_fixture(self):
+        for platform, cases in SHIM_CONTRACT.items():
+            for case in cases:
+                with self.subTest(platform=platform, path=case["binary_path"]):
+                    self.assertEqual(wrapper.shim_contents(case["binary_path"], platform == "windows"), case["shim"])
+                    self.assertEqual(wrapper.shim_target(case["shim"]), case["binary_path"])
+        for head in ["@echo off\r\n", "@echo off\r\nsetlocal DisableDelayedExpansion\r\n"]:
+            self.assertIsNone(wrapper.shim_target(f'{head}"C:\\bin\\%UP%\\vera.exe" %*\r\n'))
+
+    def test_home_resolution_matches_rust(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            home = Path(temp) / "user"
+            legacy = home / ".vera"
+            with patch.object(wrapper.Path, "home", return_value=home), patch.object(wrapper.platform, "system", return_value="Linux"):
+                os.environ["XDG_DATA_HOME"] = str(Path(temp) / "xdg")
+                self.assertEqual(wrapper.vera_home(), Path(temp) / "xdg/vera")
+                os.environ["XDG_DATA_HOME"] = "relative"
+                self.assertEqual(wrapper.vera_home(), home / ".local/share/vera")
+                with patch.object(wrapper.platform, "system", return_value="Darwin"):
+                    self.assertEqual(wrapper.vera_home(), home / "Library/Application Support/vera")
+                with patch.object(wrapper.platform, "system", return_value="Windows"):
+                    self.assertEqual(wrapper.vera_home(), legacy)
+                    os.environ["APPDATA"] = str(Path(temp) / "roaming")
+                    self.assertEqual(wrapper.vera_home(), Path(temp) / "roaming/vera")
+                legacy.mkdir(parents=True)
+                (legacy / "update-check.json").write_text("{}")
+                (legacy / ".hidden").write_text("incidental")
+                self.assertEqual(wrapper.vera_home(), home / ".local/share/vera")
+                (legacy / "models").mkdir()
+                self.assertEqual(wrapper.vera_home(), legacy)
+                os.environ["VERA_HOME"] = " \t "
+                self.assertEqual(wrapper.vera_home(), legacy)
+                os.environ["VERA_HOME"] = "~/raw home "
+                self.assertEqual(wrapper.vera_home(), Path(os.path.abspath("~/raw home ")))
+                os.environ.pop("VERA_HOME")
+                (legacy / "models").rmdir()
+                (legacy / "update-check.json").unlink()
+                (legacy / ".hidden").unlink()
+                legacy.rmdir()
+                legacy.write_text("not a directory")
+                with self.assertRaises(NotADirectoryError):
+                    wrapper.vera_home()
+
+    def test_agent_prompts_require_both_terminals_unless_args_are_explicit(self):
+        for stdin, stderr, rest in [(True, True, []), (True, False, []), (False, True, []), (False, False, []), (False, False, ["--client", "all", "--scope", "global"])]:
+            with self.subTest(stdin=stdin, stderr=stderr, rest=rest), patch.object(sys, "argv", ["vera-ai", "install", *rest]), \
+                    patch.object(wrapper, "ensure_binary_installed", return_value=(Path("binary"), "1.0.0")) as ensure, \
+                    patch.object(wrapper, "run_binary", return_value=7) as run, \
+                    patch.object(sys.stdin, "isatty", return_value=stdin), \
+                    patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+                with patch.object(output, "isatty", return_value=stderr):
+                    expected = bool(rest) or (stdin and stderr)
+                    self.assertEqual(wrapper.run(), 7 if expected else 0)
+                ensure.assert_called_once_with(install=True)
+                if expected:
+                    run.assert_called_once_with(Path("binary"), ["agent", "install", *rest])
+                else:
+                    run.assert_not_called()
+                    self.assertIn("vera agent install --client all --scope global", output.getvalue())
+                self.assertIn("Vera 1.0.0 installed.", output.getvalue())
 
 
 class Fixture(unittest.TestCase):
@@ -153,6 +217,112 @@ class Fixture(unittest.TestCase):
             wrapper.ensure_binary_installed()
         self.assertFalse(binary.exists())
         self.assertFalse(any(p.name.startswith(".install-") for p in binary.parent.iterdir()))
+
+    def test_passthrough_preserves_launcher_and_metadata_install_or_missing_launcher_publishes(self):
+        self.serve(self.archive())
+        binary, value = wrapper.ensure_binary_installed()
+        shim = wrapper.pick_user_bin_dir() / wrapper.shim_name()
+        metadata = wrapper.install_metadata_path()
+        original = shim.read_bytes()
+        metadata.write_text('{"install_method":"manual","version":"old"}\n')
+        os.utime(shim, (1, 1))
+        os.utime(metadata, (1, 1))
+        wrapper.ensure_binary_installed()
+        self.assertEqual(shim.stat().st_mtime_ns, 1_000_000_000)
+        self.assertEqual(metadata.stat().st_mtime_ns, 1_000_000_000)
+        wrapper.ensure_binary_installed(install=True)
+        self.assertEqual(shim.stat().st_mtime_ns, 1_000_000_000)
+        self.assertEqual(json.loads(metadata.read_text())["version"], value)
+        shim.unlink()
+        metadata.write_text("{}")
+        wrapper.ensure_binary_installed()
+        self.assertEqual(shim.read_bytes(), original)
+        self.assertEqual(json.loads(metadata.read_text())["binary_path"], str(binary))
+
+    def test_shim_replacement_accepts_only_owned_templates_and_preserves_foreign_entries(self):
+        binary = wrapper.vera_home() / "bin/2.0.1/x" / wrapper.binary_name()
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"native binary")
+        shim = wrapper.create_shim(binary)
+        old = wrapper.vera_home() / "bin/2.0.0/x" / wrapper.binary_name()
+        bodies = [
+            wrapper.shim_contents(str(old), False), wrapper.shim_contents(str(old), True),
+            f'@echo off\r\n"{old}" %*\r\n',
+            wrapper.shim_contents(str(Path.home() / ".vera/bin/2.0.0/x" / wrapper.binary_name()), os.name == "nt"),
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin/version/../2.0.0/x" / wrapper.binary_name()), os.name == "nt"),
+        ]
+        if not any(ch in str(old) for ch in '$`\\"'):
+            bodies.append(f'#!/bin/sh\nexec "{old}" "$@"\n')
+        if wrapper.re.fullmatch(r"[A-Za-z0-9@%+=:,./_-]+", str(old)):
+            bodies.append(f'#!/bin/sh\nexec {old} "$@"\n')
+        for body in bodies:
+            with self.subTest(body=body):
+                shim.write_bytes(body.encode())
+                self.assertEqual(wrapper.create_shim(binary), shim)
+                self.assertEqual(shim.read_bytes().decode(), wrapper.shim_contents(str(binary), os.name == "nt"))
+        foreign = [
+            b"#!/bin/sh\necho other\n", b"\x7f\xcf",
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin-extra/vera"), os.name == "nt").encode(),
+            (wrapper.shim_contents(str(old), False) + "echo extra\n").encode(),
+            *[f'#!/bin/sh\nexec "{wrapper.vera_home() / "bin" / name}" "$@"\n'.encode()
+              for name in ["$OTHER", "`other`", "back\\slash", 'quo"te']],
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin/../../other/tool"), os.name == "nt").encode(),
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin/other-tool"), os.name == "nt").encode(),
+            wrapper.shim_contents(os.path.join("relative", "bin", "2.0.0", "x", wrapper.binary_name()), os.name == "nt").encode(),
+        ]
+        with patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            for body in foreign:
+                shim.write_bytes(body)
+                self.assertIsNone(wrapper.create_shim(binary))
+                self.assertEqual(shim.read_bytes(), body)
+            shim.unlink()
+            shim.mkdir()
+            self.assertIsNone(wrapper.create_shim(binary))
+            shim.rmdir()
+            if os.name != "nt":
+                for target in [binary, self.root / "missing"]:
+                    shim.symlink_to(target)
+                    self.assertIsNone(wrapper.create_shim(binary))
+                    self.assertTrue(shim.is_symlink())
+                    shim.unlink()
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), len(foreign) + 1 + (2 if os.name != "nt" else 0))
+            self.assertTrue(all(str(shim) in line and str(binary) in line for line in lines))
+
+    def test_blocked_shim_does_not_announce_path_addition(self):
+        self.serve(self.archive())
+        bin_dir = wrapper.pick_user_bin_dir()
+        bin_dir.mkdir(parents=True)
+        shim = bin_dir / wrapper.shim_name()
+        shim.write_text("foreign")
+        with patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            binary, _ = wrapper.ensure_binary_installed(install=True)
+        self.assertEqual(shim.read_text(), "foreign")
+        self.assertIn(str(shim), output.getvalue())
+        self.assertIn(str(binary), output.getvalue())
+        self.assertNotIn("Added Vera", output.getvalue())
+
+    def test_manifest_override_with_existing_launcher_records_download_and_then_runs_offline(self):
+        self.serve(self.archive(), "9.8.7")
+        os.environ["VERA_MANIFEST_URL"] = f"{self.base}/custom"
+        bin_dir = wrapper.pick_user_bin_dir()
+        bin_dir.mkdir(parents=True)
+        shim = bin_dir / wrapper.shim_name()
+        shim.write_text("existing launcher")
+        os.utime(shim, (1, 1))
+        first = wrapper.ensure_binary_installed()
+        self.assertEqual(first[1], "9.8.7")
+        self.assertEqual(len(self.seen), 2)
+        self.assertEqual(shim.read_text(), "existing launcher")
+        self.assertEqual(shim.stat().st_mtime_ns, 1_000_000_000)
+        metadata = wrapper.install_metadata_path()
+        self.assertEqual(json.loads(metadata.read_text())["binary_path"], str(first[0]))
+        os.utime(metadata, (1, 1))
+        with patch.object(wrapper, "open_response", side_effect=OSError("offline")):
+            self.assertEqual(wrapper.ensure_binary_installed(), first)
+        self.assertEqual(len(self.seen), 2)
+        self.assertEqual(shim.stat().st_mtime_ns, 1_000_000_000)
+        self.assertEqual(metadata.stat().st_mtime_ns, 1_000_000_000)
 
     def test_checksums_sizes_redirects_manifest_limit_and_timeouts(self):
         self.serve(self.archive(), checksum="0" * 64)

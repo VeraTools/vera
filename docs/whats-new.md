@@ -2,6 +2,16 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
+## v2.1.0
+
+- `vera uninstall` removes the PATH shim the npm and pip installers write again. Since v2.0.0 it left that shim behind and reported a partial uninstall.
+- `vera uninstall` deletes the data directory only when its contents match the layout Vera creates. A `VERA_HOME` pointing at a shared directory is left in place and reported.
+- The installers no longer overwrite a `vera` launcher they did not create, such as a `cargo install` binary, and only rewrite their own launcher during `install`.
+- The npm and pip installers store data in the same platform directory Vera itself uses (`~/.local/share/vera` on Linux) unless `~/.vera` already holds an installation.
+- `npm install -g @vera-ai/cli` installs a `vera-ai` command, matching pip. It used to install a command named `cli`.
+- `install` without a terminal, as in CI, installs the binary and skips the agent selector instead of failing.
+- `vera upgrade --apply` installs the exact new version, so a package registry that has not caught up fails clearly instead of reinstalling the current release. It no longer changes global npm or Bun packages.
+
 ## v2.0.1
 
 - Environment variables now override saved settings at runtime and are never written to `config.json`. Before, running `vera config set` with a variable such as `VERA_MAX_OUTPUT_CHARS` set saved that value permanently, and once a value was saved, the matching variable was ignored. If an earlier `config set` saved an override you did not intend, set the key again or remove it from `config.json`.
