@@ -2,6 +2,14 @@
 
 Historical benchmark snapshots, ablations, and comparisons moved from the current results page. See [Benchmarks](benchmarks.md#current-results) for the maintained comparison.
 
+## Vera v1.4.0 Semble Row (2026-09-03)
+
+Replaced in the current comparison by the v2.0.1 row. Measured at head 98e6e50 on the AMD Ryzen 7 9800X3D host with shipped defaults (local potion-code-16M-v2 embeddings, no reranker), three interleaved full-suite runs on the 1,251-task suite. The v1.2.0 row read 0.8450 nDCG@10 on an earlier CPU.
+
+| Tool | nDCG@10 | R@1 | R@5 | R@10 | MRR | Query p50 | Index time | Index size |
+|------|---------|------|------|-------|-----|-----------|------------|------------|
+| Vera v1.4.0 | 0.8437 | 0.6713 | 0.9189 | 0.9502 | 0.8258 | 6.4 ms | 115 s | 4.7 GB |
+
 ## Rejected Ranking and Chunking Hypotheses (2026-09-01)
 
 Measured at `6e01956fb644b9cce2d96d7e799b0b0798855c46` on the full 1,251-task Semble v0.5.5 suite (`921849164e2632dd4f0e1c1370f82cfe15ed6d6c`), local Potion Code v2 revision `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`, no reranker, AMD Ryzen 7 9800X3D. Each arm rebuilt its indexes. The 320-task subset and 180-task independent set were also measured. [The measurement report](https://github.com/VeraTools/vera/issues/196#issuecomment-5486933078) contains those pairs and provenance.

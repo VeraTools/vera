@@ -140,8 +140,8 @@ Reference points, each measured on a different corpus:
 
 | Backend | Hardware | Corpus | Index time |
 |---------|----------|--------|------------|
-| Potion Code (default) | AMD Ryzen 7 9800X3D, CPU | Semble suite, 63 repositories | 115 s |
-| Jina ONNX, CUDA | RTX 4080 | Vera's own codebase (239 files, ~3,100 chunks) | ~8 s |
+| Potion Code (default) | AMD Ryzen 7 9800X3D, CPU | Semble suite, 63 repositories | 89 s |
+| Jina ONNX, CUDA | RTX 4080 | commons-lang (11,429 chunks) | ~16 s |
 | Jina ONNX, CPU | Ryzen 5 7600X3D (6c/12t) | Vera's own codebase (239 files, ~3,100 chunks) | ~6 min |
 
 Jina ONNX on CPU is a compatibility path; use Potion Code on CPU-only machines.
