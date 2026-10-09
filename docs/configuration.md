@@ -4,7 +4,7 @@
 
 ## Backend/API
 
-Backend selection adjusts effective embedding parameters: Potion Code uses a batch ceiling of 1024 and one worker; ONNX CPU uses 4 and one worker; GPU backends choose a ceiling from available memory. Every backend is also capped by `embedding.max_in_flight_inputs`, so Potion Code embeds at most 256 inputs at a time by default. Potion Code stores at most 256 vector dimensions. Saved values shown by `vera config show` can differ from these runtime limits.
+Backend selection adjusts effective embedding parameters: Potion Code uses a batch ceiling of 1024 and one worker; ONNX CPU uses 4 and one worker; GPU backends use 16, or 4 and 1 when free GPU memory is under 3 GB or 512 MB. Every backend is also capped by `embedding.max_in_flight_inputs`, so Potion Code embeds at most 256 inputs at a time by default. Potion Code stores at most 256 vector dimensions. Saved values shown by `vera config show` can differ from these runtime limits.
 
 ### `vera config` keys
 
