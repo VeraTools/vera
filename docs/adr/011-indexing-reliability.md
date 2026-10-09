@@ -18,7 +18,7 @@ Tools such as PR review bots run `vera index . --json` or `vera update . --json`
 - A failed API build keeps finished embeddings in `<repo>/.vera.resume/embeddings.db`. Entries are keyed by the SHA-256 of the chunk text, and the file records an identity of model name plus document prefix; a mismatched identity discards the file. The next build reuses matching vectors (`embeddings_reused`) and deletes the checkpoint after it publishes. The checkpoint is best-effort: if it cannot be written, indexing continues without it. Only API builds checkpoint.
 - `vera update` writes into the live index, so it sets `index_complete` to `"0"` in index metadata before writing and back to `"1"` when done. Search and `vera stats` refuse an index marked `"0"` unless a writer still holds the index lock. The next `vera update` repairs every file the interrupted run touched, without a `max_files` cap. Indexes without the key (pre-v2) are treated as complete.
 
-Known limitation: when a batch is split because it exceeds the model context, the sub-batch vectors are not checkpointed. A rerun re-embeds them; results are not affected.
+When a batch exceeds the model context it is split in half until it fits. Halves that finish before another part fails are checkpointed, and a requeue resends only the unfinished items.
 
 ### Request shaping
 
