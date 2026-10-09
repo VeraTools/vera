@@ -140,31 +140,19 @@ impl VeraConfig {
                 let gpu_info = detect_gpu_info(ep);
                 if let Some(vram) = gpu_info.vram_free_mb {
                     tracing::info!("detected GPU VRAM: {vram}MB");
-                    // Auto-scale batch_size based on VRAM.
-                    // Prioritize speed: use large batches when VRAM allows.
-                    // A GPU reporting ~0 free MB is full or shared, so run
-                    // the most conservative shape rather than trusting the
-                    // reading as headroom.
-                    let auto_batch = if vram < 512 {
+                    // Shrink batches only when VRAM is scarce. Batches above
+                    // 16 saturate no faster: on an RTX 4080 with the default
+                    // model, 64 and 128 indexed 4-12% slower than 16 while
+                    // using 2.5-4x the memory. A GPU reporting ~0 free MB is
+                    // full or shared, so run the most conservative shape
+                    // rather than trusting the reading as headroom.
+                    self.embedding.batch_size = if vram < 512 {
                         1
                     } else if vram < 3072 {
                         4
-                    } else if vram < 5120 {
+                    } else {
                         16
-                    } else if vram < 8192 {
-                        32
-                    } else if vram < 12288 {
-                        64
-                    } else {
-                        128
                     };
-                    // Unified memory is shared with macOS and apps; cap the
-                    // CoreML batch so large-RAM Macs don't starve the system.
-                    if ep == OnnxExecutionProvider::CoreMl {
-                        self.embedding.batch_size = auto_batch.min(64);
-                    } else {
-                        self.embedding.batch_size = auto_batch;
-                    }
 
                     // Set a conservative memory limit only for low-VRAM GPUs
                     // to prevent ORT from grabbing all VRAM. For >=8GB, no limit.

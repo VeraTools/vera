@@ -215,7 +215,7 @@ The syntax uses semicolon-separated groups of comma-separated equivalent model n
 
 ## Apple Silicon Memory and Batching
 
-On macOS Apple Silicon, CoreML auto-detects unified memory by reading `sysctl hw.memsize`. Vera treats half of system RAM as the available GPU pool for auto-scaling and caps the CoreML auto batch size at 64 to keep macOS and other applications responsive.
+On macOS Apple Silicon, CoreML auto-detects unified memory by reading `sysctl hw.memsize`. Vera treats half of system RAM as the available GPU pool, and like other GPU backends uses batches of at most 16.
 
 ## Notes
 

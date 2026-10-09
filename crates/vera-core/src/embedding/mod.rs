@@ -87,6 +87,9 @@ pub(crate) mod test_helpers {
     pub(crate) struct CheckpointProvider {
         requests: Mutex<Vec<Vec<String>>>,
         fail_on_call: Option<usize>,
+        pub fail_status: u16,
+        /// Batches larger than this fail with a context-size error.
+        pub max_batch: usize,
         pub prefix: &'static str,
     }
 
@@ -95,6 +98,8 @@ pub(crate) mod test_helpers {
             Self {
                 requests: Mutex::new(Vec::new()),
                 fail_on_call,
+                fail_status: 400,
+                max_batch: usize::MAX,
                 prefix: "passage: ",
             }
         }
@@ -121,9 +126,15 @@ pub(crate) mod test_helpers {
                 requests.push(texts.to_vec());
                 requests.len()
             };
-            if self.fail_on_call == Some(call) {
+            if texts.len() > self.max_batch {
                 return Err(EmbeddingError::ApiError {
                     status: 400,
+                    message: "max allowed tokens per submitted batch is 8192".to_string(),
+                });
+            }
+            if self.fail_on_call == Some(call) {
+                return Err(EmbeddingError::ApiError {
+                    status: self.fail_status,
                     message: "checkpoint test failure".to_string(),
                 });
             }
