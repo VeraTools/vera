@@ -18,7 +18,7 @@ struct StoredConfig {
 pub fn load_saved_runtime_config() -> vera_core::config::VeraConfig {
     let config_path = match vera_core::local_models::vera_home_dir() {
         Ok(dir) => dir.join("config.json"),
-        Err(_) => return vera_core::config::VeraConfig::default(),
+        Err(_) => return vera_core::config::VeraConfig::default().with_env_overrides(),
     };
     load_runtime_config_from_path(&config_path)
 }
@@ -26,25 +26,88 @@ pub fn load_saved_runtime_config() -> vera_core::config::VeraConfig {
 fn load_runtime_config_from_path(config_path: &Path) -> vera_core::config::VeraConfig {
     let data = match std::fs::read(config_path) {
         Ok(data) => data,
-        Err(_) => return vera_core::config::VeraConfig::default(),
+        Err(_) => return vera_core::config::VeraConfig::default().with_env_overrides(),
     };
     if data.is_empty() {
-        return vera_core::config::VeraConfig::default();
+        return vera_core::config::VeraConfig::default().with_env_overrides();
     }
     let stored: StoredConfig = match serde_json::from_slice(&data) {
         Ok(stored) => stored,
-        Err(_) => return vera_core::config::VeraConfig::default(),
+        Err(_) => return vera_core::config::VeraConfig::default().with_env_overrides(),
     };
     let mut config = stored.core_config.unwrap_or_default();
     config
         .embedding
         .upgrade_saved_defaults(stored.config_format);
-    config
+    config.with_env_overrides()
 }
 
 #[cfg(test)]
 mod tests {
     use super::load_runtime_config_from_path;
+
+    #[test]
+    fn runtime_environment_precedence_and_fallbacks() {
+        for value in [Some("777"), None, Some("invalid")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "saved_config::tests::runtime_environment_precedence_and_fallbacks_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ]);
+            match value {
+                Some(value) => {
+                    command.env("VERA_MAX_OUTPUT_CHARS", value);
+                }
+                None => {
+                    command.env_remove("VERA_MAX_OUTPUT_CHARS");
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "driven by runtime_environment_precedence_and_fallbacks"]
+    fn runtime_environment_precedence_and_fallbacks_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        let valid = std::env::var("VERA_MAX_OUTPUT_CHARS").as_deref() == Ok("777");
+        assert_eq!(
+            load_runtime_config_from_path(&path)
+                .retrieval
+                .max_output_chars,
+            if valid { 777 } else { 0 }
+        );
+        for contents in ["", "not json", "{}"] {
+            std::fs::write(&path, contents).unwrap();
+            assert_eq!(
+                load_runtime_config_from_path(&path)
+                    .retrieval
+                    .max_output_chars,
+                if valid { 777 } else { 0 }
+            );
+        }
+        let mut saved = vera_core::config::VeraConfig::default();
+        saved.retrieval.max_output_chars = 321;
+        let contents = serde_json::json!({"core_config": saved}).to_string();
+        std::fs::write(&path, &contents).unwrap();
+        assert_eq!(
+            load_runtime_config_from_path(&path)
+                .retrieval
+                .max_output_chars,
+            if valid { 777 } else { 321 }
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+    }
 
     #[test]
     fn load_config_missing_file_returns_default() {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{env_usize, is_local_mode};
+use super::is_local_mode;
 
 /// Configuration for the embedding provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ impl Default for EmbeddingConfig {
 }
 
 fn default_max_in_flight_inputs() -> usize {
-    env_usize("VERA_MAX_IN_FLIGHT_INPUTS", 256).max(1)
+    256
 }
 
 /// Saved-config format written by this version. Configs saved without it
@@ -259,7 +259,9 @@ mod tests {
     #[test]
     #[ignore = "driven by max_in_flight_environment_value_normalizes_zero_to_one"]
     fn max_in_flight_environment_value_normalizes_zero_to_one_probe() {
-        assert_eq!(default_max_in_flight_inputs(), 1);
+        assert_eq!(default_max_in_flight_inputs(), 256);
+        let config = crate::config::VeraConfig::default().with_env_overrides();
+        assert_eq!(config.embedding.max_in_flight_inputs, 1);
     }
 
     /// Shorthand for matching without configured alias groups.

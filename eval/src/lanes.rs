@@ -375,7 +375,9 @@ impl ResolvedLane {
         }
         if provenance.rerank {
             // Explicit reranker provenance (replaces run-note fallback)
-            let retrieval = vera_core::config::VeraConfig::default().retrieval;
+            let retrieval = vera_core::config::VeraConfig::default()
+                .with_env_overrides()
+                .retrieval;
             config.insert(
                 "retrieval.rerank_candidates".to_string(),
                 retrieval.rerank_candidates.to_string(),

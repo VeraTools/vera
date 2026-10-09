@@ -377,9 +377,10 @@ fn reranker_protocol_checks(stored: &state::StoredConfig) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let retrieval = stored
         .core_config
-        .as_ref()
-        .map(|c| c.retrieval.clone())
-        .unwrap_or_else(|| vera_core::config::VeraConfig::default().retrieval);
+        .clone()
+        .unwrap_or_default()
+        .with_env_overrides()
+        .retrieval;
 
     // Validate endpoint path: must start with '/' when present.
     if let Some(path) = &retrieval.reranker_endpoint_path

@@ -33,7 +33,7 @@ pub struct VeraBm25Adapter {
 
 impl VeraBm25Adapter {
     pub fn new() -> anyhow::Result<Self> {
-        let mut config = VeraConfig::default();
+        let mut config = VeraConfig::default().with_env_overrides();
         config.retrieval.reranking_enabled = false;
         config.embedding.max_stored_dim = EMBEDDING_DIM;
         Ok(Self {
@@ -378,7 +378,7 @@ impl VeraFullAdapter {
         name: impl Into<String>,
         lane: &LaneSpec,
     ) -> anyhow::Result<Self> {
-        let mut config = VeraConfig::default();
+        let mut config = VeraConfig::default().with_env_overrides();
         config.retrieval.reranking_enabled = reranking_enabled;
         config.adjust_for_backend(backend);
         if let Some(batch_size) = lane.batch_size {

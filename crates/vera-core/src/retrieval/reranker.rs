@@ -240,11 +240,12 @@ impl ApiReranker {
     /// Create a new API-based reranker from configuration.
     ///
     /// This preserves the original constructor contract by resolving
-    /// configuration from `VeraConfig::default()` (which itself reads the
-    /// legacy `VERA_MAX_RERANK_*` env overrides for its defaults). Explicit
+    /// built-in configuration with the legacy environment overrides. Explicit
     /// `RetrievalConfig` values remain authoritative per `aae94f7`.
     pub fn new(config: RerankerConfig) -> Result<Self> {
-        let retrieval = crate::config::VeraConfig::default().retrieval;
+        let retrieval = crate::config::VeraConfig::default()
+            .with_env_overrides()
+            .retrieval;
         Self::from_configs(config, &retrieval)
     }
 
@@ -253,15 +254,17 @@ impl ApiReranker {
     /// `max_rerank_batch` is the caller's resolved `retrieval.max_rerank_batch`.
     /// It is a parameter rather than an environment lookup so that the value
     /// in `~/.vera/config.json` is the one actually used; 0 disables batching.
-    /// Other retrieval fields are sourced from `VeraConfig::default()` for the
-    /// legacy static path, preserving env-honored defaults but keeping config
+    /// Other retrieval fields use built-in defaults with environment overrides
+    /// for the legacy static path, keeping config
     /// authoritative when an explicit retrieval config is used via
     /// `from_configs`.
     pub fn new_with_max_rerank_batch(
         config: RerankerConfig,
         max_rerank_batch: usize,
     ) -> Result<Self> {
-        let mut retrieval = crate::config::VeraConfig::default().retrieval;
+        let mut retrieval = crate::config::VeraConfig::default()
+            .with_env_overrides()
+            .retrieval;
         retrieval.max_rerank_batch = max_rerank_batch;
         Self::from_configs(config, &retrieval)
     }

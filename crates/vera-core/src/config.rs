@@ -26,94 +26,88 @@ pub struct VeraConfig {
     pub embedding: EmbeddingConfig,
 }
 
-/// Read a `usize` config override from an environment variable, falling back
-/// to `default` when unset or unparseable. Invalid values are reported so a
-/// typo cannot silently change runtime behavior.
-fn env_usize(key: &str, default: usize) -> usize {
+impl VeraConfig {
+    /// Apply valid environment overrides for runtime use, never for saving.
+    pub fn with_env_overrides(mut self) -> Self {
+        let retrieval = &mut self.retrieval;
+        retrieval.max_output_chars =
+            env_parse("VERA_MAX_OUTPUT_CHARS").unwrap_or(retrieval.max_output_chars);
+        retrieval.max_rerank_batch =
+            env_parse("VERA_MAX_RERANK_BATCH").unwrap_or(retrieval.max_rerank_batch);
+        retrieval.reranker_max_doc_chars =
+            env_parse("VERA_MAX_RERANK_DOC_CHARS").unwrap_or(retrieval.reranker_max_doc_chars);
+        retrieval.reranker_timeout_secs =
+            env_parse("VERA_RERANK_TIMEOUT_SECS").unwrap_or(retrieval.reranker_timeout_secs);
+        retrieval.reranker_max_retries =
+            env_parse("VERA_RERANK_MAX_RETRIES").unwrap_or(retrieval.reranker_max_retries);
+        if let Some(value) = env_parse("VERA_RERANK_RATE_LIMIT_WAIT_SECS") {
+            retrieval.reranker_rate_limit_wait_secs = Some(value).filter(|value| *value != 0);
+        }
+        retrieval.ranking_filename_stem_boost = retrieval.ranking_filename_stem_boost_enabled();
+        retrieval.ranking_filename_stem_min_ratio =
+            retrieval.ranking_filename_stem_min_ratio_effective();
+        retrieval.ranking_filename_stem_skip_symbol_queries =
+            retrieval.ranking_filename_stem_skip_symbol_queries_enabled();
+        retrieval.ranking_definition_boost = retrieval.ranking_definition_boost_enabled();
+        retrieval.ranking_recall_pool_expansion = retrieval.ranking_recall_pool_expansion_enabled();
+        retrieval.vector_filter_during_scan = retrieval.vector_filter_during_scan_enabled();
+        if let Some(value) = env_parse::<usize>("VERA_MAX_IN_FLIGHT_INPUTS") {
+            self.embedding.max_in_flight_inputs = value.max(1);
+        }
+        self.indexing.max_chunk_bytes =
+            env_parse("VERA_MAX_CHUNK_BYTES").unwrap_or(self.indexing.max_chunk_bytes);
+        self
+    }
+}
+
+fn env_value(key: &str) -> Option<String> {
     match std::env::var(key) {
-        Ok(value) => match value.parse() {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                tracing::warn!(
-                    key,
-                    value = %value,
-                    default,
-                    error = %error,
-                    "invalid numeric environment override; using default"
-                );
-                default
-            }
-        },
-        Err(std::env::VarError::NotPresent) => default,
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
         Err(error) => {
             tracing::warn!(
                 key,
-                default,
                 error = %error,
-                "could not read numeric environment override; using default"
+                "could not read environment override; retaining configured value"
             );
-            default
+            None
         }
     }
 }
 
-/// Read an `f64` config override from an environment variable, falling back
-/// to `default` when unset or unparseable.
-fn env_f64(key: &str, default: f64) -> f64 {
-    match std::env::var(key) {
-        Ok(value) => match value.parse::<f64>() {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                tracing::warn!(
-                    key,
-                    value = %value,
-                    default,
-                    error = %error,
-                    "invalid float environment override; using default"
-                );
-                default
-            }
-        },
-        Err(std::env::VarError::NotPresent) => default,
+/// Read a numeric override. Unset or invalid values leave the config unchanged.
+fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let value = env_value(key)?;
+    match value.parse() {
+        Ok(parsed) => Some(parsed),
         Err(error) => {
             tracing::warn!(
                 key,
-                default,
+                value = %value,
                 error = %error,
-                "could not read float environment override; using default"
+                "invalid numeric environment override; retaining configured value"
             );
-            default
+            None
         }
     }
 }
 
-/// Read a `bool` config override from an environment variable, falling back
-/// to `default` when unset or unparseable. Recognizes `1`/`0`, `true`/`false`,
-/// `yes`/`no`, `on`/`off` case-insensitively.
-fn env_bool(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(value) => match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => {
-                tracing::warn!(
-                    key,
-                    value = %value,
-                    default,
-                    "invalid boolean environment override; using default"
-                );
-                default
-            }
-        },
-        Err(std::env::VarError::NotPresent) => default,
-        Err(error) => {
+/// Recognizes `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off` case-insensitively.
+fn env_bool(key: &str) -> Option<bool> {
+    let value = env_value(key)?;
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
             tracing::warn!(
                 key,
-                default,
-                error = %error,
-                "could not read boolean environment override; using default"
+                value = %value,
+                "invalid boolean environment override; retaining configured value"
             );
-            default
+            None
         }
     }
 }
@@ -122,6 +116,180 @@ fn env_bool(key: &str, default: bool) -> bool {
 mod tests {
     use super::*;
     use crate::test_env::run_env_test;
+
+    // Environment key, config path, built-in default, saved value, override.
+    const OVERRIDES: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "VERA_MAX_OUTPUT_CHARS",
+            "retrieval.max_output_chars",
+            "0",
+            "111",
+            "777",
+        ),
+        (
+            "VERA_MAX_RERANK_BATCH",
+            "retrieval.max_rerank_batch",
+            "20",
+            "8",
+            "7",
+        ),
+        (
+            "VERA_MAX_RERANK_DOC_CHARS",
+            "retrieval.reranker_max_doc_chars",
+            "4800",
+            "1200",
+            "9999",
+        ),
+        (
+            "VERA_RERANK_TIMEOUT_SECS",
+            "retrieval.reranker_timeout_secs",
+            "30",
+            "42",
+            "9",
+        ),
+        (
+            "VERA_RERANK_MAX_RETRIES",
+            "retrieval.reranker_max_retries",
+            "2",
+            "5",
+            "3",
+        ),
+        (
+            "VERA_RERANK_RATE_LIMIT_WAIT_SECS",
+            "retrieval.reranker_rate_limit_wait_secs",
+            "null",
+            "10",
+            "99",
+        ),
+        (
+            "VERA_RANKING_FILENAME_STEM_BOOST",
+            "retrieval.ranking_filename_stem_boost",
+            "true",
+            "false",
+            "true",
+        ),
+        (
+            "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
+            "retrieval.ranking_filename_stem_min_ratio",
+            "0.05",
+            "0.5",
+            "0.75",
+        ),
+        (
+            "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
+            "retrieval.ranking_filename_stem_skip_symbol_queries",
+            "false",
+            "true",
+            "false",
+        ),
+        (
+            "VERA_RANKING_DEFINITION_BOOST",
+            "retrieval.ranking_definition_boost",
+            "true",
+            "false",
+            "true",
+        ),
+        (
+            "VERA_RANKING_RECALL_POOL_EXPANSION",
+            "retrieval.ranking_recall_pool_expansion",
+            "true",
+            "false",
+            "true",
+        ),
+        (
+            "VERA_VECTOR_FILTER_DURING_SCAN",
+            "retrieval.vector_filter_during_scan",
+            "true",
+            "false",
+            "true",
+        ),
+        (
+            "VERA_MAX_IN_FLIGHT_INPUTS",
+            "embedding.max_in_flight_inputs",
+            "256",
+            "64",
+            "32",
+        ),
+        (
+            "VERA_MAX_CHUNK_BYTES",
+            "indexing.max_chunk_bytes",
+            "24576",
+            "1000",
+            "2000",
+        ),
+    ];
+
+    #[test]
+    fn environment_override_precedence() {
+        for mode in ["valid", "unset", "invalid", "zero"] {
+            let mut vars: Vec<_> = OVERRIDES
+                .iter()
+                .map(|&(key, _, _, _, value)| {
+                    let value = match mode {
+                        "valid" => Some(value),
+                        "invalid" => Some("invalid"),
+                        "zero"
+                            if matches!(
+                                key,
+                                "VERA_RERANK_RATE_LIMIT_WAIT_SECS" | "VERA_MAX_IN_FLIGHT_INPUTS"
+                            ) =>
+                        {
+                            Some("0")
+                        }
+                        _ => None,
+                    };
+                    (key, value)
+                })
+                .collect();
+            vars.push(("VERA_TEST_OVERRIDE_MODE", Some(mode)));
+            run_env_test(
+                "config::tests::environment_override_precedence_probe",
+                &vars,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "driven by environment_override_precedence"]
+    fn environment_override_precedence_probe() {
+        let mode = std::env::var("VERA_TEST_OVERRIDE_MODE").unwrap();
+        let defaults = serde_json::to_value(VeraConfig::default()).unwrap();
+        let mut legacy = defaults.clone();
+        let mut saved = defaults.clone();
+        for &(_, path, default, value, _) in OVERRIDES {
+            let (section, field) = path.split_once('.').unwrap();
+            assert_eq!(
+                defaults[section][field],
+                serde_json::from_str::<serde_json::Value>(default).unwrap(),
+                "{path}"
+            );
+            legacy[section].as_object_mut().unwrap().remove(field);
+            saved[section][field] = serde_json::from_str(value).unwrap();
+        }
+        let legacy: VeraConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap(), defaults);
+        let config: VeraConfig = serde_json::from_value(saved.clone()).unwrap();
+        let runtime = serde_json::to_value(config.with_env_overrides()).unwrap();
+        for &(key, path, _, value, override_value) in OVERRIDES {
+            let (section, field) = path.split_once('.').unwrap();
+            let expected = match mode.as_str() {
+                "valid" => override_value,
+                "zero" if key == "VERA_RERANK_RATE_LIMIT_WAIT_SECS" => "null",
+                "zero" if key == "VERA_MAX_IN_FLIGHT_INPUTS" => "1",
+                _ => value,
+            };
+            assert_eq!(
+                runtime[section][field],
+                serde_json::from_str::<serde_json::Value>(expected).unwrap(),
+                "{path}: {mode}"
+            );
+            assert_eq!(
+                saved[section][field],
+                serde_json::from_str::<serde_json::Value>(value).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn default_config_is_valid() {
         let config = VeraConfig::default();
@@ -174,16 +342,13 @@ mod tests {
         let key = "VERA_TEST_BOOL_VARIANTS";
         match std::env::var(key).as_deref() {
             Ok("1" | "true" | "TRUE" | "yes" | "on") => {
-                assert!(env_bool(key, false));
-                assert!(env_bool(key, true));
+                assert_eq!(env_bool(key), Some(true));
             }
             Ok("0" | "false" | "FALSE" | "no" | "off") => {
-                assert!(!env_bool(key, false));
-                assert!(!env_bool(key, true));
+                assert_eq!(env_bool(key), Some(false));
             }
             Ok("maybe") | Err(_) => {
-                assert!(env_bool(key, true));
-                assert!(!env_bool(key, false));
+                assert_eq!(env_bool(key), None);
             }
             Ok(value) => panic!("unexpected boolean test value: {value}"),
         }
