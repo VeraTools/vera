@@ -43,6 +43,8 @@ class Contracts(unittest.TestCase):
                 with self.subTest(platform=platform, path=case["binary_path"]):
                     self.assertEqual(wrapper.shim_contents(case["binary_path"], platform == "windows"), case["shim"])
                     self.assertEqual(wrapper.shim_target(case["shim"]), case["binary_path"])
+        for head in ["@echo off\r\n", "@echo off\r\nsetlocal DisableDelayedExpansion\r\n"]:
+            self.assertIsNone(wrapper.shim_target(f'{head}"C:\\bin\\%UP%\\vera.exe" %*\r\n'))
 
     def test_home_resolution_matches_rust(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):

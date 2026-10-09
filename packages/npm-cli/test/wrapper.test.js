@@ -81,7 +81,11 @@ test("both platform helpers match every shared shim fixture", () => {
   for (const [platform, cases] of Object.entries(shimContract)) {
     for (const value of cases) {
       assert.equal(wrapper.shimContents(value.binary_path, platform === "windows" ? "win32" : "linux"), value.shim);
+      assert.equal(wrapper.shimTarget(value.shim), value.binary_path);
     }
+  }
+  for (const head of ["@echo off\r\n", "@echo off\r\nsetlocal DisableDelayedExpansion\r\n"]) {
+    assert.equal(wrapper.shimTarget(`${head}"C:\\bin\\%UP%\\vera.exe" %*\r\n`), null);
   }
 });
 

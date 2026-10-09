@@ -376,7 +376,8 @@ def shim_target(text: str) -> str | None:
         head = '@echo off\r\n' + ('setlocal DisableDelayedExpansion\r\n' if setlocal else '') + '"'
         if text.startswith(head) and text.endswith('" %*\r\n'):
             target = text[len(head):-6]
-            if '"' in target:
+            # cmd expands a lone `%`; only the escaped form may carry a literal one.
+            if '"' in target or "%" in (target.replace("%%", "") if setlocal else target):
                 return None
             return (target.replace("%%", "%") if setlocal else target) or None
     return None

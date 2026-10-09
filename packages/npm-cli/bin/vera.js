@@ -401,7 +401,8 @@ function shimTarget(text) {
     const head = '@echo off\r\n' + (setlocal ? 'setlocal DisableDelayedExpansion\r\n' : '') + '"';
     if (text.startsWith(head) && text.endsWith('" %*\r\n')) {
       const target = text.slice(head.length, -6);
-      if (target.includes('"')) return null;
+      // cmd expands a lone `%`; only the escaped form may carry a literal one.
+      if (target.includes('"') || (setlocal ? target.replace(/%%/g, "") : target).includes("%")) return null;
       return (setlocal ? target.replace(/%%/g, "%") : target) || null;
     }
   }
@@ -580,4 +581,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { defaultVeraHome, shimContents, detectMusl, fetchText, downloadFile, extractArchive, ensureBinaryInstalled, createShim, runBinary };
+module.exports = { defaultVeraHome, shimContents, shimTarget, detectMusl, fetchText, downloadFile, extractArchive, ensureBinaryInstalled, createShim, runBinary };

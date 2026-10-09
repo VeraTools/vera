@@ -130,7 +130,13 @@ fn shim_target(text: &str) -> Option<String> {
         None => (rest, false),
     };
     let target = rest.strip_prefix('"')?.strip_suffix("\" %*\r\n")?;
-    (!target.is_empty() && !target.contains('"')).then(|| {
+    // cmd expands a lone `%`; only the escaped form may carry a literal one.
+    let decoded = if escaped {
+        target.replace("%%", "")
+    } else {
+        target.to_owned()
+    };
+    (!target.is_empty() && !target.contains('"') && !decoded.contains('%')).then(|| {
         if escaped {
             target.replace("%%", "%")
         } else {
@@ -637,7 +643,8 @@ fn run_at(
             // the guard just read, so remove the target and then the link.
             fs::remove_dir_all(fs::canonicalize(vera_home)?)?;
             if vera_home.symlink_metadata().is_ok() {
-                fs::remove_file(vera_home)?;
+                // Windows directory links are removed as directories.
+                fs::remove_file(vera_home).or_else(|_| fs::remove_dir(vera_home))?;
             }
             removed.push("vera data dir");
             if !json_output {
@@ -1201,11 +1208,21 @@ mod tests {
                 "/a@%+=:,./_-09Z/vera",
             ),
             (
-                "@echo off\r\n\"C:\\%%!\\vera.exe\" %*\r\n",
-                "C:\\%%!\\vera.exe",
+                "@echo off\r\n\"C:\\Users\\u !\\vera.exe\" %*\r\n",
+                "C:\\Users\\u !\\vera.exe",
             ),
         ] {
             assert_eq!(shim_target(body).as_deref(), Some(path));
+        }
+    }
+
+    #[test]
+    fn windows_shims_must_not_expand_a_percent_sign() {
+        for body in [
+            "@echo off\r\n\"C:\\bin\\%UP%\\vera.exe\" %*\r\n",
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\bin\\%UP%\\vera.exe\" %*\r\n",
+        ] {
+            assert!(shim_target(body).is_none(), "{body:?}");
         }
     }
 
