@@ -633,7 +633,12 @@ fn run_at(
     // 2. Remove Vera data directory (binary cache, models, libs, config, credentials).
     if data_exists {
         if owned_data {
-            fs::remove_dir_all(vera_home)?;
+            // `remove_dir_all` would unlink a symlinked home and keep the data
+            // the guard just read, so remove the target and then the link.
+            fs::remove_dir_all(fs::canonicalize(vera_home)?)?;
+            if vera_home.symlink_metadata().is_ok() {
+                fs::remove_file(vera_home)?;
+            }
             removed.push("vera data dir");
             if !json_output {
                 writeln!(stderr, "  Removed {}", vera_home.display())?;
@@ -990,6 +995,23 @@ mod tests {
             }
             assert!(!contains_only_vera_files(temp.path()).unwrap(), "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_vera_home_is_removed_with_its_target() {
+        let roots = roots();
+        let target = roots.home.join("vera-data");
+        fs::create_dir_all(target.join("models")).unwrap();
+        fs::write(target.join("config.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&target, &roots.vera_home).unwrap();
+
+        let (stdout, _) = uninstall(&roots, true);
+
+        assert!(!target.exists());
+        assert!(roots.vera_home.symlink_metadata().is_err());
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["complete"], true);
     }
 
     #[test]
