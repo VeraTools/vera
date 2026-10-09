@@ -9,7 +9,7 @@ The default local embedding model, `minishlab/potion-code-16M-v2`, runs on CPU a
 ## Install
 
 ```bash
-pip install vera-ai
+pip install vera-ai && vera-ai install
 ```
 
 ## Quick Start

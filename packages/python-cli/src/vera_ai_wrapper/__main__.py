@@ -5,7 +5,6 @@ import json
 import os
 import platform
 import re
-import shlex
 import stat
 import subprocess
 import sys
@@ -100,7 +99,24 @@ def manifest_url() -> str:
 
 
 def vera_home() -> Path:
-    return Path(os.environ.get("VERA_HOME", Path.home() / ".vera")).expanduser()
+    override = os.environ.get("VERA_HOME", "")
+    if override.strip():
+        return Path(override)
+    home = Path.home()
+    legacy = home / ".vera"
+    try:
+        if any(not entry.name.startswith(".") and entry.name != "update-check.json" for entry in legacy.iterdir()):
+            return legacy
+    except FileNotFoundError:
+        pass
+    system = platform.system().lower()
+    if system == "windows":
+        data = os.environ.get("APPDATA")
+        return Path(data) / "vera" if data else legacy
+    if system == "darwin":
+        return home / "Library" / "Application Support" / "vera"
+    data = os.environ.get("XDG_DATA_HOME", "")
+    return (Path(data) if Path(data).is_absolute() else home / ".local" / "share") / "vera"
 
 
 def install_metadata_path() -> Path:
@@ -336,17 +352,62 @@ def copy_binary(source, destination: Path, size: int) -> None:
             remaining -= len(chunk)
 
 
-def create_shim(binary_path: Path) -> Path:
+def shim_contents(binary_path: str, windows: bool) -> str:
+    if windows:
+        escaped_path = binary_path.replace("%", "%%")
+        return f'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"{escaped_path}" %*\r\n'
+    quoted = "'" + binary_path.replace("'", "'\"'\"'") + "'"
+    return f'#!/bin/sh\nexec {quoted} "$@"\n'
+
+
+def shim_target(text: str) -> str | None:
+    if text.startswith("#!/bin/sh\nexec ") and text.endswith(' "$@"\n'):
+        word = text[15:-6]
+        if word.startswith("'") and word.endswith("'"):
+            parts = word[1:-1].split("'\"'\"'")
+            if all("'" not in part for part in parts):
+                return "'".join(parts) or None
+        elif word.startswith('"') and word.endswith('"'):
+            target = word[1:-1]
+            return target if target and not any(ch in target for ch in "$`\\") else None
+        elif re.fullmatch(r"[A-Za-z0-9@%+=:,./_-]+", word):
+            return word
+    for setlocal in (True, False):
+        head = '@echo off\r\n' + ('setlocal DisableDelayedExpansion\r\n' if setlocal else '') + '"'
+        if text.startswith(head) and text.endswith('" %*\r\n'):
+            target = text[len(head):-6]
+            return (target.replace("%%", "%") if setlocal else target) or None
+    return None
+
+
+def create_shim(binary_path: Path) -> Path | None:
     bin_dir = pick_user_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim_path = bin_dir / shim_name()
     if shim_path.absolute() == binary_path.absolute():
         return shim_path
-    if os.name == "nt":
-        escaped_path = str(binary_path).replace("%", "%%")
-        contents = f'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"{escaped_path}" %*\r\n'
-    else:
-        contents = f'#!/bin/sh\nexec {shlex.quote(str(binary_path))} "$@"\n'
+    contents = shim_contents(str(binary_path), os.name == "nt")
+    try:
+        info = shim_path.lstat()
+        try:
+            current = shim_path.read_bytes().decode("utf-8") if stat.S_ISREG(info.st_mode) else ""
+        except (OSError, UnicodeDecodeError):
+            current = ""
+        target = shim_target(current)
+        target = os.path.normpath(target) if target and os.path.isabs(target) else None
+        # The legacy home counts too: an older uninstall could leave its shim behind.
+        owned = [os.path.abspath(home / "bin") + os.sep for home in (vera_home(), Path.home() / ".vera")]
+        if not target or not any(target.startswith(prefix) for prefix in owned):
+            print(
+                f"Left {shim_path} in place because Vera did not create it. "
+                f"Run {binary_path} directly, or remove that file and install again.",
+                file=sys.stderr,
+            )
+            return None
+        if current == contents:
+            return shim_path
+    except FileNotFoundError:
+        pass
     with tempfile.NamedTemporaryFile(prefix=".vera-shim-", dir=bin_dir, delete=False) as handle:
         staged_shim = Path(handle.name)
         handle.write(contents.encode("utf-8"))
@@ -381,24 +442,27 @@ def cached_binary(target: str, requested_version: str) -> tuple[Path, str] | Non
     return None
 
 
-def finish_install(binary_path: Path, version_value: str, target: str, announce: bool = False) -> tuple[Path, str]:
-    shim_path = create_shim(binary_path)
-    if announce and shim_path.parent.resolve() not in path_entries():
-        print(f"Added Vera to {shim_path.parent}. Add that directory to PATH to run `vera` directly.", file=sys.stderr)
-    write_install_metadata(
-        install_method=detect_wrapper_install_method(), version_value=version_value,
-        binary_path=binary_path, target=target,
-    )
+def finish_install(binary_path: Path, version_value: str, target: str, install: bool, downloaded: bool = False) -> tuple[Path, str]:
+    write_launcher = install or not os.path.lexists(pick_user_bin_dir() / shim_name())
+    if write_launcher:
+        shim_path = create_shim(binary_path)
+        if downloaded and shim_path is not None and shim_path.parent.resolve() not in path_entries():
+            print(f"Added Vera to {shim_path.parent}. Add that directory to PATH to run `vera` directly.", file=sys.stderr)
+    if write_launcher or downloaded:
+        write_install_metadata(
+            install_method=detect_wrapper_install_method(), version_value=version_value,
+            binary_path=binary_path, target=target,
+        )
     return binary_path, version_value
 
 
-def ensure_binary_installed() -> tuple[Path, str]:
+def ensure_binary_installed(install: bool = False) -> tuple[Path, str]:
     target = resolve_target()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", target):
         raise RuntimeError("invalid release target")
     cached = cached_binary(target, package_version())
     if cached:
-        return finish_install(cached[0], cached[1], target)
+        return finish_install(cached[0], cached[1], target, install)
     manifest = load_manifest()
     assets = manifest.get("assets", {})
     asset = assets.get(target) if isinstance(assets, dict) else None
@@ -436,7 +500,7 @@ def ensure_binary_installed() -> tuple[Path, str]:
         staged_receipt.write_text(json.dumps(receipt), encoding="utf-8")
         staged_binary.replace(binary_path)
         staged_receipt.replace(Path(f"{binary_path}.receipt.json"))
-    return finish_install(binary_path, version_value, target, announce=True)
+    return finish_install(binary_path, version_value, target, install, downloaded=True)
 
 
 def run_binary(binary_path: Path, args: list[str]) -> int:
@@ -449,10 +513,13 @@ def run_binary(binary_path: Path, args: list[str]) -> int:
 def run() -> int:
     command = sys.argv[1] if len(sys.argv) > 1 else "help"
     rest = sys.argv[2:]
-    binary_path, version_value = ensure_binary_installed()
+    binary_path, version_value = ensure_binary_installed(install=command == "install")
 
     if command == "install":
         print(f"Vera {version_value} installed.", file=sys.stderr)
+        if not rest and not (sys.stdin.isatty() and sys.stderr.isatty()):
+            print("Run `vera agent install` in a terminal or `vera agent install --client all --scope global` to install agent skills.", file=sys.stderr)
+            return 0
         return run_binary(binary_path, ["agent", "install", *rest])
 
     if command == "help":

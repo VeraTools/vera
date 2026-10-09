@@ -12,9 +12,8 @@
   "bugs": {
     "url": "https://github.com/VeraTools/Vera/issues"
   },
-  "bin": "./bin/vera.js",
-  "scripts": {
-    "postinstall": "node ./bin/vera.js _record-install-method"
+  "bin": {
+    "vera-ai": "./bin/vera.js"
   },
   "files": [
     "bin/vera.js",

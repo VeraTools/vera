@@ -2,14 +2,14 @@
 
 Code search for AI agents. Vera indexes your codebase using tree-sitter parsing and hybrid search (BM25 + vector similarity + optional cross-encoder reranking), then returns ranked code snippets as Markdown codeblocks by default, or JSON with `--json`.
 
-This package downloads and wraps the native Vera binary for your platform. It downloads the exact package version, checks the release archive size and SHA-256, and stores a completed binary cache. Later runs use that cache without network access. Older caches are downloaded and verified once before they can be reused offline. On Linux without glibc (such as Alpine or NixOS), the wrapper selects the musl binary. Other native targets use their platform system libraries; optional ONNX backends have additional runtime requirements. Set `VERA_TARGET` to override target detection (e.g., `VERA_TARGET=x86_64-unknown-linux-musl npm install -g @vera-ai/cli`).
+This package downloads and wraps the native Vera binary for your platform. It downloads the exact package version, checks the release archive size and SHA-256, and stores a completed binary cache. Later runs use that cache without network access. Older caches are downloaded and verified once before they can be reused offline. On Linux without glibc (such as Alpine or NixOS), the wrapper selects the musl binary. Other native targets use their platform system libraries; optional ONNX backends have additional runtime requirements. Set `VERA_TARGET` to override target detection (e.g., `VERA_TARGET=x86_64-unknown-linux-musl npx -y @vera-ai/cli install`).
 
 The default local embedding model, `minishlab/potion-code-16M-v2`, runs on CPU and works offline after its first download. API mode is also available; Qwen/OpenRouter is recommended among API presets (paid usage). The [benchmark report](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks.md) separates the full 1,251-task suite from smaller screening subsets, and the [agent benchmark](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks-history.md#agent-level-benchmark) records context measurements and their sample limits.
 
 ## Install
 
 ```bash
-npm install -g @vera-ai/cli
+npx -y @vera-ai/cli install
 ```
 
 ## Quick Start

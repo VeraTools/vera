@@ -322,7 +322,7 @@ To allow switching between equivalent embedding model names without triggering a
 
 ### Uninstalling
 
-`vera uninstall` removes Vera's data directory (models, ONNX Runtime libs, config), agent skill files, and the PATH shim. Per-project indexes (`.vera/` in each project) are left in place.
+`vera uninstall` removes Vera's data directory (models, ONNX Runtime libs, config), agent skill files, and the PATH shim. A data directory containing files Vera did not create is left in place and reported. Per-project indexes (`.vera/` in each project) are left in place.
 
 ### Cross-Platform
 

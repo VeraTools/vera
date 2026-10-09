@@ -75,7 +75,11 @@ pub fn run(apply: bool, json_output: bool) -> Result<()> {
         current_executable.as_deref(),
     );
 
-    update_check::apply_update(method)?;
+    let latest = report
+        .latest_version
+        .as_deref()
+        .expect("an available update has a latest version");
+    update_check::apply_update(method, latest)?;
 
     // The installer command exiting 0 does not mean the new version landed. A
     // package registry can lag behind a GitHub release, in which case the
@@ -293,7 +297,7 @@ fn print_manual_commands() {
         println!(
             "  {:<5} {}",
             format!("{method}:"),
-            update_check::suggested_update_command(Some(method))
+            update_check::suggested_update_command(Some(method), None)
         );
     }
 }
@@ -305,7 +309,7 @@ fn manual_command_lines() -> String {
             format!(
                 "  {}: {}",
                 method,
-                update_check::suggested_update_command(Some(method))
+                update_check::suggested_update_command(Some(method), None)
             )
         })
         .collect::<Vec<_>>()

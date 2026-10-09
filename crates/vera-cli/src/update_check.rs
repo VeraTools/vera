@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -61,7 +61,10 @@ impl BinaryVersionStatus {
 
     pub fn update_command(&self) -> String {
         if self.install_method.is_some() && self.can_apply_update() {
-            suggested_update_command(self.install_method.as_deref())
+            suggested_update_command(
+                self.install_method.as_deref(),
+                self.latest_version.as_deref(),
+            )
         } else {
             "vera upgrade".to_string()
         }
@@ -372,16 +375,44 @@ fn cached_install_method(cached: &UpdateCache) -> Option<InstallMethodResolution
     })
 }
 
-pub fn suggested_update_command(install_method: Option<&str>) -> String {
-    match install_method {
-        Some("npm") => "npm install -g @vera-ai/cli@latest && npx @vera-ai/cli install".to_string(),
-        Some("bun") => {
-            "bun install -g @vera-ai/cli@latest && bunx @vera-ai/cli install".to_string()
-        }
-        Some("pip") => "pip install --upgrade vera-ai && vera-ai install".to_string(),
-        Some("uv") => "uvx vera-ai install".to_string(),
-        _ => "vera upgrade".to_string(),
+pub fn suggested_update_command(install_method: Option<&str>, version: Option<&str>) -> String {
+    match install_method.and_then(|method| update_steps(method, version)) {
+        Some(steps) => steps
+            .iter()
+            .map(|(program, args)| format_command(program, args))
+            .collect::<Vec<_>>()
+            .join(" && "),
+        None => "vera upgrade".to_string(),
     }
+}
+
+/// The commands that move a wrapper-managed install to `version`, or to the
+/// newest published package when the version is unknown. Pinning the version
+/// makes a lagging package registry fail loudly instead of reinstalling the
+/// running release, and the ephemeral runners leave any global package alone.
+fn update_steps(method: &str, version: Option<&str>) -> Option<Vec<(&'static str, Vec<String>)>> {
+    let tag = version.unwrap_or("latest");
+    let install = || "install".to_string();
+    Some(match method {
+        "npm" => vec![(
+            "npx",
+            vec!["-y".into(), format!("@vera-ai/cli@{tag}"), install()],
+        )],
+        "bun" => vec![("bunx", vec![format!("@vera-ai/cli@{tag}"), install()])],
+        "pip" => vec![
+            (
+                "pip",
+                vec![
+                    install(),
+                    "--upgrade".into(),
+                    version.map_or_else(|| "vera-ai".into(), |v| format!("vera-ai=={v}")),
+                ],
+            ),
+            ("vera-ai", vec![install()]),
+        ],
+        "uv" => vec![("uvx", vec![format!("vera-ai@{tag}"), install()])],
+        _ => return None,
+    })
 }
 
 /// Compare two release tags. Returns true if `latest` > `current`.
@@ -508,24 +539,12 @@ pub fn supported_update_methods() -> &'static [&'static str] {
     &["npm", "bun", "pip", "uv"]
 }
 
-pub fn apply_update(method: &str) -> Result<()> {
-    match method {
-        "npm" => {
-            run_update_step("npm", &["install", "-g", "@vera-ai/cli@latest"])?;
-            run_update_step("npx", &["@vera-ai/cli", "install"])?;
-        }
-        "bun" => {
-            run_update_step("bun", &["install", "-g", "@vera-ai/cli@latest"])?;
-            run_update_step("bunx", &["@vera-ai/cli", "install"])?;
-        }
-        "pip" => {
-            run_update_step("pip", &["install", "--upgrade", "vera-ai"])?;
-            run_update_step("vera-ai", &["install"])?;
-        }
-        "uv" => run_update_step("uvx", &["vera-ai", "install"])?,
-        other => bail!("unsupported install method: {other}"),
+pub fn apply_update(method: &str, version: &str) -> Result<()> {
+    let steps = update_steps(method, Some(version))
+        .ok_or_else(|| anyhow!("unsupported install method: {method}"))?;
+    for (program, args) in &steps {
+        run_update_step(program, args)?;
     }
-
     Ok(())
 }
 
@@ -539,10 +558,12 @@ fn command_succeeds(program: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn run_update_step(program: &str, args: &[&str]) -> Result<()> {
+fn run_update_step(program: &str, args: &[String]) -> Result<()> {
+    // No stdin: the wrapper's `install` then skips the interactive agent
+    // selector, and the upgraded binary refreshes installed skills itself.
     let status = Command::new(shell_command(program))
         .args(args)
-        .stdin(Stdio::inherit())
+        .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -561,15 +582,17 @@ fn run_update_step(program: &str, args: &[&str]) -> Result<()> {
     }
 }
 
-fn format_command(program: &str, args: &[&str]) -> String {
+fn format_command<S: AsRef<str>>(program: &str, args: &[S]) -> String {
     std::iter::once(program)
-        .chain(args.iter().copied())
+        .chain(args.iter().map(AsRef::as_ref))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
+/// npm's launchers are batch files on Windows; pip, uv and bun ship `.exe`s,
+/// which `Command` finds without an extension.
 fn shell_command(program: &str) -> String {
-    if cfg!(windows) {
+    if cfg!(windows) && matches!(program, "npm" | "npx") {
         format!("{program}.cmd")
     } else {
         program.to_string()
@@ -636,12 +659,31 @@ mod tests {
 
     #[test]
     fn suggested_update_command_known_methods() {
-        assert!(suggested_update_command(Some("npm")).contains("npm install"));
-        assert!(suggested_update_command(Some("bun")).contains("bunx"));
-        assert!(suggested_update_command(Some("pip")).contains("pip install"));
-        assert!(suggested_update_command(Some("uv")).contains("uvx"));
-        assert_eq!(suggested_update_command(None), "vera upgrade");
-        assert_eq!(suggested_update_command(Some("unknown")), "vera upgrade");
+        assert_eq!(
+            suggested_update_command(Some("npm"), Some("2.1.0")),
+            "npx -y @vera-ai/cli@2.1.0 install"
+        );
+        assert_eq!(
+            suggested_update_command(Some("bun"), None),
+            "bunx @vera-ai/cli@latest install"
+        );
+        assert_eq!(
+            suggested_update_command(Some("pip"), Some("2.1.0")),
+            "pip install --upgrade vera-ai==2.1.0 && vera-ai install"
+        );
+        assert_eq!(
+            suggested_update_command(Some("pip"), None),
+            "pip install --upgrade vera-ai && vera-ai install"
+        );
+        assert_eq!(
+            suggested_update_command(Some("uv"), Some("2.1.0")),
+            "uvx vera-ai@2.1.0 install"
+        );
+        assert_eq!(suggested_update_command(None, None), "vera upgrade");
+        assert_eq!(
+            suggested_update_command(Some("unknown"), None),
+            "vera upgrade"
+        );
     }
 
     #[test]
@@ -803,7 +845,7 @@ mod tests {
     #[test]
     fn format_command_joins_args() {
         assert_eq!(format_command("npm", &["update", "-g"]), "npm update -g");
-        assert_eq!(format_command("vera", &[]), "vera");
+        assert_eq!(format_command::<&str>("vera", &[]), "vera");
     }
 
     /// #183 regression: pre-release segments used to parse as 0, so tags like
