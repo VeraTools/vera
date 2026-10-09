@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::env_usize;
-
 pub(crate) const DEFAULT_MAX_FILE_SIZE_BYTES: u64 = 1_000_000;
 
 /// Configuration for the indexing pipeline.
@@ -34,7 +32,7 @@ pub struct IndexingConfig {
 }
 
 fn default_max_chunk_bytes() -> usize {
-    env_usize("VERA_MAX_CHUNK_BYTES", 24_576)
+    24_576
 }
 
 impl Default for IndexingConfig {
@@ -77,6 +75,8 @@ mod tests {
     #[ignore = "driven by invalid_numeric_environment_value_falls_back_to_default"]
     fn invalid_numeric_environment_value_falls_back_to_default_probe() {
         assert_eq!(default_max_chunk_bytes(), 24_576);
+        let config = crate::config::VeraConfig::default().with_env_overrides();
+        assert_eq!(config.indexing.max_chunk_bytes, 24_576);
     }
 
     #[test]

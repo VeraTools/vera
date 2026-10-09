@@ -1,6 +1,6 @@
 # Configuration
 
-`vera config show` prints the persisted configuration. Use `vera config get <key>` and `vera config set <key> <value>` for individual values. Environment variables override selected runtime defaults; aliases are listed together below.
+`vera config show` prints the saved configuration. Use `vera config get <key>` and `vera config set <key> <value>` for individual saved values. Runtime precedence is valid environment variable > saved config > built-in default. Environment values are never saved to `config.json`; invalid overrides keep the saved value or default. Aliases are listed together below.
 
 ## Backend/API
 
@@ -35,7 +35,7 @@ Backend selection adjusts effective embedding parameters: Potion Code uses a bat
 | `EMBEDDING_QUERY_PREFIX` | unset | Prefixes embedding queries. |
 | `EMBEDDING_DOCUMENT_PREFIX` | unset | Prefixes embedded documents. |
 | `VERA_EMBEDDING_QUERY_PREFIX` | unset | Vera-specific query-prefix override. |
-| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Default for `embedding.max_in_flight_inputs` when the config does not set it; values below 1 normalize to 1. |
+| `VERA_MAX_IN_FLIGHT_INPUTS` | 256 | Sets `embedding.max_in_flight_inputs`; values below 1 normalize to 1. |
 | `VERA_EMBEDDING_MODEL_ALIASES` | unset | Defines semicolon-separated, comma-separated embedding alias groups. |
 | `RERANKER_MODEL_ID` | unset | Selects the reranker model. |
 | `RERANKER_MODEL_BASE_URL` | unset | Sets the reranker API base URL. |
@@ -85,7 +85,7 @@ Backend selection adjusts effective embedding parameters: Potion Code uses a bat
 | `VERA_MAX_RERANK_DOC_CHARS` | 4800 | Sets the reranker document character budget. |
 | `VERA_RERANK_TIMEOUT_SECS` | 30 | Sets the reranker timeout. |
 | `VERA_RERANK_MAX_RETRIES` | 2 | Sets reranker retries. |
-| `VERA_RERANK_RATE_LIMIT_WAIT_SECS` | unset | Positive seconds enable capped quota-reset waits; unset or `0` keeps short generic retries. |
+| `VERA_RERANK_RATE_LIMIT_WAIT_SECS` | unset | Positive seconds enable capped quota-reset waits; `0` keeps short generic retries. |
 | `VERA_RANKING_FILENAME_STEM_BOOST` | `true` | Enables filename-stem boosting. |
 | `VERA_RANKING_FILENAME_STEM_MIN_RATIO` | 0.05 | Sets the filename-stem match ratio. |
 | `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` | `false` | Skips that boost for symbol queries. |

@@ -396,7 +396,7 @@ fn configure_backend_with_api_setup(
                 },
             };
             if persist_state {
-                let mut runtime = state::load_runtime_config()?;
+                let mut runtime = state::load_saved_core_config()?;
                 let update = match api_setup.reranker_update {
                     Some(update) => Some(update),
                     None if reranker_provider_changed(api_setup.reranker.as_ref())? => {
@@ -902,7 +902,7 @@ fn prompt_reranker_protocol_settings_for_preset(
     preset_id: ApiPresetId,
     provider_changed: bool,
 ) -> anyhow::Result<RerankerProtocolUpdate> {
-    let existing = state::load_runtime_config()?;
+    let existing = state::load_saved_core_config()?;
     let existing = if preset_id == ApiPresetId::Custom && !provider_changed {
         existing
     } else {
@@ -1214,6 +1214,7 @@ mod tests {
                 .args(["--exact", "commands::setup::tests::api_preset_switch_persists_reranker_settings_without_losing_other_config", "--nocapture"])
                 .env(CHILD_HOME, home.path())
                 .env("VERA_HOME", home.path())
+                .env_remove("VERA_MAX_OUTPUT_CHARS")
                 .status().unwrap();
             assert!(status.success());
             return;

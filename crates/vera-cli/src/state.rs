@@ -175,8 +175,12 @@ pub fn clear_reranker_setup() -> Result<()> {
 }
 
 pub fn load_runtime_config() -> Result<vera_core::config::VeraConfig> {
-    let default = vera_core::config::VeraConfig::default();
-    Ok(load_saved_config()?.core_config.unwrap_or(default))
+    Ok(load_saved_core_config()?.with_env_overrides())
+}
+
+/// Load saved values or built-in defaults for editing without env overrides.
+pub fn load_saved_core_config() -> Result<vera_core::config::VeraConfig> {
+    Ok(load_saved_config()?.core_config.unwrap_or_default())
 }
 
 pub fn config_path() -> Result<PathBuf> {
@@ -501,6 +505,107 @@ mod tests {
     /// config directory must not overlap with each other.
     static VERA_HOME_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn config_edits_do_not_save_environment_overrides() {
+        for value in [Some("valid"), None, Some("invalid")] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "state::tests::config_edits_do_not_save_environment_overrides_probe",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("VERA_HOME", dir.path())
+                .env_remove("VERA_LOCAL")
+                .env_remove("VERA_BACKEND");
+            for (key, valid) in [
+                ("VERA_RANKING_DEFINITION_BOOST", "0"),
+                ("VERA_MAX_OUTPUT_CHARS", "777"),
+                ("VERA_RERANK_TIMEOUT_SECS", "9"),
+                ("VERA_LOCAL", "1"),
+            ] {
+                match value {
+                    Some("valid") => {
+                        command.env(key, valid);
+                    }
+                    Some(value) => {
+                        command.env(key, value);
+                    }
+                    None => {
+                        command.env_remove(key);
+                    }
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "driven by config_edits_do_not_save_environment_overrides"]
+    fn config_edits_do_not_save_environment_overrides_probe() {
+        let mut expected = vera_core::config::VeraConfig::default();
+        expected.retrieval.default_limit = 7;
+        crate::commands::config::run(
+            &["set".into(), "retrieval.default_limit".into(), "7".into()],
+            false,
+        )
+        .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(raw["core_config"], serde_json::to_value(&expected).unwrap());
+        assert_eq!(raw["core_config"]["embedding"]["batch_size"], 128);
+        assert_eq!(
+            raw["core_config"]["embedding"]["max_concurrent_requests"],
+            8
+        );
+
+        // A later explicit edit still saves the requested value, not the env.
+        crate::commands::config::run(
+            &[
+                "set".into(),
+                "retrieval.max_output_chars".into(),
+                "321".into(),
+            ],
+            false,
+        )
+        .unwrap();
+        expected.retrieval.max_output_chars = 321;
+        let saved = load_saved_core_config().unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let runtime = load_runtime_config().unwrap();
+        if std::env::var("VERA_MAX_OUTPUT_CHARS").as_deref() == Ok("777") {
+            assert_eq!(runtime.retrieval.max_output_chars, 777);
+            assert_eq!(runtime.retrieval.reranker_timeout_secs, 9);
+            assert!(!runtime.retrieval.ranking_definition_boost);
+        } else {
+            assert_eq!(runtime.retrieval.max_output_chars, 321);
+            assert_eq!(runtime.retrieval.reranker_timeout_secs, 30);
+            assert!(runtime.retrieval.ranking_definition_boost);
+        }
+
+        let embedding = ApiSetupInput {
+            base_url: "https://embedding.example".into(),
+            model_id: "embedding".into(),
+            api_key: "fixture-key".into(),
+        };
+        save_api_setup(&embedding, None, &saved).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(raw["core_config"], serde_json::to_value(expected).unwrap());
+    }
+
     /// What `vera setup` wrote to `config.json` before the pooling fix.
     const LEGACY_JINA_CONFIG: &str = r#"{
       "local_embedding_model": {
@@ -648,13 +753,15 @@ mod tests {
         dump.embedding.max_in_flight_inputs = 16;
         dump.embedding.timeout_secs = 60;
         let _guard = with_stored_config(&serde_json::json!({ "core_config": dump }).to_string());
-        let current = vera_core::config::EmbeddingConfig::default();
+        let current = vera_core::config::VeraConfig::default()
+            .with_env_overrides()
+            .embedding;
         let upgraded = load_runtime_config().unwrap().embedding;
         assert_eq!(upgraded.max_in_flight_inputs, current.max_in_flight_inputs);
         assert_eq!(upgraded.timeout_secs, current.timeout_secs);
         assert_eq!(upgraded.max_concurrent_requests, 2);
 
-        let mut explicit = load_runtime_config().unwrap();
+        let mut explicit = load_saved_core_config().unwrap();
         explicit.embedding.max_in_flight_inputs = 16;
         explicit.embedding.timeout_secs = 60;
         save_runtime_config(&explicit).unwrap();
@@ -662,10 +769,11 @@ mod tests {
             serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
         assert_eq!(raw["config_format"], vera_core::config::SAVED_CONFIG_FORMAT);
         assert_eq!(raw["core_config"]["embedding"]["max_in_flight_inputs"], 16);
+        let expected = explicit.with_env_overrides().embedding;
         let reloaded = load_runtime_config().unwrap().embedding;
         assert_eq!(
             (reloaded.max_in_flight_inputs, reloaded.timeout_secs),
-            (16, 60)
+            (expected.max_in_flight_inputs, expected.timeout_secs)
         );
     }
 

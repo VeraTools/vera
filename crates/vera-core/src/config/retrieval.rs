@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-use super::{env_bool, env_f64, env_usize};
+use super::{env_bool, env_parse};
 
 /// Reranker wire protocol / capability selection.
 ///
@@ -170,55 +170,27 @@ pub struct RetrievalConfig {
 }
 
 fn default_max_output_chars() -> usize {
-    env_usize("VERA_MAX_OUTPUT_CHARS", 0)
+    0
 }
 
 fn default_max_rerank_batch() -> usize {
-    env_usize("VERA_MAX_RERANK_BATCH", 20)
+    20
 }
 
 fn default_reranker_max_doc_chars() -> usize {
-    env_usize("VERA_MAX_RERANK_DOC_CHARS", 4800)
+    4800
 }
 
 fn default_reranker_timeout_secs() -> u64 {
-    env_usize("VERA_RERANK_TIMEOUT_SECS", 30) as u64
+    30
 }
 
 fn default_reranker_max_retries() -> u32 {
-    env_usize("VERA_RERANK_MAX_RETRIES", 2) as u32
+    2
 }
 
 fn default_reranker_rate_limit_wait_secs() -> Option<u64> {
-    match std::env::var("VERA_RERANK_RATE_LIMIT_WAIT_SECS") {
-        Ok(value) => match value.parse::<u64>() {
-            Ok(parsed) => {
-                if parsed == 0 {
-                    None
-                } else {
-                    Some(parsed)
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    key = "VERA_RERANK_RATE_LIMIT_WAIT_SECS",
-                    value = %value,
-                    error = %error,
-                    "invalid numeric environment override; using default"
-                );
-                None
-            }
-        },
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => {
-            tracing::warn!(
-                key = "VERA_RERANK_RATE_LIMIT_WAIT_SECS",
-                error = %error,
-                "could not read numeric environment override; using default"
-            );
-            None
-        }
-    }
+    None
 }
 
 fn deserialize_reranker_rate_limit_wait_secs<'de, D>(
@@ -239,25 +211,23 @@ fn default_reranker_return_documents() -> Option<bool> {
 }
 
 fn default_ranking_filename_stem_boost() -> bool {
-    env_bool("VERA_RANKING_FILENAME_STEM_BOOST", true)
+    true
 }
 
 fn default_ranking_filename_stem_min_ratio() -> f64 {
-    // Default 0.05 preserves pre-knob behavior. Env authoritative.
-    env_f64("VERA_RANKING_FILENAME_STEM_MIN_RATIO", 0.05)
+    0.05
 }
 
 fn default_ranking_filename_stem_skip_symbol_queries() -> bool {
-    // Default false preserves pre-knob behavior. Env authoritative.
-    env_bool("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES", false)
+    false
 }
 
 fn default_ranking_definition_boost() -> bool {
-    env_bool("VERA_RANKING_DEFINITION_BOOST", true)
+    true
 }
 
 fn default_ranking_recall_pool_expansion() -> bool {
-    env_bool("VERA_RANKING_RECALL_POOL_EXPANSION", true)
+    true
 }
 
 fn default_vector_filter_during_scan() -> bool {
@@ -268,7 +238,7 @@ fn default_vector_filter_during_scan() -> bool {
     // (|delta| 0.0000049 <= 0.001), and absolute latency acceptance (p50
     // 6.353 ms <= 7.38, p95 65.034 ms <= 65.88 vs the 072c725 9800X3D
     // baseline 7.879/60.880). Evidence: docs/adr/008-filter-during-scan-default.md.
-    env_bool("VERA_VECTOR_FILTER_DURING_SCAN", true)
+    true
 }
 
 impl Default for RetrievalConfig {
@@ -303,66 +273,38 @@ impl Default for RetrievalConfig {
 impl RetrievalConfig {
     /// Filename-stem boost enabled, with env-var override for cheap ablations.
     pub fn ranking_filename_stem_boost_enabled(&self) -> bool {
-        if std::env::var("VERA_RANKING_FILENAME_STEM_BOOST").is_ok() {
-            env_bool(
-                "VERA_RANKING_FILENAME_STEM_BOOST",
-                self.ranking_filename_stem_boost,
-            )
-        } else {
-            self.ranking_filename_stem_boost
-        }
+        env_bool("VERA_RANKING_FILENAME_STEM_BOOST").unwrap_or(self.ranking_filename_stem_boost)
     }
 
     /// Minimum ratio for filename-stem boost, with env-var override.
     /// Default 0.05; env `VERA_RANKING_FILENAME_STEM_MIN_RATIO` authoritative.
     pub fn ranking_filename_stem_min_ratio_effective(&self) -> f64 {
-        env_f64(
-            "VERA_RANKING_FILENAME_STEM_MIN_RATIO",
-            self.ranking_filename_stem_min_ratio,
-        )
+        env_parse("VERA_RANKING_FILENAME_STEM_MIN_RATIO")
+            .unwrap_or(self.ranking_filename_stem_min_ratio)
     }
 
     /// Whether to skip filename-stem boost for symbol queries, with env-var override.
     /// Default false; env `VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES` authoritative.
     pub fn ranking_filename_stem_skip_symbol_queries_enabled(&self) -> bool {
-        env_bool(
-            "VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES",
-            self.ranking_filename_stem_skip_symbol_queries,
-        )
+        env_bool("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES")
+            .unwrap_or(self.ranking_filename_stem_skip_symbol_queries)
     }
 
     /// Definition-content boost enabled, with env-var override.
     pub fn ranking_definition_boost_enabled(&self) -> bool {
-        if std::env::var("VERA_RANKING_DEFINITION_BOOST").is_ok() {
-            env_bool(
-                "VERA_RANKING_DEFINITION_BOOST",
-                self.ranking_definition_boost,
-            )
-        } else {
-            self.ranking_definition_boost
-        }
+        env_bool("VERA_RANKING_DEFINITION_BOOST").unwrap_or(self.ranking_definition_boost)
     }
 
     /// Recall-pool expansion enabled, with env-var override.
     pub fn ranking_recall_pool_expansion_enabled(&self) -> bool {
-        if std::env::var("VERA_RANKING_RECALL_POOL_EXPANSION").is_ok() {
-            env_bool(
-                "VERA_RANKING_RECALL_POOL_EXPANSION",
-                self.ranking_recall_pool_expansion,
-            )
-        } else {
-            self.ranking_recall_pool_expansion
-        }
+        env_bool("VERA_RANKING_RECALL_POOL_EXPANSION").unwrap_or(self.ranking_recall_pool_expansion)
     }
 
     /// Filter-during-scan optimization enabled, with env-var override.
     /// Default ON since the r5 evidence-backed flip (issue #197);
     /// env `VERA_VECTOR_FILTER_DURING_SCAN` authoritative.
     pub fn vector_filter_during_scan_enabled(&self) -> bool {
-        env_bool(
-            "VERA_VECTOR_FILTER_DURING_SCAN",
-            self.vector_filter_during_scan,
-        )
+        env_bool("VERA_VECTOR_FILTER_DURING_SCAN").unwrap_or(self.vector_filter_during_scan)
     }
 }
 
@@ -371,6 +313,15 @@ mod tests {
     use super::*;
     use crate::config::VeraConfig;
     use crate::test_env::run_env_test;
+
+    fn runtime_retrieval(retrieval: RetrievalConfig) -> RetrievalConfig {
+        VeraConfig {
+            retrieval,
+            ..Default::default()
+        }
+        .with_env_overrides()
+        .retrieval
+    }
 
     #[test]
     fn reranker_protocol_parses_case_insensitively() {
@@ -457,7 +408,7 @@ mod tests {
 
     #[test]
     fn reranker_doc_budget_env_precedence_matrix() {
-        // env-only, env+config (config wins), unset — for VERA_MAX_RERANK_DOC_CHARS
+        // Env-only, env overriding saved config, and unset.
         run_env_test(
             "config::retrieval::tests::reranker_doc_budget_env_precedence_matrix_probe",
             &[
@@ -469,7 +420,7 @@ mod tests {
             ],
         );
         run_env_test(
-            "config::retrieval::tests::reranker_doc_budget_config_wins_over_env_probe",
+            "config::retrieval::tests::reranker_doc_budget_env_wins_over_config_probe",
             &[("VERA_MAX_RERANK_DOC_CHARS", Some("9999"))],
         );
         run_env_test(
@@ -482,22 +433,18 @@ mod tests {
     #[ignore = "driven by reranker_doc_budget_env_precedence_matrix"]
     fn reranker_doc_budget_env_precedence_matrix_probe() {
         // env-only: no config key, env present => env value observed
-        assert_eq!(default_reranker_max_doc_chars(), 9999);
-        let cfg = RetrievalConfig::default();
+        assert_eq!(default_reranker_max_doc_chars(), 4800);
+        let cfg = runtime_retrieval(RetrievalConfig::default());
         assert_eq!(cfg.reranker_max_doc_chars, 9999);
     }
 
     #[test]
     #[ignore = "driven by reranker_doc_budget_env_precedence_matrix"]
-    fn reranker_doc_budget_config_wins_over_env_probe() {
-        // env + explicit config JSON: file value must win (config authoritative)
+    fn reranker_doc_budget_env_wins_over_config_probe() {
         let json = r#"{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":20,"max_output_chars":0,"reranker_max_doc_chars":1200}"#;
         let cfg: RetrievalConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cfg.reranker_max_doc_chars, 1200,
-            "config file must win over env 9999"
-        );
-        // Also verify RetrievalConfig::default still sees env (covered by other probe)
+        assert_eq!(cfg.reranker_max_doc_chars, 1200);
+        assert_eq!(runtime_retrieval(cfg).reranker_max_doc_chars, 9999);
     }
 
     #[test]
@@ -515,7 +462,7 @@ mod tests {
             &[("VERA_RERANK_RATE_LIMIT_WAIT_SECS", Some("42"))],
         );
         run_env_test(
-            "config::retrieval::tests::reranker_rate_limit_config_wins_probe",
+            "config::retrieval::tests::reranker_rate_limit_env_wins_probe",
             &[("VERA_RERANK_RATE_LIMIT_WAIT_SECS", Some("99"))],
         );
         run_env_test(
@@ -527,23 +474,31 @@ mod tests {
     #[test]
     #[ignore = "driven by reranker_rate_limit_env_precedence_matrix"]
     fn reranker_rate_limit_env_precedence_probe() {
-        assert_eq!(default_reranker_rate_limit_wait_secs(), Some(42));
+        assert_eq!(default_reranker_rate_limit_wait_secs(), None);
         assert_eq!(
-            RetrievalConfig::default().reranker_rate_limit_wait_secs,
+            runtime_retrieval(RetrievalConfig::default()).reranker_rate_limit_wait_secs,
             Some(42)
         );
     }
 
     #[test]
     #[ignore = "driven by reranker_rate_limit_env_precedence_matrix"]
-    fn reranker_rate_limit_config_wins_probe() {
+    fn reranker_rate_limit_env_wins_probe() {
         let json = r#"{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":20,"max_output_chars":0,"reranker_rate_limit_wait_secs":10}"#;
         let cfg: RetrievalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.reranker_rate_limit_wait_secs, Some(10));
-        // 0 in config becomes None (explicit unlimited/short), env ignored
+        assert_eq!(
+            runtime_retrieval(cfg).reranker_rate_limit_wait_secs,
+            Some(99)
+        );
+        // A saved null remains null until the runtime overlay is applied.
         let json_zero = r#"{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":20,"max_output_chars":0,"reranker_rate_limit_wait_secs":null}"#;
         let cfg2: RetrievalConfig = serde_json::from_str(json_zero).unwrap();
         assert_eq!(cfg2.reranker_rate_limit_wait_secs, None);
+        assert_eq!(
+            runtime_retrieval(cfg2).reranker_rate_limit_wait_secs,
+            Some(99)
+        );
     }
 
     #[test]
@@ -559,13 +514,12 @@ mod tests {
 
     #[test]
     fn reranker_batch_env_precedence_matrix() {
-        // Batch is the pinned case: config authoritative on BOTH dynamic and static paths (aae94f7)
         run_env_test(
             "config::retrieval::tests::reranker_batch_env_only_probe",
             &[("VERA_MAX_RERANK_BATCH", Some("7"))],
         );
         run_env_test(
-            "config::retrieval::tests::reranker_batch_config_authoritative_probe",
+            "config::retrieval::tests::reranker_batch_env_overrides_saved_config_probe",
             &[("VERA_MAX_RERANK_BATCH", Some("99"))],
         );
         run_env_test(
@@ -577,18 +531,22 @@ mod tests {
     #[test]
     #[ignore = "driven by reranker_batch_env_precedence_matrix"]
     fn reranker_batch_env_only_probe() {
-        assert_eq!(default_max_rerank_batch(), 7);
-        assert_eq!(RetrievalConfig::default().max_rerank_batch, 7);
+        assert_eq!(default_max_rerank_batch(), 20);
+        assert_eq!(
+            runtime_retrieval(RetrievalConfig::default()).max_rerank_batch,
+            7
+        );
     }
 
     #[test]
     #[ignore = "driven by reranker_batch_env_precedence_matrix"]
-    fn reranker_batch_config_authoritative_probe() {
-        // Even with env=99, explicit JSON 8 must win (config authoritative)
+    fn reranker_batch_env_overrides_saved_config_probe() {
         let json = r#"{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":8,"max_output_chars":0}"#;
         let cfg: RetrievalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.max_rerank_batch, 8);
-        // Dynamic path: ApiReranker::from_configs must use retrieval's 8, not env 99
+        let cfg = runtime_retrieval(cfg);
+        assert_eq!(cfg.max_rerank_batch, 99);
+        // The constructor consumes the already-resolved runtime config.
         let rcfg = crate::retrieval::reranker::RerankerConfig::new(
             "http://example.com".to_string(),
             "m".to_string(),
@@ -596,11 +554,9 @@ mod tests {
         );
         let r = crate::retrieval::reranker::ApiReranker::from_configs(rcfg, &cfg).unwrap();
         assert_eq!(
-            r.max_rerank_batch, 8,
-            "dynamic path: config 8 must win over env 99"
+            r.max_rerank_batch, 99,
+            "dynamic path must use the runtime overlay"
         );
-        // Static legacy path still honors env when no explicit retrieval value is passed
-        // (covered by env_only probe); from_configs is the authoritative path.
     }
 
     #[test]
@@ -687,8 +643,9 @@ mod tests {
     #[ignore = "driven by ranking_filename_stem_boost_env_precedence_matrix"]
     fn ranking_filename_stem_boost_env_only_probe() {
         // env=0 overrides default true
-        assert!(!default_ranking_filename_stem_boost());
-        let cfg = RetrievalConfig::default();
+        assert!(default_ranking_filename_stem_boost());
+        let cfg = runtime_retrieval(RetrievalConfig::default());
+        assert!(!cfg.ranking_filename_stem_boost);
         assert!(!cfg.ranking_filename_stem_boost_enabled());
     }
 
@@ -731,7 +688,8 @@ mod tests {
     #[test]
     #[ignore = "driven by ranking_definition_boost_env_precedence_matrix"]
     fn ranking_definition_boost_env_only_probe() {
-        assert!(!default_ranking_definition_boost());
+        assert!(default_ranking_definition_boost());
+        assert!(!runtime_retrieval(RetrievalConfig::default()).ranking_definition_boost);
         assert!(!RetrievalConfig::default().ranking_definition_boost_enabled());
     }
 
@@ -773,7 +731,8 @@ mod tests {
     #[test]
     #[ignore = "driven by ranking_recall_pool_expansion_env_precedence_matrix"]
     fn ranking_recall_pool_expansion_env_only_probe() {
-        assert!(!default_ranking_recall_pool_expansion());
+        assert!(default_ranking_recall_pool_expansion());
+        assert!(!runtime_retrieval(RetrievalConfig::default()).ranking_recall_pool_expansion);
         assert!(!RetrievalConfig::default().ranking_recall_pool_expansion_enabled());
     }
 
@@ -866,7 +825,8 @@ mod tests {
             std::env::var("VERA_VECTOR_FILTER_DURING_SCAN").unwrap(),
             "0"
         );
-        assert!(!default_vector_filter_during_scan());
+        assert!(default_vector_filter_during_scan());
+        assert!(!runtime_retrieval(RetrievalConfig::default()).vector_filter_during_scan);
         // Even if file says true, env 0 must win.
         let cfg = RetrievalConfig {
             vector_filter_during_scan: true,
@@ -950,7 +910,7 @@ mod tests {
 
     #[test]
     fn vector_filter_alias_parity() {
-        // Single alias, but parity requires default_* and enabled helper share order.
+        // The runtime overlay and enabled helper must resolve the same value.
         run_env_test(
             "config::retrieval::tests::vector_filter_alias_parity_probe",
             &[("VERA_VECTOR_FILTER_DURING_SCAN", Some("1"))],
@@ -968,8 +928,7 @@ mod tests {
             std::env::var("VERA_VECTOR_FILTER_DURING_SCAN").unwrap(),
             "1"
         );
-        // Both helpers must see same alias set precedence (only one alias, but still).
-        assert!(default_vector_filter_during_scan());
+        assert!(runtime_retrieval(RetrievalConfig::default()).vector_filter_during_scan);
         let cfg = RetrievalConfig {
             vector_filter_during_scan: false,
             ..Default::default()
@@ -984,7 +943,7 @@ mod tests {
             std::env::var("VERA_VECTOR_FILTER_DURING_SCAN").unwrap(),
             "0"
         );
-        assert!(!default_vector_filter_during_scan());
+        assert!(!runtime_retrieval(RetrievalConfig::default()).vector_filter_during_scan);
         let cfg = RetrievalConfig {
             vector_filter_during_scan: true,
             ..Default::default()
@@ -1109,8 +1068,11 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_MIN_RATIO").unwrap(),
             "0.75"
         );
-        // env should make default helper return 0.75 even when no file
-        assert!((default_ranking_filename_stem_min_ratio() - 0.75).abs() < 1e-9);
+        assert!(
+            (runtime_retrieval(RetrievalConfig::default()).ranking_filename_stem_min_ratio - 0.75)
+                .abs()
+                < 1e-9
+        );
         // stored false/0.05 vs env 0.75 -> env wins
         let cfg = RetrievalConfig {
             ranking_filename_stem_min_ratio: 0.05,
@@ -1137,7 +1099,9 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES").unwrap(),
             "1"
         );
-        assert!(default_ranking_filename_stem_skip_symbol_queries());
+        assert!(
+            runtime_retrieval(RetrievalConfig::default()).ranking_filename_stem_skip_symbol_queries
+        );
         let cfg = RetrievalConfig {
             ranking_filename_stem_skip_symbol_queries: false,
             ..Default::default()
@@ -1200,14 +1164,18 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_MIN_RATIO").unwrap(),
             "0.5"
         );
-        assert!((default_ranking_filename_stem_min_ratio() - 0.5).abs() < 1e-9);
+        assert!(
+            (runtime_retrieval(RetrievalConfig::default()).ranking_filename_stem_min_ratio - 0.5)
+                .abs()
+                < 1e-9
+        );
         let cfg = RetrievalConfig {
             ranking_filename_stem_min_ratio: 0.05,
             ..Default::default()
         };
         assert!(
             (cfg.ranking_filename_stem_min_ratio_effective() - 0.5).abs() < 1e-9,
-            "effective must match default helper's env resolution"
+            "effective must match the runtime overlay"
         );
         // stored 0.9 must be ignored when env present
         let cfg2 = RetrievalConfig {
@@ -1224,7 +1192,11 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_MIN_RATIO").unwrap(),
             "0.25"
         );
-        assert!((default_ranking_filename_stem_min_ratio() - 0.25).abs() < 1e-9);
+        assert!(
+            (runtime_retrieval(RetrievalConfig::default()).ranking_filename_stem_min_ratio - 0.25)
+                .abs()
+                < 1e-9
+        );
         let cfg = RetrievalConfig {
             ranking_filename_stem_min_ratio: 0.8,
             ..Default::default()
@@ -1239,7 +1211,9 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES").unwrap(),
             "1"
         );
-        assert!(default_ranking_filename_stem_skip_symbol_queries());
+        assert!(
+            runtime_retrieval(RetrievalConfig::default()).ranking_filename_stem_skip_symbol_queries
+        );
         let cfg = RetrievalConfig {
             ranking_filename_stem_skip_symbol_queries: false,
             ..Default::default()
@@ -1254,7 +1228,10 @@ mod tests {
             std::env::var("VERA_RANKING_FILENAME_STEM_SKIP_SYMBOL_QUERIES").unwrap(),
             "0"
         );
-        assert!(!default_ranking_filename_stem_skip_symbol_queries());
+        assert!(
+            !runtime_retrieval(RetrievalConfig::default())
+                .ranking_filename_stem_skip_symbol_queries
+        );
         let cfg = RetrievalConfig {
             ranking_filename_stem_skip_symbol_queries: true,
             ..Default::default()
