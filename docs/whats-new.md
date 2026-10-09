@@ -2,7 +2,7 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
-## v2.0.2
+## v2.1.0
 
 - `vera uninstall` removes the PATH shim the npm and pip installers write again. Since v2.0.0 it left that shim behind and reported a partial uninstall.
 - `vera uninstall` deletes the data directory only when its contents match the layout Vera creates. A `VERA_HOME` pointing at a shared directory is left in place and reported.
