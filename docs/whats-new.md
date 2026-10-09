@@ -5,7 +5,7 @@ Release highlights from v1.0 onward. For the current benchmark tables and method
 ## v2.0.2
 
 - `vera uninstall` removes the PATH shim the npm and pip installers write again. Since v2.0.0 it left that shim behind and reported a partial uninstall.
-- `vera uninstall` deletes the data directory only when everything in it is Vera's own. A `VERA_HOME` pointing at a shared directory is left in place and reported.
+- `vera uninstall` deletes the data directory only when its contents match the layout Vera creates. A `VERA_HOME` pointing at a shared directory is left in place and reported.
 - The installers no longer overwrite a `vera` launcher they did not create, such as a `cargo install` binary, and only rewrite their own launcher during `install`.
 - The npm and pip installers store data in the same platform directory Vera itself uses (`~/.local/share/vera` on Linux) unless `~/.vera` already holds an installation.
 - `npm install -g @vera-ai/cli` installs a `vera-ai` command, matching pip. It used to install a command named `cli`.

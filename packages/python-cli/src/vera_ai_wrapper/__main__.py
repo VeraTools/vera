@@ -101,7 +101,7 @@ def manifest_url() -> str:
 def vera_home() -> Path:
     override = os.environ.get("VERA_HOME", "")
     if override.strip():
-        return Path(override)
+        return Path(os.path.abspath(override))
     home = Path.home()
     legacy = home / ".vera"
     try:
@@ -369,15 +369,27 @@ def shim_target(text: str) -> str | None:
                 return "'".join(parts) or None
         elif word.startswith('"') and word.endswith('"'):
             target = word[1:-1]
-            return target if target and not any(ch in target for ch in "$`\\") else None
+            return target if target and not any(ch in target for ch in '$`\\"') else None
         elif re.fullmatch(r"[A-Za-z0-9@%+=:,./_-]+", word):
             return word
     for setlocal in (True, False):
         head = '@echo off\r\n' + ('setlocal DisableDelayedExpansion\r\n' if setlocal else '') + '"'
         if text.startswith(head) and text.endswith('" %*\r\n'):
             target = text[len(head):-6]
+            if '"' in target:
+                return None
             return (target.replace("%%", "%") if setlocal else target) or None
     return None
+
+
+def is_release_binary(target: str, home: Path) -> bool:
+    # Releases live at <home>/bin/<version>/<target>/<binary>. The legacy home
+    # counts too: an older uninstall could leave its shim behind.
+    try:
+        parts = Path(target).relative_to(os.path.abspath(home / "bin")).parts
+    except ValueError:
+        return False
+    return len(parts) == 3 and parts[2] == binary_name()
 
 
 def create_shim(binary_path: Path) -> Path | None:
@@ -395,9 +407,7 @@ def create_shim(binary_path: Path) -> Path | None:
             current = ""
         target = shim_target(current)
         target = os.path.normpath(target) if target and os.path.isabs(target) else None
-        # The legacy home counts too: an older uninstall could leave its shim behind.
-        owned = [os.path.abspath(home / "bin") + os.sep for home in (vera_home(), Path.home() / ".vera")]
-        if not target or not any(target.startswith(prefix) for prefix in owned):
+        if not target or not any(is_release_binary(target, home) for home in (vera_home(), Path.home() / ".vera")):
             print(
                 f"Left {shim_path} in place because Vera did not create it. "
                 f"Run {binary_path} directly, or remove that file and install again.",

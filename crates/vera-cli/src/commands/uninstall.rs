@@ -108,8 +108,9 @@ fn shim_target(text: &str) -> Option<String> {
             .strip_prefix('"')
             .and_then(|rest| rest.strip_suffix('"'))
         {
-            // Preserve legacy verbatim paths, including embedded double quotes.
-            if quoted.contains(['$', '`', '\\']) {
+            // Legacy shims wrote paths verbatim; reject anything sh would
+            // expand or that would end the quoted word early.
+            if quoted.contains(['$', '`', '\\', '"']) {
                 return None;
             }
             quoted.to_owned()
@@ -129,7 +130,7 @@ fn shim_target(text: &str) -> Option<String> {
         None => (rest, false),
     };
     let target = rest.strip_prefix('"')?.strip_suffix("\" %*\r\n")?;
-    (!target.is_empty()).then(|| {
+    (!target.is_empty() && !target.contains('"')).then(|| {
         if escaped {
             target.replace("%%", "%")
         } else {
@@ -549,6 +550,20 @@ fn is_vera_data_file(name: &str) -> bool {
                 .any(|file| file.strip_suffix(".json") == Some(base)))
 }
 
+/// The installers keep each release in `bin/<version>/<target>/`, so any other
+/// entry there belongs to something else, such as a shared `~/bin`.
+fn holds_only_versioned_releases(bin: &Path) -> Result<bool> {
+    for entry in fs::read_dir(bin)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir() || semver::Version::parse(&name.to_string_lossy()).is_err()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// An override may name a shared directory. Delete it only when every entry
 /// has a name and file type Vera creates, including its atomic-write temps.
 fn contains_only_vera_files(dir: &Path) -> Result<bool> {
@@ -557,8 +572,10 @@ fn contains_only_vera_files(dir: &Path) -> Result<bool> {
         let kind = entry.file_type()?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let ours = if kind.is_dir() {
-            matches!(name.as_ref(), "bin" | "models" | "lib" | "venv")
+        let ours = if kind.is_dir() && name == "bin" {
+            holds_only_versioned_releases(&entry.path())?
+        } else if kind.is_dir() {
+            matches!(name.as_ref(), "models" | "lib" | "venv")
         } else if kind.is_file() {
             is_vera_data_file(&name)
         } else {
@@ -931,7 +948,7 @@ mod tests {
     #[test]
     fn a_vera_home_with_only_vera_entries_and_temp_files_is_removed() {
         let roots = roots();
-        for name in ["bin", "models", "lib", "venv"] {
+        for name in ["bin/2.0.1/x", "models", "lib", "venv"] {
             fs::create_dir_all(roots.vera_home.join(name)).unwrap();
             fs::write(roots.vera_home.join(name).join("payload"), "data").unwrap();
         }
@@ -973,6 +990,21 @@ mod tests {
             }
             assert!(!contains_only_vera_files(temp.path()).unwrap(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_bin_directory_holding_other_tools_is_left_in_place() {
+        let roots = roots();
+        let tool = roots.vera_home.join("bin").join("other-tool");
+        fs::create_dir_all(roots.vera_home.join("models").join("foreign")).unwrap();
+        fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        fs::write(&tool, "foreign tool").unwrap();
+
+        let (stdout, _) = uninstall(&roots, true);
+
+        assert_eq!(fs::read_to_string(tool).unwrap(), "foreign tool");
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["complete"], false);
     }
 
     #[test]
@@ -1139,10 +1171,6 @@ mod tests {
     fn legacy_shims_decode_without_changing_verbatim_paths() {
         for (body, path) in [
             (
-                "#!/bin/sh\nexec \"/home/ho\"me/.vera/bin/vera\" \"$@\"\n",
-                "/home/ho\"me/.vera/bin/vera",
-            ),
-            (
                 "#!/bin/sh\nexec /home/u/.vera/bin/2.0.1/x/vera \"$@\"\n",
                 "/home/u/.vera/bin/2.0.1/x/vera",
             ),
@@ -1165,6 +1193,7 @@ mod tests {
             "/home/u/.vera/bin/$OTHER",
             "/home/u/.vera/bin/`other`",
             "/home/u/.vera/bin/back\\slash",
+            "/home/u/.vera/bin/\"\"..\"/\"../..\"/\"other",
         ] {
             assert!(shim_target(&format!("#!/bin/sh\nexec \"{path}\" \"$@\"\n")).is_none());
             assert_eq!(
@@ -1630,7 +1659,12 @@ mod tests {
                 .vera_home
                 .join("bin")
                 .join("1.3.0")
-                .join("space ' \" $ % !")
+                // Windows file names cannot contain a double quote.
+                .join(if platform == "unix" {
+                    "space ' \" $ % !"
+                } else {
+                    "space ' $ % !"
+                })
                 .join("vera");
             let case = &contract[platform][0];
             let path = binary.display().to_string();
@@ -1673,8 +1707,8 @@ mod tests {
         );
     }
 
-    /// A path may contain a quote character, and the installer writes it into
-    /// the shim verbatim. Rejecting such a target left the shim on PATH.
+    /// A double quote in the home path must not hide the canonical shim. The
+    /// legacy double-quoted form cannot carry one safely, so it is not decoded.
     #[cfg(unix)]
     #[test]
     fn a_quote_in_the_home_path_does_not_hide_the_shim() {
@@ -1687,7 +1721,7 @@ mod tests {
         let binary = vera_home.join("bin").join("1.3.0").join("x").join("vera");
         let shim = install_shim(
             &bin,
-            &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", binary.display()),
+            &format!("#!/bin/sh\nexec '{}' \"$@\"\n", binary.display()),
         );
 
         let mut stdout = Vec::new();
@@ -1750,8 +1784,8 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(recorded.parent().unwrap()).unwrap();
         fs::write(&recorded, "binary").unwrap();
-        // PATH/vera -> <vera_home>/bin/current -> <recorded binary>
-        let middle = roots.vera_home.join("bin").join("current");
+        // PATH/vera -> <vera_home>/bin/1.3.0/current -> <recorded binary>
+        let middle = roots.vera_home.join("bin").join("1.3.0").join("current");
         std::os::unix::fs::symlink(&recorded, &middle).unwrap();
         let entry = bin.join("vera");
         std::os::unix::fs::symlink(&middle, &entry).unwrap();

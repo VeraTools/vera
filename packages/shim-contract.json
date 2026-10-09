@@ -23,8 +23,8 @@
       "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\u\\AppData\\Roaming\\vera\\bin\\2.0.1\\x\\vera.exe\" %*\r\n"
     },
     {
-      "binary_path": "C:\\Users\\space ' \" $ %USERPROFILE% !\\vera\\bin\\vera.exe",
-      "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\space ' \" $ %%USERPROFILE%% !\\vera\\bin\\vera.exe\" %*\r\n"
+      "binary_path": "C:\\Users\\space ' $ %USERPROFILE% !\\vera\\bin\\vera.exe",
+      "shim": "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"C:\\Users\\space ' $ %%USERPROFILE%% !\\vera\\bin\\vera.exe\" %*\r\n"
     },
     {
       "binary_path": "C:\\Users\\%%!\\vera\\bin\\vera.exe",

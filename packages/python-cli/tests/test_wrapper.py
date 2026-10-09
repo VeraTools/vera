@@ -68,7 +68,7 @@ class Contracts(unittest.TestCase):
                 os.environ["VERA_HOME"] = " \t "
                 self.assertEqual(wrapper.vera_home(), legacy)
                 os.environ["VERA_HOME"] = "~/raw home "
-                self.assertEqual(wrapper.vera_home(), Path("~/raw home "))
+                self.assertEqual(wrapper.vera_home(), Path(os.path.abspath("~/raw home ")))
                 os.environ.pop("VERA_HOME")
                 (legacy / "models").rmdir()
                 (legacy / "update-check.json").unlink()
@@ -242,14 +242,14 @@ class Fixture(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"native binary")
         shim = wrapper.create_shim(binary)
-        old = wrapper.vera_home() / "bin/old" / wrapper.binary_name()
+        old = wrapper.vera_home() / "bin/2.0.0/x" / wrapper.binary_name()
         bodies = [
             wrapper.shim_contents(str(old), False), wrapper.shim_contents(str(old), True),
             f'@echo off\r\n"{old}" %*\r\n',
-            wrapper.shim_contents(str(Path.home() / ".vera/bin/old" / wrapper.binary_name()), os.name == "nt"),
-            wrapper.shim_contents(str(wrapper.vera_home() / "bin/version/../old" / wrapper.binary_name()), os.name == "nt"),
+            wrapper.shim_contents(str(Path.home() / ".vera/bin/2.0.0/x" / wrapper.binary_name()), os.name == "nt"),
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin/version/../2.0.0/x" / wrapper.binary_name()), os.name == "nt"),
         ]
-        if not any(ch in str(old) for ch in "$`\\"):
+        if not any(ch in str(old) for ch in '$`\\"'):
             bodies.append(f'#!/bin/sh\nexec "{old}" "$@"\n')
         if wrapper.re.fullmatch(r"[A-Za-z0-9@%+=:,./_-]+", str(old)):
             bodies.append(f'#!/bin/sh\nexec {old} "$@"\n')
@@ -263,11 +263,11 @@ class Fixture(unittest.TestCase):
             wrapper.shim_contents(str(wrapper.vera_home() / "bin-extra/vera"), os.name == "nt").encode(),
             (wrapper.shim_contents(str(old), False) + "echo extra\n").encode(),
             *[f'#!/bin/sh\nexec "{wrapper.vera_home() / "bin" / name}" "$@"\n'.encode()
-              for name in ["$OTHER", "`other`", "back\\slash"]],
+              for name in ["$OTHER", "`other`", "back\\slash", 'quo"te']],
             wrapper.shim_contents(str(wrapper.vera_home() / "bin/../../other/tool"), os.name == "nt").encode(),
+            wrapper.shim_contents(str(wrapper.vera_home() / "bin/other-tool"), os.name == "nt").encode(),
+            wrapper.shim_contents(os.path.join("relative", "bin", "2.0.0", "x", wrapper.binary_name()), os.name == "nt").encode(),
         ]
-        os.environ["VERA_HOME"] = os.path.relpath(wrapper.vera_home())
-        foreign.append(wrapper.shim_contents(str(wrapper.vera_home() / "bin/old" / wrapper.binary_name()), os.name == "nt").encode())
         with patch.object(sys, "stderr", new_callable=io.StringIO) as output:
             for body in foreign:
                 shim.write_bytes(body)

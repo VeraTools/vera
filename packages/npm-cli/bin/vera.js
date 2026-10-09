@@ -84,7 +84,7 @@ function manifestUrl(version) {
 }
 
 function defaultVeraHome() {
-  if (process.env.VERA_HOME && process.env.VERA_HOME.trim()) return process.env.VERA_HOME;
+  if (process.env.VERA_HOME && process.env.VERA_HOME.trim()) return path.resolve(process.env.VERA_HOME);
   const home = os.homedir();
   const legacy = path.join(home, ".vera");
   try {
@@ -394,13 +394,14 @@ function shimTarget(text) {
       if (parts.every((part) => !part.includes("'"))) return parts.join("'") || null;
     } else if (word.startsWith('"') && word.endsWith('"')) {
       const target = word.slice(1, -1);
-      return target && !/[$`\\]/.test(target) ? target : null;
+      return target && !/[$`\\"]/.test(target) ? target : null;
     } else if (/^[A-Za-z0-9@%+=:,./_-]+$/.test(word)) return word;
   }
   for (const setlocal of [true, false]) {
     const head = '@echo off\r\n' + (setlocal ? 'setlocal DisableDelayedExpansion\r\n' : '') + '"';
     if (text.startsWith(head) && text.endsWith('" %*\r\n')) {
       const target = text.slice(head.length, -6);
+      if (target.includes('"')) return null;
       return (setlocal ? target.replace(/%%/g, "%") : target) || null;
     }
   }
@@ -418,9 +419,14 @@ async function createShim(binaryPath) {
     const current = stat.isFile() ? await fsp.readFile(shimPath, "utf8").catch(() => "") : "";
     const target = shimTarget(current);
     const normalized = target && path.isAbsolute(target) ? path.resolve(target) : null;
-    // The legacy home counts too: an older uninstall could leave its shim behind.
-    const owned = [defaultVeraHome(), path.join(os.homedir(), ".vera")].map((home) => path.resolve(home, "bin") + path.sep);
-    if (!normalized || !owned.some((prefix) => normalized.startsWith(prefix))) {
+    // Releases live at <home>/bin/<version>/<target>/<binary>. The legacy home
+    // counts too: an older uninstall could leave its shim behind.
+    const owned = normalized && [defaultVeraHome(), path.join(os.homedir(), ".vera")].some((home) => {
+      const relative = path.relative(path.resolve(home, "bin"), normalized);
+      const parts = relative.split(path.sep);
+      return !path.isAbsolute(relative) && parts.length === 3 && parts[0] !== ".." && parts[2] === binaryName();
+    });
+    if (!owned) {
       console.error(`Left ${shimPath} in place because Vera did not create it. Run ${binaryPath} directly, or remove that file and install again.`);
       return null;
     }

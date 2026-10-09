@@ -117,7 +117,7 @@ test("home resolution follows Rust overrides, legacy detection and platform data
   env.VERA_HOME = " \t ";
   assert.equal(resolve("linux"), legacy);
   env.VERA_HOME = "~/raw home ";
-  assert.equal(resolve("linux"), "~/raw home ");
+  assert.equal(resolve("linux"), path.resolve("~/raw home "));
   await fsp.rm(legacy, { recursive: true });
   await fsp.writeFile(legacy, "not a directory");
   delete env.VERA_HOME;
@@ -183,14 +183,14 @@ test("shim replacement accepts only owned templates and preserves foreign entrie
   await fsp.mkdir(path.dirname(binary), { recursive: true });
   await fsp.writeFile(binary, "native binary");
   const shim = await wrapper.createShim(binary);
-  const old = path.join(process.env.VERA_HOME, "bin", "old", binaryName);
+  const old = path.join(process.env.VERA_HOME, "bin", "2.0.0", "x", binaryName);
   const bodies = [
     wrapper.shimContents(old, "linux"), wrapper.shimContents(old, "win32"),
     `@echo off\r\n"${old}" %*\r\n`,
-    wrapper.shimContents(path.join(os.homedir(), ".vera", "bin", "old", binaryName), process.platform),
-    wrapper.shimContents(path.join(process.env.VERA_HOME, "bin") + `${path.sep}version${path.sep}..${path.sep}old${path.sep}${binaryName}`, process.platform),
+    wrapper.shimContents(path.join(os.homedir(), ".vera", "bin", "2.0.0", "x", binaryName), process.platform),
+    wrapper.shimContents(path.join(process.env.VERA_HOME, "bin") + `${path.sep}version${path.sep}..${path.sep}2.0.0${path.sep}x${path.sep}${binaryName}`, process.platform),
   ];
-  if (!/[$`\\]/.test(old)) bodies.push(`#!/bin/sh\nexec "${old}" "$@"\n`);
+  if (!/[$`\\"]/.test(old)) bodies.push(`#!/bin/sh\nexec "${old}" "$@"\n`);
   if (/^[A-Za-z0-9@%+=:,./_-]+$/.test(old)) bodies.push(`#!/bin/sh\nexec ${old} "$@"\n`);
   for (const body of bodies) {
     await fsp.writeFile(shim, body);
@@ -201,11 +201,11 @@ test("shim replacement accepts only owned templates and preserves foreign entrie
     "#!/bin/sh\necho other\n", Buffer.from([0x7f, 0xcf]),
     wrapper.shimContents(path.join(process.env.VERA_HOME, "bin-extra", "vera"), process.platform),
     wrapper.shimContents(old, "linux") + "echo extra\n",
-    ...["$OTHER", "`other`", "back\\slash"].map((name) => `#!/bin/sh\nexec "${path.join(process.env.VERA_HOME, "bin", name)}" "$@"\n`),
+    ...["$OTHER", "`other`", "back\\slash", 'quo"te'].map((name) => `#!/bin/sh\nexec "${path.join(process.env.VERA_HOME, "bin", name)}" "$@"\n`),
     wrapper.shimContents(path.join(process.env.VERA_HOME, "bin") + `${path.sep}..${path.sep}..${path.sep}other${path.sep}tool`, process.platform),
+    wrapper.shimContents(path.join(process.env.VERA_HOME, "bin", "other-tool"), process.platform),
+    wrapper.shimContents(path.join("relative", "bin", "2.0.0", "x", binaryName), process.platform),
   ];
-  process.env.VERA_HOME = path.relative(process.cwd(), process.env.VERA_HOME);
-  foreign.push(wrapper.shimContents(path.join(process.env.VERA_HOME, "bin", "old", binaryName), process.platform));
   const errors = [];
   const originalError = console.error;
   console.error = (line) => errors.push(line);
