@@ -524,6 +524,7 @@ mod tests {
                 ("VERA_RANKING_DEFINITION_BOOST", "0"),
                 ("VERA_MAX_OUTPUT_CHARS", "777"),
                 ("VERA_RERANK_TIMEOUT_SECS", "9"),
+                ("VERA_LOCAL", "1"),
             ] {
                 match value {
                     Some("valid") => {
@@ -561,6 +562,11 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&fs::read(config_path().unwrap()).unwrap()).unwrap();
         assert_eq!(raw["core_config"], serde_json::to_value(&expected).unwrap());
+        assert_eq!(raw["core_config"]["embedding"]["batch_size"], 128);
+        assert_eq!(
+            raw["core_config"]["embedding"]["max_concurrent_requests"],
+            8
+        );
 
         // A later explicit edit still saves the requested value, not the env.
         crate::commands::config::run(

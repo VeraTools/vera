@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::is_local_mode;
-
 /// Configuration for the embedding provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
@@ -59,10 +57,10 @@ pub struct EmbeddingConfig {
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
-        let is_local = is_local_mode();
+        // Local backends set their own batching in `adjust_for_backend`.
         Self {
-            batch_size: if is_local { 4 } else { 128 },
-            max_concurrent_requests: if is_local { 1 } else { 8 },
+            batch_size: 128,
+            max_concurrent_requests: 8,
             max_in_flight_inputs: default_max_in_flight_inputs(),
             timeout_secs: 120,
             max_retries: 3,
