@@ -849,7 +849,13 @@ async fn search_hybrid_inner(
         .ok()
         .map(|(_, embed_elapsed)| *embed_elapsed);
     charge_vector_span(&mut timings, vector_start.elapsed(), embed_elapsed);
-    let vector_results = vector_outcome.map(|(results, _)| results);
+    let vector_results = if vectors_missing {
+        Err(VectorSearchError::StorageError(anyhow::anyhow!(
+            "the vector database is missing or empty; re-index to restore vector search"
+        )))
+    } else {
+        vector_outcome.map(|(results, _)| results)
+    };
 
     // Await the BM25 result (should already be done or nearly done).
     let (bm25_results, bm25_elapsed) = bm25_handle.await.map_err(|e| {
@@ -859,12 +865,6 @@ async fn search_hybrid_inner(
 
     match (bm25_results, vector_results) {
         (Ok(bm25), Ok(vector)) => {
-            if vectors_missing {
-                let reason =
-                    "the vector database is missing or empty; re-index to restore vector search";
-                warn!("{reason}; using BM25-only search");
-                timings.semantic_fallback = Some(reason.to_string());
-            }
             debug!(
                 bm25_count = bm25.len(),
                 vector_count = vector.len(),
