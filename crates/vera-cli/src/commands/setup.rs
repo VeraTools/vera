@@ -407,6 +407,9 @@ fn configure_backend_with_api_setup(
                 if let Some(update) = update {
                     apply_reranker_protocol_update(&mut runtime, update);
                 }
+                // Reranking defaults off for local backends; a reranker named
+                // during API setup is the user's choice to use it.
+                runtime.retrieval.reranking_enabled = api_setup.reranker.is_some();
                 state::save_api_setup(&api_setup.embedding, api_setup.reranker.as_ref(), &runtime)?;
             }
         }
@@ -1266,6 +1269,7 @@ mod tests {
             );
             let reloaded = state::load_runtime_config().unwrap();
             assert_eq!(reloaded.retrieval.max_output_chars, 12345);
+            assert_eq!(reloaded.retrieval.reranking_enabled, has_reranker);
             assert_eq!(
                 reloaded.retrieval.reranker_protocol,
                 has_reranker.then_some(RerankerProtocol::Generic)

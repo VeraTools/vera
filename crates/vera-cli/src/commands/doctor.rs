@@ -173,6 +173,13 @@ pub fn run(json_output: bool, probe: bool) -> anyhow::Result<()> {
         }
     }
 
+    // API rerankers serve any embedding backend, so this check is not tied to one.
+    if let Ok(stored) = state::load_saved_config()
+        && let Some(check) = reranking_disabled_check(&stored)
+    {
+        checks.push(check);
+    }
+
     let cwd = std::env::current_dir()?;
     let index_dir = vera_core::indexing::index_dir(&cwd);
     checks.push(DoctorCheck {
@@ -371,6 +378,22 @@ fn saved_backend_check(config: &state::StoredConfig) -> DoctorCheck {
             },
         },
     }
+}
+
+/// Setup before v2.1.4 saved API rerankers without enabling reranking.
+fn reranking_disabled_check(stored: &state::StoredConfig) -> Option<DoctorCheck> {
+    let enabled = stored
+        .core_config
+        .clone()
+        .unwrap_or_default()
+        .with_env_overrides()
+        .retrieval
+        .reranking_enabled;
+    (stored.reranker_api.is_some() && !enabled).then(|| DoctorCheck {
+        name: "reranking-enabled",
+        status: CheckStatus::Warn,
+        detail: "a reranker endpoint is saved but reranking is disabled; enable it with `vera config set retrieval.reranking_enabled true`".to_string(),
+    })
 }
 
 fn reranker_protocol_checks(stored: &state::StoredConfig) -> Vec<DoctorCheck> {
@@ -814,6 +837,19 @@ fn one_line_error(err: &anyhow::Error) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn a_saved_reranker_with_reranking_off_warns_without_failing() {
+        let mut stored = state::StoredConfig::default();
+        assert!(reranking_disabled_check(&stored).is_none());
+        stored.reranker_api = Some(state::ApiEndpointConfig::default());
+        let check = reranking_disabled_check(&stored).expect("warning");
+        assert!(matches!(check.status, CheckStatus::Warn));
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.reranking_enabled = true;
+        stored.core_config = Some(runtime);
+        assert!(reranking_disabled_check(&stored).is_none());
+    }
 
     fn check(name: &'static str, status: CheckStatus) -> DoctorCheck {
         DoctorCheck {
