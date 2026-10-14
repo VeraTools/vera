@@ -1187,6 +1187,18 @@ impl MetadataStore {
         collect_rows(rows)
     }
 
+    /// Every chunk id with the file it belongs to.
+    pub fn chunk_ids_with_files(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, file_path FROM chunks")
+            .context("failed to prepare chunk id query")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .context("failed to query chunk ids")?;
+        collect_rows(rows)
+    }
+
     /// Count distinct files in the index.
     pub fn file_count(&self) -> Result<u64> {
         let count: i64 = self

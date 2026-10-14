@@ -851,7 +851,7 @@ async fn search_hybrid_inner(
     charge_vector_span(&mut timings, vector_start.elapsed(), embed_elapsed);
     let vector_results = if vectors_missing {
         Err(VectorSearchError::StorageError(anyhow::anyhow!(
-            "the vector database is missing or empty; re-index to restore vector search"
+            "the vector database is missing or empty; run `vera update` to restore vector search"
         )))
     } else {
         vector_outcome.map(|(results, _)| results)

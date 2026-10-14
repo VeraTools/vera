@@ -469,6 +469,14 @@ where
         .map(|file| file.relative_path.as_str())
         .collect();
 
+    let vectorless_files = files_missing_vectors(&metadata_store, &idx_dir.join("vectors.db"))?;
+    if !vectorless_files.is_empty() {
+        warn!(
+            files = vectorless_files.len(),
+            "indexed files have no stored vectors; re-embedding them"
+        );
+    }
+
     // Classify files.
     let mut modified = Vec::new();
     let mut added = Vec::new();
@@ -494,7 +502,9 @@ where
         if stored_files.contains(rel_path.as_str()) {
             // File exists in index.
             match stored_hash {
-                Some(ref old_hash) if *old_hash == hash => {
+                Some(ref old_hash)
+                    if *old_hash == hash && !vectorless_files.contains(rel_path.as_str()) =>
+                {
                     unchanged += 1;
                 }
                 _ => {
@@ -888,8 +898,28 @@ where
     Ok(summary)
 }
 
-/// Remove parse-phase rows (references, type relations) for a file.
-/// Modified files re-insert these during parsing, so stale rows go first.
+/// Files with a chunk that has no stored vector, as left by a deleted or
+/// emptied vector database. Indexing stores a vector for every chunk, so the
+/// id lists are only compared when the vector count falls short.
+fn files_missing_vectors(
+    metadata_store: &MetadataStore,
+    vector_path: &Path,
+) -> Result<HashSet<String>> {
+    let chunk_count = metadata_store
+        .chunk_count()
+        .context("failed to count chunks")?;
+    if VectorStore::stored_chunk_count(vector_path)? >= chunk_count {
+        return Ok(HashSet::new());
+    }
+    let vector_ids = VectorStore::stored_chunk_ids(vector_path)?;
+    Ok(metadata_store
+        .chunk_ids_with_files()?
+        .into_iter()
+        .filter(|(id, _)| !vector_ids.contains(id))
+        .map(|(_, file)| file)
+        .collect())
+}
+
 fn chunk_file_for_update(
     src: &str,
     rel_path: &str,
@@ -954,6 +984,8 @@ fn chunk_file_for_update(
     }
 }
 
+/// Remove parse-phase rows (references, type relations) for a file.
+/// Modified files re-insert these during parsing, so stale rows go first.
 fn remove_file_parse_data(metadata_store: &MetadataStore, file_path: &str) -> Result<()> {
     metadata_store
         .delete_references_by_file(file_path)
@@ -1348,6 +1380,56 @@ mod regression_tests {
             .await
             .unwrap();
         assert_eq!(summary.files_modified, 1);
+    }
+
+    #[tokio::test]
+    async fn update_restores_lost_vectors_for_unchanged_files() {
+        use crate::storage::vector::VectorStore;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let provider = MockProvider::new(8);
+        let config = VeraConfig::default();
+        index_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        let idx = index_dir(&dir.path().canonicalize().unwrap());
+        let vector_path = idx.join("vectors.db");
+        let chunk_count = MetadataStore::open(&idx.join("metadata.db"))
+            .unwrap()
+            .chunk_count()
+            .unwrap();
+
+        // Losing one file's vectors re-embeds only that file.
+        VectorStore::open(&vector_path, 8)
+            .unwrap()
+            .delete_by_file_prefix("a.rs:")
+            .unwrap();
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (1, 1));
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count
+        );
+
+        // A deleted vector database is rebuilt for every file.
+        std::fs::remove_file(&vector_path).unwrap();
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (2, 0));
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count
+        );
+
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (0, 2));
     }
 
     #[tokio::test]

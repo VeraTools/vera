@@ -6,7 +6,7 @@
 //! the SQLite KNN path for comparison or rollback.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
-use rusqlite::{Connection, OptionalExtension, ffi::sqlite3_auto_extension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, ffi::sqlite3_auto_extension, params};
 use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
 use sqlite_vec::sqlite3_vec_init;
@@ -668,6 +668,31 @@ fn expected_flat_bytes(dim: usize, max_rowid: i64) -> Result<u64> {
         .context("flat vector storage size overflow")
 }
 
+/// Read the chunk id map without opening the store, so a missing database is
+/// not created and the flat sidecar is not loaded. A missing database or table
+/// holds no ids.
+fn read_stored_chunk_map<T: Default>(
+    db_path: &Path,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> Result<T> {
+    if !db_path.exists() {
+        return Ok(T::default());
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open vector db: {}", db_path.display()))?;
+    let has_map: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunk_id_map')",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to inspect vector db schema")?;
+    if !has_map {
+        return Ok(T::default());
+    }
+    read(&conn).context("failed to read stored vector ids")
+}
+
 fn load_or_rebuild_disk_snapshot(
     conn: &Connection,
     dim: usize,
@@ -1121,6 +1146,25 @@ impl VectorStore {
         let sidecar_dir = db_path.parent().filter(|path| !path.as_os_str().is_empty());
         let sidecar_dir = sidecar_dir.unwrap_or_else(|| Path::new("."));
         Self::from_connection(conn, dim, scan_mode, Some(sidecar_dir))
+    }
+
+    /// Number of chunk ids stored in the vector database at `db_path`.
+    pub fn stored_chunk_count(db_path: &Path) -> Result<u64> {
+        read_stored_chunk_map(db_path, |conn| {
+            conn.query_row("SELECT COUNT(*) FROM chunk_id_map", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as u64)
+        })
+    }
+
+    /// Chunk ids stored in the vector database at `db_path`.
+    pub fn stored_chunk_ids(db_path: &Path) -> Result<HashSet<String>> {
+        read_stored_chunk_map(db_path, |conn| {
+            conn.prepare("SELECT chunk_id FROM chunk_id_map")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
     }
 
     /// Create an in-memory vector store (useful for testing).
