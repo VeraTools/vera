@@ -16,7 +16,7 @@ MCP is the optional integration path: most agents work best with the Vera CLI an
 
 `search_code`, `structural_search`, and `find_references` auto-index and start a file watcher on first use when the project has no index. Search, references, and overview also accept changed-file git scopes.
 
-Search results can carry a second text block of warnings: the index may be stale, semantic search was unavailable so the results are keyword-only (BM25), or the reranker failed so the results are not reranked. Each warning names its cause. See [Troubleshooting](troubleshooting.md#keyword-only-results).
+Search results can carry a second text block of warnings: the index may be stale, semantic search was unavailable so a query's results are keyword-only (BM25), or the reranker failed so a query's results are not reranked. Each warning names its cause. See [Troubleshooting](troubleshooting.md#keyword-only-results).
 
 ## Client setup
 

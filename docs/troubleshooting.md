@@ -130,7 +130,7 @@ A `vera update` was interrupted while writing. Search and `vera stats` refuse th
 
 ## Keyword-only results
 
-A warning ending in `using BM25-only search` or `falling back to BM25-only results` on stderr, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run and the results come from keyword matching alone. The text gives the cause:
+A warning ending in `using BM25-only search` or `falling back to BM25-only results` on stderr, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run for that query and its results come from keyword matching alone. The text gives the cause:
 
 - The embedding endpoint failed, for example an expired key or a provider outage. See [API errors](#api-errors).
 - The index was built with a different embedding model or document prefix than the active configuration, or with more dimensions than the active model produces. Re-index with `vera index .`.

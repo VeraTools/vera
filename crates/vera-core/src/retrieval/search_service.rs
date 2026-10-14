@@ -28,7 +28,7 @@ use crate::types::{SearchFilters, SearchResult};
 pub struct SearchTimings {
     pub rerank_outcome: RerankOutcome,
     /// Why semantic search was skipped or failed, leaving BM25-only results.
-    /// `None` when vector search ran or BM25-only search was requested.
+    /// `None` when vector search succeeded or BM25-only search was requested.
     pub semantic_fallback: Option<String>,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
