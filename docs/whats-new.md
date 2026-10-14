@@ -2,6 +2,10 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
+## v2.1.3
+
+- `vera update` restores lost vectors. Files whose chunks have no stored vector (for example, after `.vera/vectors.db` was deleted) are re-embedded instead of being reported as up to date, and the search warning now points to `vera update .`.
+
 ## v2.1.2
 
 - Search warns when the index has chunks but no stored vectors (for example, a deleted `.vera/vectors.db`). It used to return keyword-only results silently, on the CLI and in MCP.

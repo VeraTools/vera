@@ -469,6 +469,9 @@ where
         .map(|file| file.relative_path.as_str())
         .collect();
 
+    let vectorless_files =
+        repair_vector_coverage(&metadata_store, &idx_dir.join("vectors.db"), stored_dim)?;
+
     // Classify files.
     let mut modified = Vec::new();
     let mut added = Vec::new();
@@ -494,7 +497,9 @@ where
         if stored_files.contains(rel_path.as_str()) {
             // File exists in index.
             match stored_hash {
-                Some(ref old_hash) if *old_hash == hash => {
+                Some(ref old_hash)
+                    if *old_hash == hash && !vectorless_files.contains(rel_path.as_str()) =>
+                {
                     unchanged += 1;
                 }
                 _ => {
@@ -888,8 +893,56 @@ where
     Ok(summary)
 }
 
-/// Remove parse-phase rows (references, type relations) for a file.
-/// Modified files re-insert these during parsing, so stale rows go first.
+/// Files with a chunk that has no stored vector, as left by a deleted or
+/// damaged vector database; update re-embeds them. Vectors whose chunk is gone
+/// are deleted. Indexing stores exactly one vector per chunk, so the id lists
+/// are only compared when the counts differ.
+fn repair_vector_coverage(
+    metadata_store: &MetadataStore,
+    vector_path: &Path,
+    stored_dim: usize,
+) -> Result<HashSet<String>> {
+    let chunk_count = metadata_store
+        .chunk_count()
+        .context("failed to count chunks")?;
+    if VectorStore::stored_chunk_count(vector_path)? == chunk_count {
+        return Ok(HashSet::new());
+    }
+    let mut vector_rowids = HashMap::new();
+    let mut orphan_rowids = Vec::new();
+    for (rowid, id) in VectorStore::stored_vectors(vector_path)? {
+        match id {
+            Some(id) => {
+                vector_rowids.insert(id, rowid);
+            }
+            None => orphan_rowids.push(rowid),
+        }
+    }
+    let mut vectorless_files = HashSet::new();
+    for (id, file) in metadata_store.chunk_ids_with_files()? {
+        if vector_rowids.remove(&id).is_none() {
+            vectorless_files.insert(file);
+        }
+    }
+    orphan_rowids.extend(vector_rowids.into_values());
+    if !orphan_rowids.is_empty() {
+        warn!(
+            vectors = orphan_rowids.len(),
+            "deleting vectors whose chunk is no longer indexed"
+        );
+        VectorStore::open(vector_path, stored_dim)
+            .and_then(|store| store.delete_rowids(&orphan_rowids))
+            .context("failed to delete orphaned vectors")?;
+    }
+    if !vectorless_files.is_empty() {
+        warn!(
+            files = vectorless_files.len(),
+            "indexed files have no stored vectors; re-embedding them"
+        );
+    }
+    Ok(vectorless_files)
+}
+
 fn chunk_file_for_update(
     src: &str,
     rel_path: &str,
@@ -954,6 +1007,8 @@ fn chunk_file_for_update(
     }
 }
 
+/// Remove parse-phase rows (references, type relations) for a file.
+/// Modified files re-insert these during parsing, so stale rows go first.
 fn remove_file_parse_data(metadata_store: &MetadataStore, file_path: &str) -> Result<()> {
     metadata_store
         .delete_references_by_file(file_path)
@@ -1348,6 +1403,95 @@ mod regression_tests {
             .await
             .unwrap();
         assert_eq!(summary.files_modified, 1);
+    }
+
+    #[tokio::test]
+    async fn update_restores_lost_vectors_for_unchanged_files() {
+        use crate::storage::vector::VectorStore;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let provider = MockProvider::new(8);
+        let config = VeraConfig::default();
+        index_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        let idx = index_dir(&dir.path().canonicalize().unwrap());
+        let vector_path = idx.join("vectors.db");
+        let chunk_count = MetadataStore::open(&idx.join("metadata.db"))
+            .unwrap()
+            .chunk_count()
+            .unwrap();
+
+        // Losing one file's vectors re-embeds only that file.
+        VectorStore::open(&vector_path, 8)
+            .unwrap()
+            .delete_by_file_prefix("a.rs:")
+            .unwrap();
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (1, 1));
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count
+        );
+
+        // A deleted vector database is rebuilt for every file.
+        std::fs::remove_file(&vector_path).unwrap();
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (2, 0));
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count
+        );
+
+        let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!((summary.files_modified, summary.files_unchanged), (0, 2));
+
+        // Vectors without a chunk, mapped or not, are deleted and the
+        // indexed chunks keep theirs.
+        let store = VectorStore::open(&vector_path, 8).unwrap();
+        store.insert("gone.rs:1:1", &[0.5; 8]).unwrap();
+        rusqlite::Connection::open(&vector_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO vec_chunks (rowid, embedding) VALUES (9999, ?1)",
+                [vec![0u8; 8 * 4]],
+            )
+            .unwrap();
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count + 2
+        );
+        update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        let mut stored: Vec<_> = VectorStore::stored_vectors(&vector_path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, id)| id.unwrap())
+            .collect();
+        let mut indexed: Vec<_> = MetadataStore::open(&idx.join("metadata.db"))
+            .unwrap()
+            .chunk_ids_with_files()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        stored.sort();
+        indexed.sort();
+        assert_eq!(stored, indexed);
+        let hits = VectorStore::open(&vector_path, 8)
+            .unwrap()
+            .search(&[0.5; 8], 10)
+            .unwrap();
+        assert_eq!(hits.len() as u64, chunk_count);
     }
 
     #[tokio::test]
