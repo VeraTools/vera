@@ -434,6 +434,8 @@ fn compute_bm25_candidates(query: &str, limit: usize) -> usize {
 #[derive(Debug, Default)]
 pub struct HybridTimings {
     pub rerank_outcome: super::RerankOutcome,
+    /// Why vector search failed, leaving BM25-only results.
+    pub semantic_fallback: Option<String>,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -856,6 +858,7 @@ async fn search_hybrid_inner(
                 error = %vec_err,
                 "vector search failed, falling back to BM25-only results"
             );
+            timings.semantic_fallback = Some(format!("vector search failed: {vec_err:#}"));
             let mut results = bm25;
             results.truncate(limit);
             Ok((results, timings))

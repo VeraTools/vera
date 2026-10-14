@@ -2,6 +2,11 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
+## v2.1.1
+
+- MCP search results say when they are degraded: keyword-only because semantic search failed or was skipped (for example, an expired embedding key) or unreranked because the reranker failed. The CLI already printed these on stderr; MCP agents saw nothing.
+- `retrieval.rrf_k` now applies to ordinary search. It used to affect only multi-query merging. The default (60) is unchanged; an invalid saved value falls back to it.
+
 ## v2.1.0
 
 - `vera uninstall` removes the PATH shim the npm and pip installers write again. Since v2.0.0 it left that shim behind and reported a partial uninstall.

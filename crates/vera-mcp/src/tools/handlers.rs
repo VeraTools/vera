@@ -75,7 +75,51 @@ fn compact_results_json(
 /// The notice rides in its own content block, so it stays outside
 /// `MCP_OUTPUT_BUDGET` and cannot silently evict results.
 fn results_with_staleness(cwd: &std::path::Path, json: String) -> ToolCallResult {
-    ToolCallResult::success_with_notice(json, crate::staleness::notice_for_repo(cwd))
+    results_with_notices(cwd, json, Vec::new())
+}
+
+/// Like [`results_with_staleness`], with `notices` ahead of any stale-index
+/// notice in the same block.
+fn results_with_notices(
+    cwd: &std::path::Path,
+    json: String,
+    mut notices: Vec<String>,
+) -> ToolCallResult {
+    notices.extend(crate::staleness::notice_for_repo(cwd));
+    ToolCallResult::success_with_notice(json, (!notices.is_empty()).then(|| notices.join("\n")))
+}
+
+/// Notices for results from a degraded pipeline. The CLI reports these on
+/// stderr, which an MCP agent never sees, so without them it cannot tell
+/// keyword-only or unreranked results from a full hybrid search. Merged
+/// multi-query timings keep the first fallback, which may cover only one query.
+fn degraded_search_notices(
+    timings: &vera_core::retrieval::search_service::SearchTimings,
+    multi_query: bool,
+) -> Vec<String> {
+    let (keyword_only, unreranked) = if multi_query {
+        (
+            "At least one query ran keyword-only (BM25)",
+            "At least one query was not reranked",
+        )
+    } else {
+        (
+            "These results are keyword-only (BM25)",
+            "These results are not reranked",
+        )
+    };
+    let mut notices = Vec::new();
+    if let Some(reason) = &timings.semantic_fallback {
+        notices.push(format!(
+            "warning: semantic search unavailable ({reason}). {keyword_only}, so prefer exact identifiers in queries."
+        ));
+    }
+    if let vera_core::retrieval::RerankOutcome::Fallback(reason) = &timings.rerank_outcome {
+        notices.push(format!(
+            "warning: reranker unavailable ({reason}). {unreranked}."
+        ));
+    }
+    notices
 }
 
 /// Dispatch a tool call to the appropriate handler.
@@ -299,6 +343,7 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
 
     let mut result_sets: Vec<Vec<vera_core::types::SearchResult>> =
         Vec::with_capacity(queries.len());
+    let mut timings = vera_core::retrieval::search_service::SearchTimings::default();
     for query in &queries {
         // Pass the raw query plus the optional intent. Core applies the intent
         // only to the semantic (embedding/rerank) side; BM25 gets the raw query
@@ -311,7 +356,10 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
             &filters,
             per_query_limit,
         )) {
-            Ok((results, _timings)) => result_sets.push(results),
+            Ok((results, query_timings)) => {
+                timings.merge(&query_timings);
+                result_sets.push(results);
+            }
             Err(e) => return ToolCallResult::error(format!("Search failed: {e}")),
         }
     }
@@ -338,7 +386,11 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
         .unwrap_or(false);
 
     match compact_results_json(&all_results, MCP_OUTPUT_BUDGET, signatures_only) {
-        Ok(json) => results_with_staleness(&cwd, json),
+        Ok(json) => results_with_notices(
+            &cwd,
+            json,
+            degraded_search_notices(&timings, queries.len() > 1),
+        ),
         Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
     }
 }
@@ -681,6 +733,56 @@ mod tests {
 
         assert_eq!(result.content.len(), 1);
         assert_eq!(result.content[0].text, results);
+    }
+
+    #[test]
+    fn degraded_search_notices_precede_the_stale_index_notice() {
+        let dir = repo_indexed_as("pub fn current() {}\n", "pub fn previous() {}\n");
+        let timings = vera_core::retrieval::search_service::SearchTimings {
+            semantic_fallback: Some("vector search failed: 401".to_string()),
+            rerank_outcome: vera_core::retrieval::RerankOutcome::Fallback("timeout".to_string()),
+            ..Default::default()
+        };
+
+        let result = results_with_notices(
+            dir.path(),
+            "[]".to_string(),
+            degraded_search_notices(&timings, false),
+        );
+
+        assert_eq!(result.content.len(), 2);
+        let lines: Vec<&str> = result.content[1].text.lines().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].starts_with("warning: semantic search unavailable (vector search failed: 401). These results are keyword-only (BM25)"));
+        assert_eq!(
+            lines[1],
+            "warning: reranker unavailable (timeout). These results are not reranked."
+        );
+        assert!(lines[2].starts_with("warning: index may be stale"));
+    }
+
+    #[test]
+    fn full_hybrid_search_adds_no_notice() {
+        let timings = vera_core::retrieval::search_service::SearchTimings {
+            rerank_outcome: vera_core::retrieval::RerankOutcome::Reranked,
+            ..Default::default()
+        };
+        assert!(degraded_search_notices(&timings, false).is_empty());
+    }
+
+    #[test]
+    fn multi_query_notice_does_not_claim_every_result_degraded() {
+        let timings = vera_core::retrieval::search_service::SearchTimings {
+            semantic_fallback: Some("vector search failed: 429".to_string()),
+            ..Default::default()
+        };
+        let notices = degraded_search_notices(&timings, true);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("At least one query ran keyword-only (BM25)"),
+            "{}",
+            notices[0]
+        );
     }
 
     #[test]

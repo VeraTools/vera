@@ -27,6 +27,9 @@ use crate::types::{SearchFilters, SearchResult};
 #[derive(Debug, Default)]
 pub struct SearchTimings {
     pub rerank_outcome: RerankOutcome,
+    /// Why semantic search was skipped or failed, leaving BM25-only results.
+    /// `None` when vector search succeeded or BM25-only search was requested.
+    pub semantic_fallback: Option<String>,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -40,6 +43,10 @@ impl SearchTimings {
     /// Aggregate per-search stages, leaving the request's total to its caller.
     pub fn merge(&mut self, incoming: &Self) {
         self.rerank_outcome.merge(&incoming.rerank_outcome);
+        if self.semantic_fallback.is_none() {
+            self.semantic_fallback
+                .clone_from(&incoming.semantic_fallback);
+        }
         for (target, delta) in [
             (&mut self.embedding, incoming.embedding),
             (&mut self.bm25, incoming.bm25),
@@ -59,6 +66,7 @@ impl From<crate::retrieval::hybrid::HybridTimings> for SearchTimings {
     fn from(t: crate::retrieval::hybrid::HybridTimings) -> Self {
         SearchTimings {
             rerank_outcome: t.rerank_outcome,
+            semantic_fallback: t.semantic_fallback,
             embedding: t.embedding,
             bm25: t.bm25,
             vector: t.vector,
@@ -292,15 +300,13 @@ impl SearchContext {
         let has_intent = matches!(vector_query, std::borrow::Cow::Owned(_));
         let fetch_limit = compute_fetch_limit_with_config(query, filters, result_limit, config);
         let stores = self.search_stores(index_dir)?;
-
-        let Some(provider) = self.provider.as_ref() else {
-            if let Some(error) = self.provider_error.as_deref() {
-                warn!(
-                    "embedding provider unavailable ({}), using BM25-only search",
-                    error
-                );
+        // `fallback` says why semantic search was skipped, or is `None` when
+        // BM25-only search was requested.
+        let bm25_only = |fallback: Option<String>| -> Result<(Vec<SearchResult>, SearchTimings)> {
+            if let Some(reason) = &fallback {
+                warn!("{reason}; using BM25-only search");
             }
-            return run_bm25_only(
+            let (results, mut timings) = run_bm25_only(
                 query,
                 filters,
                 fetch_limit,
@@ -308,6 +314,16 @@ impl SearchContext {
                 total_start,
                 &stores,
                 config,
+            )?;
+            timings.semantic_fallback = fallback;
+            Ok((results, timings))
+        };
+
+        let Some(provider) = self.provider.as_ref() else {
+            return bm25_only(
+                self.provider_error
+                    .as_ref()
+                    .map(|error| format!("embedding provider unavailable: {error}")),
             );
         };
 
@@ -320,19 +336,7 @@ impl SearchContext {
         let index_meta = match stores.cached_index_meta() {
             Ok(meta) => Some(meta),
             Err(err) => {
-                warn!(
-                    "failed to read index meta ({}), using BM25-only search",
-                    err
-                );
-                return run_bm25_only(
-                    query,
-                    filters,
-                    fetch_limit,
-                    result_limit,
-                    total_start,
-                    &stores,
-                    config,
-                );
+                return bm25_only(Some(format!("failed to read index metadata: {err}")));
             }
         };
         if let Some((Some(s_model), Some(s_dim), s_prefix)) = index_meta {
@@ -343,57 +347,27 @@ impl SearchContext {
                     &config.embedding.model_aliases,
                 )
             {
-                warn!(
-                    "Index model '{}' does not match active model '{}'; using BM25-only search",
-                    s_model, model_name
-                );
-                return run_bm25_only(
-                    query,
-                    filters,
-                    fetch_limit,
-                    result_limit,
-                    total_start,
-                    &stores,
-                    config,
-                );
+                return bm25_only(Some(format!(
+                    "index was built with model '{s_model}' but the active model is '{model_name}'; re-index to restore vector search"
+                )));
             }
             // A changed document prefix means the stored vectors live in a
             // different vector space. Indexes written before this guard have
             // no stored prefix, and their documents were never prefixed.
             let active_prefix = provider.document_prefix_identity();
             if s_prefix.as_deref().unwrap_or("") != active_prefix {
-                warn!(
-                    "Index document prefix '{}' does not match active prefix '{}'; using BM25-only search (re-index to restore vector search)",
-                    s_prefix.as_deref().unwrap_or(""),
-                    active_prefix
-                );
-                return run_bm25_only(
-                    query,
-                    filters,
-                    fetch_limit,
-                    result_limit,
-                    total_start,
-                    &stores,
-                    config,
-                );
+                return bm25_only(Some(format!(
+                    "index document prefix '{}' does not match the active prefix '{active_prefix}'; re-index to restore vector search",
+                    s_prefix.as_deref().unwrap_or("")
+                )));
             }
             if let Ok(dim) = s_dim.parse::<usize>() {
                 if let Some(provider_dim) = provider.expected_dim()
                     && provider_dim < dim
                 {
-                    warn!(
-                        "Index dimension {} exceeds provider dimension {}; using BM25-only search",
-                        dim, provider_dim
-                    );
-                    return run_bm25_only(
-                        query,
-                        filters,
-                        fetch_limit,
-                        result_limit,
-                        total_start,
-                        &stores,
-                        config,
-                    );
+                    return bm25_only(Some(format!(
+                        "index dimension {dim} exceeds the provider dimension {provider_dim}; re-index to restore vector search"
+                    )));
                 }
                 stored_dim = dim;
             }
@@ -948,6 +922,10 @@ mod tests {
         assert_eq!(results[0].file_path, "src/auth.rs");
         assert!(timings.bm25.is_some());
         assert!(timings.vector.is_none());
+        let reason = timings
+            .semantic_fallback
+            .expect("fallback must be reported");
+        assert!(reason.contains("'indexed-model'"), "{reason}");
     }
 
     #[test]
@@ -1018,6 +996,10 @@ mod tests {
         assert_eq!(results[0].file_path, "src/auth.rs");
         assert!(timings.bm25.is_some());
         assert!(timings.vector.is_none());
+        let reason = timings
+            .semantic_fallback
+            .expect("fallback must be reported");
+        assert!(reason.contains("'passage: '"), "{reason}");
     }
 
     #[test]
@@ -1092,6 +1074,8 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_path, "fastapi/dependencies/utils.py");
         assert!(timings.bm25.is_some());
+        // BM25-only by request is not a degraded search.
+        assert_eq!(timings.semantic_fallback, None);
         // The query above is one `reranking_wanted` accepts, so this pins the
         // invariant `bm25_only`'s placeholder backend rests on: `search` returns
         // on the BM25-only path before any reranker is resolved.

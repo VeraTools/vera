@@ -261,6 +261,7 @@ mod tests {
         let mut target = SearchTimings::default();
         let incoming = SearchTimings {
             rerank_outcome: super::super::RerankOutcome::Reranked,
+            semantic_fallback: Some("vector search failed".to_string()),
             embedding: Some(Duration::from_millis(10)),
             bm25: Some(Duration::from_millis(20)),
             vector: Some(Duration::from_millis(30)),
@@ -270,7 +271,12 @@ mod tests {
             total: None,
         };
         target.merge(&incoming);
+        target.merge(&SearchTimings::default());
         target.merge(&incoming);
+        assert_eq!(
+            target.semantic_fallback.as_deref(),
+            Some("vector search failed")
+        );
         assert_eq!(target.embedding, Some(Duration::from_millis(20)));
         assert_eq!(target.bm25, Some(Duration::from_millis(40)));
         assert_eq!(target.rerank_outcome, super::super::RerankOutcome::Reranked);
