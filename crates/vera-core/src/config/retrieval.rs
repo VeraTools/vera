@@ -41,6 +41,9 @@ impl fmt::Display for RerankerProtocol {
     }
 }
 
+/// Default RRF fusion constant.
+pub const DEFAULT_RRF_K: f64 = 60.0;
+
 /// Configuration for the retrieval pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalConfig {
@@ -245,7 +248,7 @@ impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
             default_limit: 5,
-            rrf_k: 60.0,
+            rrf_k: DEFAULT_RRF_K,
             rerank_candidates: 50,
             reranking_enabled: false,
             max_rerank_batch: default_max_rerank_batch(),

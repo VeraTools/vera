@@ -11,7 +11,7 @@ pub use embedding::{EmbeddingConfig, SAVED_CONFIG_FORMAT, model_names_match_with
 pub use hardware::{GpuInfo, detect_gpu_info};
 pub(crate) use indexing::DEFAULT_MAX_FILE_SIZE_BYTES;
 pub use indexing::IndexingConfig;
-pub use retrieval::{RerankerProtocol, RetrievalConfig};
+pub use retrieval::{DEFAULT_RRF_K, RerankerProtocol, RetrievalConfig};
 
 use serde::{Deserialize, Serialize};
 

@@ -1162,6 +1162,14 @@ pub fn fuse_rrf_multi_weighted(
     rrf_k: f64,
     limit: usize,
 ) -> Vec<SearchResult> {
+    // A hand-edited config can hold a k that `config set` rejects; k <= 0
+    // breaks the 1/(k + rank) ordering.
+    let rrf_k = if rrf_k.is_finite() && rrf_k > 0.0 {
+        rrf_k
+    } else {
+        warn!(rrf_k, "invalid retrieval.rrf_k, using the default");
+        crate::config::DEFAULT_RRF_K
+    };
     let mut fused: HashMap<String, (f64, SearchResult)> = HashMap::new();
 
     for (set_idx, result_set) in result_sets.iter().enumerate() {

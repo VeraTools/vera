@@ -211,6 +211,15 @@ fn rrf_k_parameter_affects_scores() {
 }
 
 #[test]
+fn invalid_rrf_k_falls_back_to_default() {
+    let bm25 = vec![make_result("a.rs", 1, 10, 5.0, None)];
+    let expected = fuse_rrf(&bm25, &[], 60.0, 10)[0].score;
+    for k in [-60.0, 0.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(fuse_rrf(&bm25, &[], k, 10)[0].score, expected, "k={k}");
+    }
+}
+
+#[test]
 fn rrf_with_known_inputs_produces_exact_scores() {
     // RRF with k=60:
     // Item A: BM25 rank 1, vector rank 3 → 1/61 + 1/63

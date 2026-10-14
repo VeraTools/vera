@@ -1,9 +1,9 @@
 //! Query-type classifier for adaptive retrieval parameters.
 //!
 //! Detects whether a search query is a natural language (NL) intent query
-//! or an identifier/symbol lookup. NL queries benefit from higher vector
-//! weight in RRF fusion (lower k), while identifier queries perform best
-//! with the standard BM25-heavy fusion.
+//! or an identifier/symbol lookup. NL queries use balanced fusion weights and
+//! a deeper vector candidate pool, while identifier queries weight BM25 more
+//! heavily.
 //!
 //! # Heuristics
 //!
