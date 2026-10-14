@@ -359,8 +359,11 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Trusted publishing: npm authenticates this workflow with an OIDC token.
+    permissions:
+      contents: read
+      id-token: write
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -376,13 +379,16 @@ jobs:
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org'
           scope: '@vera-ai'
+      # OIDC dist-tag changes need npm 11.21.0; Node 24.21.0 bundles 11.19.0.
+      - name: Install npm with trusted dist-tag support
+        run: npm install -g npm@11.21.0
       - name: Stamp and check npm package
         working-directory: packages/npm-cli
         run: |
           npm version "${RELEASE_TAG#v}" --no-git-tag-version
           npm pack --dry-run --ignore-scripts
       - name: Publish npm package
-        if: env.PUBLISH == 'true' && env.NODE_AUTH_TOKEN != ''
+        if: env.PUBLISH == 'true'
         working-directory: packages/npm-cli
         run: |
           VERSION="${RELEASE_TAG#v}"
@@ -404,9 +410,11 @@ jobs:
     needs: release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      TWINE_USERNAME: __token__
-      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+    # Trusted publishing: twine mints an upload token from this workflow's
+    # OIDC identity when no password is set.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -423,7 +431,7 @@ jobs:
           python -m build --no-isolation packages/python-cli
           python -m twine check packages/python-cli/dist/*
       - name: Publish Python package
-        if: env.PUBLISH == 'true' && env.TWINE_PASSWORD != ''
+        if: env.PUBLISH == 'true'
         run: python -m twine upload --non-interactive --skip-existing packages/python-cli/dist/*
 
   docker:
