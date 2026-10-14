@@ -443,6 +443,22 @@ pub struct HybridTimings {
     pub reranking: Option<Duration>,
 }
 
+/// Whether the index holds any chunk. A failed check counts as no chunks, so
+/// it never adds a degraded-search warning on its own.
+fn index_has_chunks(stores: Option<&SearchStores>, index_dir: &Path) -> bool {
+    let count = match stores {
+        Some(stores) => stores
+            .vector_metadata
+            .lock()
+            .ok()
+            .and_then(|metadata| metadata.chunk_count().ok()),
+        None => super::open_search_metadata(index_dir)
+            .ok()
+            .and_then(|metadata| metadata.chunk_count().ok()),
+    };
+    count.is_some_and(|count| count > 0)
+}
+
 /// Perform hybrid search combining BM25 and vector retrieval via RRF fusion.
 ///
 /// Runs BM25 and vector search concurrently, then merges the results using
@@ -633,16 +649,26 @@ async fn search_hybrid_inner(
     } else {
         None
     };
-    let (is_flat, index_count) = match (&vector_store_cached, &vector_store_direct) {
-        (Some(vs), _) => {
-            let guard = vs.lock().ok();
-            guard
-                .map(|g| (g.is_flat(), g.count().unwrap_or(0) as usize))
-                .unwrap_or((true, usize::MAX))
-        }
-        (None, Some(vs)) => (vs.is_flat(), vs.count().unwrap_or(0) as usize),
-        _ => (true, usize::MAX),
+    // `None` when no store could be read: the search runs unclamped and
+    // reports the store error itself. A failed count clamps to zero.
+    let (is_flat, vector_count) = match (&vector_store_cached, &vector_store_direct) {
+        (Some(vs), _) => vs
+            .lock()
+            .ok()
+            .map(|g| (g.is_flat(), Some(g.count())))
+            .unwrap_or((true, None)),
+        (None, Some(vs)) => (vs.is_flat(), Some(vs.count())),
+        _ => (true, None),
     };
+    let index_count = match &vector_count {
+        Some(Ok(count)) => *count as usize,
+        Some(Err(_)) => 0,
+        None => usize::MAX,
+    };
+    // Indexing stores a vector for every chunk, so chunks over an empty vector
+    // store mean the vector database was lost or emptied.
+    let vectors_missing =
+        matches!(vector_count, Some(Ok(0))) && index_has_chunks(stores.as_deref(), index_dir);
 
     // Filter-during-scan fast path (default ON since PR #268, overridable via config+env).
     // When eligible, this builds (or reuses) the per-store EligibilityMap,
@@ -833,9 +859,7 @@ async fn search_hybrid_inner(
 
     match (bm25_results, vector_results) {
         (Ok(bm25), Ok(vector)) => {
-            // Indexing stores a vector for every chunk, so BM25 hits over an
-            // empty vector store mean the vector database was lost or emptied.
-            if index_count == 0 && !bm25.is_empty() {
+            if vectors_missing {
                 let reason =
                     "the vector database is missing or empty; re-index to restore vector search";
                 warn!("{reason}; using BM25-only search");
