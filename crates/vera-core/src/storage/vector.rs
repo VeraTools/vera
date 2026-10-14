@@ -6,7 +6,7 @@
 //! the SQLite KNN path for comparison or rollback.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -668,6 +668,24 @@ fn expected_flat_bytes(dim: usize, max_rowid: i64) -> Result<u64> {
         .context("flat vector storage size overflow")
 }
 
+fn delete_rows(tx: &rusqlite::Transaction<'_>, rowids: &[i64]) -> Result<()> {
+    let mut delete_vector = tx
+        .prepare_cached("DELETE FROM vec_chunks WHERE rowid = ?1")
+        .context("failed to prepare vector delete")?;
+    let mut delete_mapping = tx
+        .prepare_cached("DELETE FROM chunk_id_map WHERE rowid = ?1")
+        .context("failed to prepare chunk id delete")?;
+    for rowid in rowids {
+        delete_vector
+            .execute(params![rowid])
+            .context("failed to delete vector")?;
+        delete_mapping
+            .execute(params![rowid])
+            .context("failed to delete chunk id mapping")?;
+    }
+    Ok(())
+}
+
 /// Read the vector tables without opening the store, so a missing database is
 /// not created and the flat sidecar is not loaded. A missing database or table
 /// holds no vectors.
@@ -1159,15 +1177,35 @@ impl VectorStore {
         })
     }
 
-    /// Ids of the chunks that have a stored vector in the database at `db_path`.
-    pub fn stored_chunk_ids(db_path: &Path) -> Result<HashSet<String>> {
+    /// Every stored vector's rowid with its chunk id, or `None` for a vector
+    /// row that lost its id mapping.
+    pub fn stored_vectors(db_path: &Path) -> Result<Vec<(i64, Option<String>)>> {
         read_stored_chunk_map(db_path, |conn| {
             conn.prepare(
-                "SELECT chunk_id FROM chunk_id_map WHERE rowid IN (SELECT rowid FROM vec_chunks)",
+                "SELECT v.rowid, m.chunk_id FROM vec_chunks v
+                 LEFT JOIN chunk_id_map m ON m.rowid = v.rowid",
             )?
-            .query_map([], |row| row.get(0))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect()
         })
+    }
+
+    /// Delete vectors and their id mappings by rowid in one transaction.
+    pub fn delete_rowids(&self, rowids: &[i64]) -> Result<()> {
+        self.refresh_flat()?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin vector delete transaction")?;
+        delete_rows(&tx, rowids)?;
+        let generation = bump_generation(&tx)?;
+        // The flat sidecar spans rowids up to the id map's sequence; a vector
+        // row above it was never mirrored there.
+        let max_rowid = current_max_rowid(&tx)?;
+        tx.commit().context("failed to commit vector delete")?;
+        let mirrored: Vec<i64> = rowids.iter().copied().filter(|&r| r <= max_rowid).collect();
+        self.update_flat(&[], &mirrored, generation)
     }
 
     /// Create an in-memory vector store (useful for testing).
@@ -1730,22 +1768,7 @@ impl VectorStore {
             return Ok(count);
         }
 
-        {
-            let mut delete_vector = tx
-                .prepare_cached("DELETE FROM vec_chunks WHERE rowid = ?1")
-                .context("failed to prepare vector delete")?;
-            let mut delete_mapping = tx
-                .prepare_cached("DELETE FROM chunk_id_map WHERE rowid = ?1")
-                .context("failed to prepare chunk id delete")?;
-            for rowid in &rows {
-                delete_vector
-                    .execute(params![rowid])
-                    .context("failed to delete vector by prefix")?;
-                delete_mapping
-                    .execute(params![rowid])
-                    .context("failed to delete chunk id by prefix")?;
-            }
-        }
+        delete_rows(&tx, &rows)?;
         let generation = bump_generation(&tx)?;
         tx.commit().context("failed to commit prefix delete")?;
         self.update_flat(&[], &rows, generation)?;

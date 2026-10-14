@@ -908,23 +908,31 @@ fn repair_vector_coverage(
     if VectorStore::stored_chunk_count(vector_path)? == chunk_count {
         return Ok(HashSet::new());
     }
-    let mut orphan_ids = VectorStore::stored_chunk_ids(vector_path)?;
+    let mut vector_rowids = HashMap::new();
+    let mut orphan_rowids = Vec::new();
+    for (rowid, id) in VectorStore::stored_vectors(vector_path)? {
+        match id {
+            Some(id) => {
+                vector_rowids.insert(id, rowid);
+            }
+            None => orphan_rowids.push(rowid),
+        }
+    }
     let mut vectorless_files = HashSet::new();
     for (id, file) in metadata_store.chunk_ids_with_files()? {
-        if !orphan_ids.remove(&id) {
+        if vector_rowids.remove(&id).is_none() {
             vectorless_files.insert(file);
         }
     }
-    if !orphan_ids.is_empty() {
+    orphan_rowids.extend(vector_rowids.into_values());
+    if !orphan_rowids.is_empty() {
         warn!(
-            vectors = orphan_ids.len(),
+            vectors = orphan_rowids.len(),
             "deleting vectors whose chunk is no longer indexed"
         );
-        let vector_store = VectorStore::open(vector_path, stored_dim)
-            .context("failed to open vector store for repair")?;
-        for id in &orphan_ids {
-            vector_store.delete(id)?;
-        }
+        VectorStore::open(vector_path, stored_dim)
+            .and_then(|store| store.delete_rowids(&orphan_rowids))
+            .context("failed to delete orphaned vectors")?;
     }
     if !vectorless_files.is_empty() {
         warn!(
@@ -1446,16 +1454,44 @@ mod regression_tests {
             .unwrap();
         assert_eq!((summary.files_modified, summary.files_unchanged), (0, 2));
 
-        // A vector without a chunk is deleted, so the counts agree again.
+        // Vectors without a chunk, mapped or not, are deleted and the
+        // indexed chunks keep theirs.
         let store = VectorStore::open(&vector_path, 8).unwrap();
         store.insert("gone.rs:1:1", &[0.5; 8]).unwrap();
-        update_repository(dir.path(), &provider, &config, "mock-model")
-            .await
+        rusqlite::Connection::open(&vector_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO vec_chunks (rowid, embedding) VALUES (9999, ?1)",
+                [vec![0u8; 8 * 4]],
+            )
             .unwrap();
         assert_eq!(
             VectorStore::stored_chunk_count(&vector_path).unwrap(),
-            chunk_count
+            chunk_count + 2
         );
+        update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        let mut stored: Vec<_> = VectorStore::stored_vectors(&vector_path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, id)| id.unwrap())
+            .collect();
+        let mut indexed: Vec<_> = MetadataStore::open(&idx.join("metadata.db"))
+            .unwrap()
+            .chunk_ids_with_files()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        stored.sort();
+        indexed.sort();
+        assert_eq!(stored, indexed);
+        let hits = VectorStore::open(&vector_path, 8)
+            .unwrap()
+            .search(&[0.5; 8], 10)
+            .unwrap();
+        assert_eq!(hits.len() as u64, chunk_count);
     }
 
     #[tokio::test]
