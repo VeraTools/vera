@@ -2,6 +2,20 @@
 
 Historical benchmark snapshots, ablations, and comparisons moved from the current results page. See [Benchmarks](benchmarks.md#current-results) for the maintained comparison.
 
+## RRF Constant Sweep (2026-10-14)
+
+Full 1,251-task Semble suite, v2.1.0 shipped defaults (local potion-code-16M-v2, no reranker), one index build reused for every k. Before this run, the main search ignored `retrieval.rrf_k` and always fused with k=60.
+
+| k | nDCG@10 | R@1 | R@5 | R@10 | MRR |
+|---|---------|------|------|-------|-----|
+| 5 | 0.8441 | 0.6739 | 0.9175 | 0.9510 | 0.8270 |
+| 10 | 0.8436 | 0.6719 | 0.9175 | 0.9510 | 0.8260 |
+| 30 | 0.8443 | 0.6723 | 0.9187 | 0.9510 | 0.8269 |
+| 60 (default) | 0.8435 | 0.6707 | 0.9195 | 0.9506 | 0.8255 |
+| 120 | 0.8445 | 0.6719 | 0.9211 | 0.9522 | 0.8266 |
+
+Every value is within 0.001 nDCG@10 of k=60, well below the 0.5% bar for a ranking change, so the default stays. Downstream ranking uses only fused positions plus priors, which keeps the fusion constant from mattering much.
+
 ## Vera v1.4.0 Semble Row (2026-09-03)
 
 Replaced in the current comparison by the v2.0.1 row. Measured at head 98e6e50 on the AMD Ryzen 7 9800X3D host with shipped defaults (local potion-code-16M-v2 embeddings, no reranker), three interleaved full-suite runs on the 1,251-task suite. The v1.2.0 row read 0.8450 nDCG@10 on an earlier CPU.

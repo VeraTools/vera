@@ -412,7 +412,7 @@ impl SearchContext {
         // Classify query to adapt fusion parameters.
         let query_type = classify_query(query);
         let query_params = params_for_query_type(query_type);
-        let rrf_k = query_params.rrf_k;
+        let rrf_k = config.retrieval.rrf_k;
         let vector_candidates = effective_vector_candidates(fetch_limit, query_params);
         let rerank_candidates =
             effective_rerank_candidates(config.retrieval.rerank_candidates, result_limit);
