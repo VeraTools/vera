@@ -2,6 +2,10 @@
 
 Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
 
+## v2.1.2
+
+- Search warns when the index has chunks but no stored vectors (for example, a deleted `.vera/vectors.db`). It used to return keyword-only results silently, on the CLI and in MCP.
+
 ## v2.1.1
 
 - MCP search results say when they are degraded: keyword-only because semantic search failed or was skipped (for example, an expired embedding key) or unreranked because the reranker failed. The CLI already printed these on stderr; MCP agents saw nothing.

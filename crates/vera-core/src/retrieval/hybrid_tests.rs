@@ -1018,6 +1018,41 @@ async fn search_hybrid_reranked_respects_limit() {
 }
 
 #[tokio::test]
+async fn missing_vector_database_is_reported_as_semantic_fallback() {
+    use crate::embedding::test_helpers::MockProvider;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (index_dir, dim) = setup_test_index(tmp.path()).await;
+    std::fs::remove_file(index_dir.join("vectors.db")).unwrap();
+
+    // A query with no keyword hits must still report the lost vectors.
+    for (query, expect_hits) in [("authenticate", true), ("zzqxvj", false)] {
+        let (results, timings) = search_hybrid(
+            &index_dir,
+            &MockProvider::new(dim),
+            query,
+            query,
+            &SearchFilters::default(),
+            5,
+            60.0,
+            dim,
+            50,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(!results.is_empty(), expect_hits, "{query}");
+        let reason = timings
+            .semantic_fallback
+            .expect("fallback must be reported");
+        assert!(
+            reason.contains("vector database is missing or empty"),
+            "{reason}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn reranking_preserves_unreranked_tail_for_later_filtering() {
     use crate::embedding::test_helpers::MockProvider;
     use crate::retrieval::apply_filters;
