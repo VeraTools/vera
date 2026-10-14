@@ -1,24 +1,30 @@
 # MCP
 
-MCP is the optional integration path: most agents work best with the Vera CLI and the skill installed by `vera agent install` (see [Installation](installation.md) and the [README](../README.md#use-with-ai-agents)). Use `vera mcp` when your client is MCP-first or your team standardizes on one server config.
+`vera mcp` runs a Model Context Protocol server over standard input and output, using JSON-RPC.
 
-`vera mcp` runs a JSON-RPC MCP server over standard input and output. It exposes:
+For most coding agents, the CLI plus the skill installed by `vera agent install` works better than MCP (see [Installation](installation.md)). Use MCP when your client is built around MCP servers or your team shares one server config.
 
-| Tool | Description |
+## Tools
+
+| Tool | What it does |
 |---|---|
-| `search_code` | Hybrid BM25 and vector search for conceptual or behavioral queries, with filters, intent, multi-query input, and git scopes. |
-| `get_stats` | Reports file count, chunk count, index size, language breakdown, and index health. |
-| `get_overview` | Summarizes languages, directories, entry points, symbol types, complexity hotspots, and project conventions. |
-| `regex_search` | Searches indexed files with a regular expression and surrounding context. |
-| `structural_search` | Runs structural intents for definitions, environment-variable reads, routes, SQL sites, and explicit implementations. |
-| `find_references` | Finds indexed caller or callee matches in Vera's persisted reference data. |
-| `explain_path` | Explains why a path is or is not indexed, including ignore, binary, size, and default-exclusion decisions. |
+| `search_code` | Hybrid keyword and semantic search, with filters, intent, multiple queries, and git scopes. |
+| `get_stats` | File count, chunk count, index size, language breakdown, and index health. |
+| `get_overview` | Languages, directories, entry points, symbol types, complexity hotspots, and project conventions. |
+| `regex_search` | Regular-expression search over indexed files, with surrounding context. |
+| `structural_search` | Definitions, environment-variable reads, routes, SQL sites, and explicit implementations. |
+| `find_references` | Callers or callees from Vera's stored reference data. |
+| `explain_path` | Why a path is or is not indexed: ignore rules, binary detection, size, or default exclusions. |
 
-`search_code`, `structural_search`, and `find_references` auto-index and start a file watcher on first use when the project has no index. Search, references, and overview also accept changed-file git scopes.
+If the project has no index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
 
-Search results can carry a second text block of warnings: the index may be stale, semantic search was unavailable so a query's results are keyword-only (BM25), or the reranker failed so a query's results are not reranked. Each warning names its cause. See [Troubleshooting](troubleshooting.md#keyword-only-results).
+A search result can include a second text block with warnings: the index is stale, semantic search was unavailable so results are keyword-only, or the reranker failed so results are not reranked. Each warning names its cause; see [Troubleshooting](troubleshooting.md#keyword-only-results).
 
 ## Client setup
+
+The server uses the backend saved by `vera setup`, unless `VERA_BACKEND` is set (the Docker images set it). Configure a backend first.
+
+The server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory.
 
 ### Claude Code
 
@@ -26,17 +32,9 @@ Search results can carry a second text block of warnings: the index may be stale
 claude mcp add vera -- vera mcp
 ```
 
-### Cursor
+### Cursor and Windsurf
 
-Add this server to the MCP configuration:
-
-```json
-{"mcpServers":{"vera":{"command":"vera","args":["mcp"]}}}
-```
-
-### Windsurf
-
-Use the same JSON server entry:
+Add this entry to the MCP configuration:
 
 ```json
 {"mcpServers":{"vera":{"command":"vera","args":["mcp"]}}}
@@ -44,28 +42,26 @@ Use the same JSON server entry:
 
 ### Codex
 
-Add this TOML entry:
-
 ```toml
 [mcp_servers.vera]
 command = "vera"
 args = ["mcp"]
 ```
 
-### VS Code Copilot
+### VS Code (Copilot)
 
-Add the server to `.vscode/mcp.json` (VS Code uses a `servers` key rather than `mcpServers`):
+Add the server to `.vscode/mcp.json`. VS Code uses a `servers` key instead of `mcpServers`:
 
 ```json
 {"servers":{"vera":{"type":"stdio","command":"vera","args":["mcp"]}}}
 ```
 
-For a local inference server, configure the backend separately and run `vera mcp`. See [llama.cpp setup](llama-cpp-setup.md) for the local endpoint example.
+### Docker
 
-## Docker
+The Docker images start `vera mcp` by default. Mount your project at `/workspace`; see the [Docker guide](docker.md) for image variants and client config.
 
-The Docker images start `vera mcp` by default. Use the CPU, CUDA, ROCm, or OpenVINO variant described in the [Docker guide](docker.md), and mount the project at `/workspace`.
+## If the server does not appear
 
-## Troubleshooting
-
-If the server does not appear in the client, verify that `vera` is on the client's `PATH`. If the client has a restricted environment, use the absolute path to the Vera binary in the `command` field. Check the client logs and run `vera mcp` directly to confirm that the server starts.
+- Make sure `vera` is on the client's `PATH`. If the client runs with a restricted environment, put the absolute path to the binary in `command`.
+- If you use API mode through environment variables, make sure the client passes them to the server process.
+- Run `vera mcp` in a terminal to confirm it starts, then check the client's MCP logs.

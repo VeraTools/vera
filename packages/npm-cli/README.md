@@ -1,59 +1,83 @@
 # @vera-ai/cli
 
-Code search for AI agents. Vera indexes your codebase using tree-sitter parsing and hybrid search (BM25 + vector similarity + optional cross-encoder reranking), then returns ranked code snippets as Markdown codeblocks by default, or JSON with `--json`.
+Vera is local code search for AI coding agents and the developers who use them. Describe what the code does, such as "where expired sessions are cleaned up", and Vera returns the functions and classes that do it, ranked, with file paths and line ranges. Exact names work too. The index lives in your project, search runs on your machine, and the default model runs on any CPU with no GPU, API key, or server to manage.
 
-This package downloads and wraps the native Vera binary for your platform. It downloads the exact package version, checks the release archive size and SHA-256, and stores a completed binary cache. Later runs use that cache without network access. Older caches are downloaded and verified once before they can be reused offline. On Linux without glibc (such as Alpine or NixOS), the wrapper selects the musl binary. Other native targets use their platform system libraries; optional ONNX backends have additional runtime requirements. Set `VERA_TARGET` to override target detection (e.g., `VERA_TARGET=x86_64-unknown-linux-musl npx -y @vera-ai/cli install`).
-
-The default local embedding model, `minishlab/potion-code-16M-v2`, runs on CPU and works offline after its first download. API mode is also available; Qwen/OpenRouter is recommended among API presets (paid usage). The [benchmark report](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks.md) separates the full 1,251-task suite from smaller screening subsets, and the [agent benchmark](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks-history.md#agent-level-benchmark) records context measurements and their sample limits.
+This package installs the native Vera binary and runs it.
 
 ## Install
 
 ```bash
 npx -y @vera-ai/cli install
+# or
+bunx @vera-ai/cli install
 ```
 
-## Quick Start
+Requires Node.js 18 or later (or Bun).
+
+`install` downloads the Vera binary that matches this package's version, adds a `vera` command to your user bin directory (for example `~/.local/bin`), and then opens the agent skill installer if you are in a terminal. Without a terminal, as in CI, it installs the binary and skips the skill installer. If the bin directory is not on your PATH, the installer tells you which directory to add. `npx -y @vera-ai/cli <command>` also forwards any Vera command to the binary.
+
+## Quick start
 
 ```bash
+# Download the default local model and index the current project
 vera setup --potion-code --index .
-vera search "authentication logic"
+
+# Search
+vera search "where expired sessions are cleaned up"
 ```
 
-`vera setup` runs the full wizard: configure a backend, optionally install agent skills, and optionally index. Local CPU is first and selected by default; API mode is second. Indexing defaults to Yes for local backends and No for API mode. `vera setup --api` uses the shorter API configuration flow, with Qwen/OpenRouter first and recommended (one shared key). See the [models guide](https://github.com/VeraTools/Vera/blob/master/docs/models.md#api-mode) for other providers and non-interactive setup.
-
-The preferred agent integration is the CLI plus the Vera skill: `vera agent install` installs it for supported coding agents and can add a short usage snippet to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, or editor rules file. The client selector uses Space to toggle and Enter to continue. Empty selection changes nothing; unselected installations remain intact. Vera also ships an optional MCP server (`vera mcp`); see the [MCP guide](https://github.com/VeraTools/Vera/blob/master/docs/mcp.md) if your client is MCP-first.
-
-## Common Tasks
-
-| Task | Command |
-|------|---------|
-| Use the interactive setup wizard | `vera setup` |
-| Use the default local model | `vera setup --potion-code` |
-| Configure API mode | `vera setup --api` |
-| Use a local NVIDIA backend | `vera setup --onnx-jina-cuda` |
-| Search semantically | `vera search "authentication middleware"` |
-| Search only changed files | `vera search "authentication middleware" --changed` |
-| Common structural tasks | `vera structural routes` / `vera structural env DATABASE_URL` / `vera structural impls Loader` |
-| Find callers or callees | `vera references foo` / `vera references foo --callees` |
-| Explain why a file is missing | `vera explain-path path/to/file` |
-| Inspect index health | `vera stats --json` |
-| Keep the index up to date | `vera update .` |
-| Watch for file changes | `vera watch .` |
-| Run local HTTP inference server | `vera serve` |
-| Diagnose setup issues | `vera doctor` |
-| Run the deeper local probe | `vera doctor --probe` |
-| Repair missing local assets | `vera repair` |
-| Inspect binary upgrades | `vera upgrade` |
-| Install agent skills | `vera agent install` |
-
-For the full backend matrix, model options, Docker setup, and troubleshooting, see the main [README](https://github.com/VeraTools/Vera) and [Installation Guide](https://github.com/VeraTools/Vera/blob/master/docs/installation.md).
+Run `vera setup` with no flags in a terminal for a guided setup that picks a backend, can install the agent skill, and can index the project. Add `.vera/` to your `.gitignore`.
 
 ## What you get
 
-- **65 languages** (61 with tree-sitter AST parsing)
-- **Hybrid search**: BM25 keyword + vector similarity, fused with Reciprocal Rank Fusion
-- **Opt-in cross-encoder reranking** for precision, disabled by default
-- **Git-aware scopes and index debugging**: `--changed` / `--since` / `--base`, `explain-path`, and index health in `vera stats`
-- **Markdown codeblock output** by default with file paths, line ranges, and optional symbol info (use `--json` for compact JSON; `--raw` works with `vera search`, `vera grep`, and `vera references`; `--timing` works with `vera search` and `vera grep`, before or after the subcommand)
+- Search by behavior and by name. Every query runs keyword search (BM25) and embedding search together, merges the results, and ranks definitions above passing mentions and source files above tests and docs.
+- Whole functions, not line fragments. Vera indexes functions, classes, methods, and other symbols as separate results, with structural (tree-sitter) parsing for most of its 65 supported languages.
+- Fast on an ordinary CPU. On a Ryzen 7 9800X3D desktop, Vera indexes its own repository (438 files, about 7,900 chunks) in under a second, and a command-line search returns in about 0.13 seconds including process startup. `vera update .` and `vera watch .` re-index only changed files.
+- Measured search quality. On Semble's 1,251-task code search benchmark, with the same embedding model for both tools, Vera scores within 1% of Semble on nDCG@10 and slightly ahead on Recall@5, with an index about a seventh the size. See the [benchmarks](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks.md).
+- Structural questions from the same index: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. Any search can be limited to files changed in your working tree or branch.
+- Agent integration. `vera agent install` adds a Vera skill to more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, and Copilot. An MCP server (`vera mcp`) is included for clients that prefer it; see the [MCP guide](https://github.com/VeraTools/Vera/blob/master/docs/mcp.md).
 
-For full documentation, including local model options and manual install steps, see the [GitHub repo](https://github.com/VeraTools/Vera).
+Results come back as Markdown code blocks labeled with path, line range, and symbol. Add `--json` for machine-readable output.
+
+## Common commands
+
+| Task | Command |
+|---|---|
+| Guided setup | `vera setup` |
+| Search by behavior | `vera search "retry failed uploads with backoff"` |
+| Narrow the results | `vera search "error handling" --lang rust --path "src/**" --type function` |
+| Search only files you changed | `vera search "token validation" --changed` (or `--base main`) |
+| Find a definition | `vera structural definitions parse_config` |
+| Find callers, or what a function calls | `vera references parse_config` / `vera references parse_config --callees` |
+| Exact text or regex in indexed files | `vera grep "TODO\|FIXME"` |
+| Keep the index current | `vera update .` or `vera watch .` |
+| Find out why a file is not indexed | `vera explain-path path/to/file` |
+| Install the agent skill | `vera agent install` |
+| Check your setup | `vera doctor` |
+| Check for a newer release | `vera upgrade` |
+
+## Models and privacy
+
+The default backend, Potion Code (`minishlab/potion-code-16M-v2`), runs on the CPU and works offline after a one-time download. Reranking is off by default for local backends. GPU backends (`vera setup --onnx-jina-cuda` and others) need extra runtime libraries; see the [installation guide](https://github.com/VeraTools/Vera/blob/master/docs/installation.md).
+
+`vera setup --api` configures hosted models instead. Qwen3 embeddings plus reranking through OpenRouter (paid) scored highest in our model screening, and any OpenAI-compatible endpoint works. See [API mode](https://github.com/VeraTools/Vera/blob/master/docs/models.md#api-mode).
+
+With a local backend, your code and queries stay on your machine. In API mode, or with an API reranker or `--deep` completion endpoint configured, Vera sends chunk text and queries to the endpoints you set. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
+
+## How this package installs Vera
+
+- By default it downloads the release of Vera that exactly matches the package version (`VERA_MANIFEST_URL` points it at a different release manifest), then checks the archive's size and SHA-256 against the release manifest before extracting the binary.
+- The verified binary is cached in Vera's data directory (`~/.local/share/vera` on Linux), and later runs use it without network access. A cache written by an older wrapper is downloaded and verified once more before it is reused offline.
+- Prebuilt binaries cover Linux x86_64 and arm64, macOS on Intel and Apple Silicon, and Windows x86_64. On x86_64 Linux without glibc (such as Alpine), it picks the musl build.
+- Set `VERA_TARGET` to override platform detection, for example `VERA_TARGET=x86_64-unknown-linux-musl npx -y @vera-ai/cli install`.
+- `vera uninstall` removes the binary, models, configuration, agent skills, and the `vera` command.
+
+## Documentation
+
+- [Installation guide](https://github.com/VeraTools/Vera/blob/master/docs/installation.md): GPU backends, API mode, prebuilt binaries, Docker
+- [Query guide](https://github.com/VeraTools/Vera/blob/master/docs/query-guide.md): how to write queries that find what you want
+- [Features](https://github.com/VeraTools/Vera/blob/master/docs/features.md): every command and flag
+- [Benchmarks](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks.md): methodology and results
+- [GitHub repository](https://github.com/VeraTools/Vera): source, issues, and release notes
+
+Vera is MIT licensed.

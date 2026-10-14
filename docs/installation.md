@@ -1,130 +1,131 @@
-# Installation Guide
+# Installation
 
-For the short path, use the [Quick Start](../README.md#quick-start) in the README.
+The short version is in the [README quick start](../README.md#quick-start). This page covers every install method, backend setup, agent integration, updates, and removal.
 
-## Install the Binary
+## Install the binary
 
-Pick whichever package manager you have:
+Use whichever package runner you already have:
 
 ```bash
 bunx @vera-ai/cli install               # Bun
 npx -y @vera-ai/cli install             # npm
-uvx vera-ai install                     # Python (uv)
-pip install vera-ai && vera-ai install  # Python (pip)
+uvx vera-ai install                     # uv
+pip install vera-ai && vera-ai install  # pip
 ```
 
-The installer downloads the `vera` binary for your platform, writes a shim to a user bin directory, and delegates to `vera agent install`, which launches an interactive scope and client selector to install skill files. After that, `vera` is a standalone command.
+The installer downloads the native `vera` binary for your platform, puts a `vera` command in your user bin directory, and then opens the agent skill installer (see [Set up agent skills](#set-up-agent-skills)). After that, `vera` is a standalone command and does not need Node or Python.
 
-Without a terminal on stdin and stderr, a bare `install` skips the agent step and succeeds. Run `vera agent install` later in a terminal, or `vera agent install --client all --scope global` without one. Extra arguments to the installer are passed to `vera agent install`.
+In CI or any other non-interactive shell, the installer skips the agent step. Extra arguments are passed to `vera agent install`, so `npx -y @vera-ai/cli install --client all --scope global` installs the skill without prompts.
 
-<details>
-<summary>Other install methods</summary>
+Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and Windows (x86_64). Linux builds need glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL 8, and later). On x86_64 Alpine and other systems without glibc, the installer picks the static musl build automatically. There is no musl build for aarch64, so Linux aarch64 needs glibc.
 
-**Prebuilt binaries:**
-Download from [GitHub Releases](https://github.com/VeraTools/Vera/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), or Windows (x86_64). For Alpine, NixOS, or minimal containers without glibc, use the `x86_64-unknown-linux-musl` archive (static binary for the default CPU backend). GNU Linux archives require glibc 2.28 or newer; macOS and Windows binaries use system libraries. Optional ONNX backends also need ONNX Runtime and provider dependencies. The npm/pip wrappers select musl when glibc is unavailable; to force a specific target, set `VERA_TARGET=x86_64-unknown-linux-musl` before running the install command.
+### Other install methods
 
-**Build from source** (Rust 1.88+):
+**Prebuilt binaries.** Download an archive from [GitHub Releases](https://github.com/VeraTools/Vera/releases) and put `vera` on your `PATH`. Use the `x86_64-unknown-linux-musl` archive on systems without glibc. To force a target with the package installers, set `VERA_TARGET`, for example `VERA_TARGET=x86_64-unknown-linux-musl npx -y @vera-ai/cli install`.
+
+**Build from source** (Rust 1.88 or newer):
+
 ```bash
 git clone https://github.com/VeraTools/Vera.git && cd Vera
-bash scripts/bootstrap-vendored-grammars.sh   # downloads the four grammars that are not tracked in git
+bash scripts/bootstrap-vendored-grammars.sh   # fetches four grammars not stored in git
 cargo build --locked --release
 cp target/release/vera ~/.local/bin/
+```
+
+**Docker.** Images for CPU, CUDA, ROCm, and OpenVINO run the MCP server by default. See [Docker](docker.md).
+
+**Restricted networks.** If Vera cannot download models or ONNX Runtime directly, follow [manual install](manual-install.md).
+
+## Set up a backend
+
+Vera always indexes, stores, and searches on your machine. The backend only decides where the embedding model (and the optional reranker) runs.
+
+Run the guided setup:
+
+```bash
 vera setup
 ```
 
-**Docker** (MCP server):
+It asks for a backend, offers to install the agent skill, and offers to index the current directory. Local CPU is the default choice. To skip the wizard, pass a backend flag, and add `--index .` to index in the same step. In a terminal, setup then asks one confirmation; add `--yes` to skip it:
+
 ```bash
-docker run --rm -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu
+vera setup --potion-code --index .
 ```
-CPU, CUDA, ROCm, and OpenVINO images available. See [docker.md](docker.md).
 
-**Manual install:** [manual-install.md](manual-install.md)
-
-</details>
-
-## Set Up a Backend
-
-Vera stores indexes and retrieves candidates locally. The "backend" only controls where embedding and reranking models run.
-
-Run `vera setup` for the full wizard: configure a backend, optionally install agent skills, and optionally index the current project. Potion Code CPU is first and selected by default; API mode is second. Indexing defaults to Yes for local backends and No for API mode. Explicit backend flags run a shorter configuration flow.
-
-The default embedding model is `minishlab/potion-code-16M-v2`. It runs on CPU and works offline after its assets have downloaded. Jina ONNX and CodeRankEmbed are opt-in alternatives.
-
-### CPU Local Mode
-
-The default `minishlab/potion-code-16M-v2` model runs locally on CPU on any supported machine.
+### Local CPU (default)
 
 ```bash
 vera setup --potion-code
 ```
 
-Use this when you want the default local model. It also runs on CPU-only machines, and the interactive `vera setup` wizard selects it as the default local backend.
+This downloads [`potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2), a 32 MB static embedding model for code. It runs on any supported machine, needs no GPU or ONNX Runtime, and works offline after the download. Use this unless you have a specific reason to pick something else.
 
-### API Mode
+### Local GPU
 
-Use an OpenAI-compatible endpoint for embedding and optional reranking calls:
+Jina ONNX backends run the [Jina v5 nano](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval) embedding model on your GPU. Vera downloads the model and the matching ONNX Runtime build.
+
+| Hardware | Command |
+|---|---|
+| NVIDIA (CUDA 12 or newer) | `vera setup --onnx-jina-cuda` |
+| AMD on Linux (ROCm) | `vera setup --onnx-jina-rocm` |
+| Apple Silicon (CoreML) | `vera setup --onnx-jina-coreml` |
+| Intel GPU or iGPU on Linux (OpenVINO) | `vera setup --onnx-jina-openvino` |
+| Any DirectX 12 GPU on Windows (DirectML) | `vera setup --onnx-jina-directml` |
+
+The ROCm and OpenVINO runtimes are installed with pip into a Python environment that Vera manages. A GPU is optional: in model screening, the default CPU model scored within about 0.01 nDCG@10 of Jina and indexed faster. See [models](models.md) for the comparison and for custom ONNX models.
+
+### API mode
 
 ```bash
 vera setup --api
 ```
 
-Qwen/OpenRouter is first and recommended in the API selector (paid usage, one shared key). OpenAI, Jina, Voyage, and custom endpoints are also available. Setup saves the endpoints, credentials, and reranker protocol settings together. `vera backend --api` uses the same configuration prompts.
+API mode sends embedding (and optionally reranking) requests to any OpenAI-compatible endpoint. The setup menu offers presets for Qwen through OpenRouter (recommended: one key covers embeddings and reranking, paid usage), OpenAI, Jina, and Voyage, plus a custom endpoint for anything else, including a local [llama.cpp](llama-cpp-setup.md) server. If you give setup a reranker, it turns reranking on.
 
-See [Models: API mode](models.md#api-mode) for provider links, non-interactive environment examples, and protocol overrides. Provider pricing and quotas can change; check the provider before indexing a large project.
+Provider details and non-interactive setup are in [models: API mode](models.md#api-mode).
 
-### GPU Local Mode
+## Index and search
 
-Jina ONNX is an opt-in local backend. Vera downloads the Jina embedding model and local reranker, then uses your GPU provider. No API key is needed, and the setup works offline after the download.
-
-**Pick the right command for your hardware:**
-
-| You have | Command | What happens |
-|----------|---------|-------------|
-| Not sure | `vera setup` | Full wizard, with local CPU selected by default |
-| CPU only | `vera setup --potion-code` | Uses the default `minishlab/potion-code-16M-v2` model |
-| Apple Silicon (M1/M2/M3/M4) | `vera setup --onnx-jina-coreml` | Uses CoreML GPU acceleration |
-| NVIDIA GPU | `vera setup --onnx-jina-cuda` | Uses CUDA |
-| AMD GPU (Linux) | `vera setup --onnx-jina-rocm` | Uses ROCm |
-| Intel GPU (Linux) | `vera setup --onnx-jina-openvino` | Uses OpenVINO |
-| DirectX 12 GPU (Windows) | `vera setup --onnx-jina-directml` | Uses DirectML |
-
-For custom ONNX models, GPU-specific tuning, and inference speed comparisons, see [models.md](models.md).
-
-## Verify Your Setup
+If you did not pass `--index .` during setup:
 
 ```bash
-vera doctor          # checks config, models, and connectivity
-vera doctor --probe  # deeper local backend diagnostics
-```
-
-## Index and Search
-
-Add `--index .` to an explicit setup command to configure the backend and index the current project in one step:
-
-```bash
-vera setup --potion-code --index .
+vera index .
 vera search "authentication logic"
 ```
 
-The bare wizard includes this indexing step; explicit setup flags need `--index .` to include it. If you skip indexing, an interactive `vera search` offers to create the missing index. JSON and non-interactive searches return the existing missing-index error instead of prompting.
-
-See the [query guide](query-guide.md) for tips on writing effective queries.
-
-## Set Up Agent Skills
-
-Vera can install skill files so your AI coding agents know how to use it:
+Add the index directory to `.gitignore`. A failed API-mode index run also leaves a resume directory, so add both:
 
 ```bash
-vera agent install              # interactive: choose scope + agents
-vera agent install --client all # non-interactive: all agents, global
+printf '.vera/\n.vera.resume/\n' >> .gitignore
 ```
 
-The selector preselects installed clients. Press Space to toggle and Enter to continue; an empty selection makes no changes. Installation adds or updates selected clients and leaves unselected installations in place. Shared skill directories are written once. Use `vera agent remove` for removal; its interactive choices group clients that share a directory.
+If you search in a project without an index, an interactive `vera search` offers to create one. Scripts and `--json` searches get an error instead, so they can handle it.
 
-The interactive flow can also update your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules` file with a short Vera usage snippet.
+## Check your setup
+
+```bash
+vera doctor           # config, models, index, and version checks
+vera doctor --probe   # also loads the local backend to test it
+```
+
+`vera doctor` exits with status 1 if a check fails, so `vera doctor && vera index .` stops early on a broken setup. If model files are missing or damaged, it tells you which `vera repair` command to run.
+
+## Set up agent skills
+
+The Vera skill teaches coding agents when to use Vera, how to phrase queries, and when plain `grep` is the better tool. It supports more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, GitHub Copilot, Windsurf, Cline, Roo Code, Junie, and Factory Droid.
+
+```bash
+vera agent install                                 # interactive: pick agents and scope
+vera agent install --client all                    # all agents, global scope
+vera agent install --client claude --scope project # one agent, this project only
+```
+
+The interactive picker preselects agents you already have installed. Press Space to toggle and Enter to continue. It only adds or updates the agents you select and never removes others. Use `vera agent status` to see what is installed, `vera agent remove` to uninstall, and `vera agent sync` to refresh outdated copies.
+
+In a terminal, the installer (with or without `--client`) also offers to add a short Vera section to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules`. Vera keeps that section up to date between its `<!-- vera:begin -->` and `<!-- vera:end -->` markers and leaves the rest of the file alone.
 
 <details>
-<summary>Add the instructions manually</summary>
+Add the agent instructions by hand
 
 ```markdown
 ## Code Search
@@ -148,59 +149,49 @@ Use Vera before opening many files or running broad text search when you need to
 <!-- vera:end -->
 ```
 
-`vera structural impls <symbol>` only finds explicit declarations such as `implements`, `extends`, `with`, `:`, or `impl Trait for Type`. It does not infer implicit interface satisfaction.
-
 </details>
 
-<details>
-<summary>Use the Vercel skills CLI instead</summary>
+If you use the [skills CLI](https://github.com/vercel-labs/skills), `npx skills add VeraTools/Vera` installs the same skill.
+
+For MCP clients, see [MCP](mcp.md).
+
+## Update
+
+Vera checks for a new release once a day and prints a note when one is out. To update:
 
 ```bash
-npx skills add VeraTools/Vera
+vera upgrade           # show what would run
+vera upgrade --apply   # run it
 ```
 
-</details>
+After an upgrade, Vera refreshes outdated agent skill copies on its own. Set `VERA_NO_UPDATE_CHECK=1` to turn off the daily check.
 
-## Updating
-
-Upgrading from v1? Read the [v2 migration notes](migration-v2.md) for retired controls and experimental indexes that need rebuilding.
-
-Vera checks for new releases daily and prints a hint when one is available.
+`vera upgrade --apply` updates the binary installed by the `install` command. It does not touch a global npm or Bun package; update that with your package manager if you use its `vera-ai` command. If an upgrade fails, rerun the installer you used originally:
 
 ```bash
-vera upgrade              # dry run: shows what would happen
-vera upgrade --apply      # applies the update
-```
-
-After an upgrade, Vera automatically syncs stale agent skill installs. Set `VERA_NO_UPDATE_CHECK=1` to disable the automatic check.
-
-`--apply` runs the installer for the new version without a terminal, so it skips the agent selector. It does not change a global npm or Bun package; update that yourself if you use its `vera-ai` command.
-
-If you are having trouble updating, reinstall with the package manager you originally used:
-
-```bash
-# Bun
 bunx @vera-ai/cli@latest install
-# npm
 npx -y @vera-ai/cli@latest install
-# uv
 uvx vera-ai@latest install
-# pip
 pip install --upgrade vera-ai && vera-ai install
 ```
 
-## Uninstalling
+Coming from 1.x? Read the [v2 migration notes](migration-v2.md) first.
+
+## Uninstall
 
 ```bash
-vera uninstall   # removes Vera data, agent skills, and its PATH shim
+vera uninstall
 ```
 
-A data directory containing files Vera did not create is left in place and reported.
+This removes the Vera binary, downloaded models and runtimes, configuration and saved credentials, installed agent skills, and the `vera` command shim. If the data directory contains files Vera did not create, it is left in place and reported. Project indexes (`.vera/` in each project) are not touched; delete them yourself if you want them gone.
 
-## Troubleshooting
+## Where Vera keeps files
 
-- Run `vera doctor` to diagnose issues.
-- Run `vera doctor --probe` for deeper local backend diagnostics.
-- Wrong backend? Run `vera setup` again with a different flag.
-- Slow opt-in Jina indexing on CPU? Switch to `--potion-code`, `--api`, or a GPU backend.
-- See [troubleshooting.md](troubleshooting.md) for more.
+| What | Where |
+|---|---|
+| Project index | `.vera/` in the indexed directory |
+| Models, runtimes, and config | `~/.local/share/vera/` (or `$XDG_DATA_HOME/vera/`) on Linux, `~/Library/Application Support/vera/` on macOS, `%APPDATA%\vera\` on Windows, or `~/.vera/` for installs that already use it |
+
+Set `VERA_HOME` to use a different data directory.
+
+If something goes wrong, see [troubleshooting](troubleshooting.md).

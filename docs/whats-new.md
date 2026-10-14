@@ -1,333 +1,327 @@
-# What's New
+# What's new
 
-Release highlights from v1.0 onward. For the current benchmark tables and methodology, see [benchmarks.md](benchmarks.md). For the full command surface, see [features.md](features.md).
+Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
+
+## v2.1.4
+
+- `vera setup --api` and `vera backend --api` turn reranking on when you configure a reranker, including with the Qwen preset, and turn it off when you set up without one. Before, setup saved the reranker but left reranking off, so searches were never reranked. If you set up API mode with an earlier version, run setup again or `vera config set retrieval.reranking_enabled true`; `vera doctor` now warns when a reranker is saved but reranking is off.
+- Switching from API mode to a local backend drops the saved API reranker and turns reranking off with it, so it does not silently switch to the slower local CPU reranker. Reranking stays on if your shell sets all three `RERANKER_MODEL_*` variables, or if you turned it on for a local backend with no API reranker saved.
+- When a local model fails to load, the hint now links to the manual install guide instead of naming an outdated model path.
 
 ## v2.1.3
 
-- `vera update` restores lost vectors. Files whose chunks have no stored vector (for example, after `.vera/vectors.db` was deleted) are re-embedded instead of being reported as up to date, and the search warning now points to `vera update .`.
+- `vera update` now repairs an index whose vectors are missing (for example, after `.vera/vectors.db` was deleted). Files without stored vectors are re-embedded instead of being reported as up to date, and the search warning for this case tells you to run `vera update .`.
 
 ## v2.1.2
 
-- Search warns when the index has chunks but no stored vectors (for example, a deleted `.vera/vectors.db`). It used to return keyword-only results silently, on the CLI and in MCP.
+- Search warns when the index has chunks but no stored vectors, such as after `.vera/vectors.db` was deleted. Before, the CLI and MCP server quietly returned keyword-only results.
 
 ## v2.1.1
 
-- MCP search results say when they are degraded: keyword-only because semantic search failed or was skipped (for example, an expired embedding key) or unreranked because the reranker failed. The CLI already printed these on stderr; MCP agents saw nothing.
-- `retrieval.rrf_k` now applies to ordinary search. It used to affect only multi-query merging. The default (60) is unchanged; an invalid saved value falls back to it.
+- MCP search results now say when they are degraded: keyword-only because semantic search failed or was skipped (an expired embedding key, for example), or unreranked because the reranker failed. The CLI already printed these warnings on stderr, but MCP clients never saw them.
+- `retrieval.rrf_k` now applies to ordinary searches. It used to affect only the merging of multiple queries. The default (60) is unchanged, and an invalid saved value falls back to it.
 
 ## v2.1.0
 
-- `vera uninstall` removes the PATH shim the npm and pip installers write again. Since v2.0.0 it left that shim behind and reported a partial uninstall.
-- `vera uninstall` deletes the data directory only when its contents match the layout Vera creates. A `VERA_HOME` pointing at a shared directory is left in place and reported.
-- The installers no longer overwrite a `vera` launcher they did not create, such as a `cargo install` binary, and only rewrite their own launcher during `install`.
-- The npm and pip installers store data in the same platform directory Vera itself uses (`~/.local/share/vera` on Linux) unless `~/.vera` already holds an installation.
-- `npm install -g @vera-ai/cli` installs a `vera-ai` command, matching pip. It used to install a command named `cli`.
-- `install` without a terminal, as in CI, installs the binary and skips the agent selector instead of failing.
-- `vera upgrade --apply` installs the exact new version, so a package registry that has not caught up fails clearly instead of reinstalling the current release. It no longer changes global npm or Bun packages.
+- `vera uninstall` once again removes the `vera` command that the npm and pip installers create. Since v2.0.0 it had left that command behind and reported a partial uninstall.
+- `vera uninstall` deletes the data directory only when its contents match what Vera creates. If `VERA_HOME` points at a shared directory, Vera leaves it in place and says so.
+- The npm and pip installers no longer overwrite a `vera` command they did not create (such as one from `cargo install`), and they rewrite their own command only during `install`.
+- The npm and pip installers store data in the same directory Vera uses (`~/.local/share/vera` on Linux), unless `~/.vera` already holds an installation.
+- `npm install -g @vera-ai/cli` installs a command named `vera-ai`, matching pip. It used to be named `cli`.
+- Running `install` without a terminal, as in CI, installs the binary and skips the agent selector instead of failing.
+- `vera upgrade --apply` installs the exact new version, so if a package registry has not caught up yet, the upgrade fails with a clear message instead of reinstalling the current release. It no longer changes globally installed npm or Bun packages.
 
 ## v2.0.1
 
-- Environment variables now override saved settings at runtime and are never written to `config.json`. Before, running `vera config set` with a variable such as `VERA_MAX_OUTPUT_CHARS` set saved that value permanently, and once a value was saved, the matching variable was ignored. If an earlier `config set` saved an override you did not intend, set the key again or remove it from `config.json`.
-- GPU indexing uses batches of at most 16 inputs again, as v1 did. v2.0.0 let cards with 8 GB or more run batches of 64 to 128, which used up to 4x the GPU memory and indexed 4 to 12% slower on an RTX 4080.
-- When an API batch is split for exceeding the model context and a later part fails, the finished parts are kept for resume, and a retry resends only the unfinished inputs.
+- Environment variables now override saved settings only while Vera runs and are never written to `config.json`. Before, running `vera config set` with a variable such as `VERA_MAX_OUTPUT_CHARS` set saved that value permanently, and once a value was saved, the variable was ignored. If an earlier `config set` saved a value you did not intend, set the key again or remove it from `config.json`.
+- GPU indexing again uses batches of at most 16 inputs, as in v1. v2.0.0 ran batches of 64 to 128 on cards with 8 GB or more, which used up to 4 times the GPU memory and indexed 4 to 12% slower on an RTX 4080.
+- When an API batch is split because it exceeds the model's context and a later part fails, the finished parts are kept, and a retry resends only the unfinished inputs.
 
 ## v2.0.0
 
-Rejected ranking, character-cap chunking, and structural graph-augmentation experiments have been removed. Default indexes remain compatible; experimental character-capped indexes require a full rebuild. See [v2 migration](migration-v2.md) for the removed controls and score contract.
+v2 removes the controls for ranking and chunking experiments that were measured and rejected in v1.x (path penalties, a larger candidate pool, character-capped chunks, and structural graph augmentation). Default indexes keep working. Indexes built with the experimental character cap need a full rebuild. The [v2 migration guide](migration-v2.md) lists the removed settings.
 
-The setup wizard starts with local CPU, then API mode with Qwen/OpenRouter first among API presets. Local and API setup both offer skills and indexing; indexing defaults to Yes locally and No for API mode. Agent installation is additive, accepts empty selections, and groups shared paths for removal. API setup and backend switching persist the same protocol, endpoint, and task settings.
+Setup changes:
 
-Wrappers verify exact-version release archives and reuse completed caches offline. Interrupted downloads, unsafe archive entries, and checksum failures do not populate the executable cache.
+- The setup wizard lists local CPU first, then API mode, with Qwen through OpenRouter as the first API preset. Both paths offer to install agent skills and index the project; indexing defaults to Yes for local backends and No for API mode.
+- The agent installer only adds or updates the clients you select. An empty selection changes nothing, and shared skill directories are grouped when you remove them.
+- API setup and `vera backend` save the same protocol, endpoint, and task settings.
+- The npm and pip wrappers verify the exact-version release archive and reuse a completed download offline. An interrupted download, an unsafe archive entry, or a checksum failure never leaves a binary in the cache.
 
 ### API indexing reliability
 
-- API indexing sends two 128-input requests at a time with a 120-second timeout (was 16 inputs and 60 seconds). Saved configs that pinned the old defaults are upgraded once; other explicit values stay. On a mock endpoint with slow tails, the old defaults failed 10 of 10 runs and the new ones finished all 10.
-- Retries use jittered exponential backoff and honor `Retry-After` up to 60 seconds. Failed or timed-out batches go to the back of the queue and are resent up to twice; other 4xx and authentication errors fail at once.
-- A slow response no longer holds the other request slots idle until it returns.
-- A failed API `vera index` keeps finished embeddings in `<repo>/.vera.resume/`, and the next run reuses them (`embeddings_reused`). An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
-- `vera index --json` and `vera update --json` report request, retry, timeout, and failed-batch counts plus per-stage busy time. Slow runs print progress to stderr even when it is not a terminal. On failure, stdout stays empty and the error is the last stderr line.
-- Error messages drop endpoint URLs and redact tokens and credentials from provider responses.
-- Potion Code embeds each chunk on its own, so its vector no longer depends on which chunks shared its batch. Local indexing is faster as a result. Indexes from earlier versions keep working; run `vera index` to refresh their vectors.
+- API indexing sends two requests of 128 inputs at a time with a 120-second timeout (previously 16 inputs and 60 seconds). Saved configs that held the old defaults are upgraded once; other values you set stay. Against a test endpoint with slow responses, the old defaults failed 10 of 10 runs and the new ones finished all 10.
+- Retries back off exponentially with jitter and honor `Retry-After` up to 60 seconds. Failed or timed-out batches move to the back of the queue and are resent up to twice. Authentication errors and other 4xx errors fail immediately.
+- One slow response no longer keeps the other request slots idle.
+- When an API `vera index` fails, finished embeddings are kept in `<repo>/.vera.resume/` and reused on the next run (reported as `embeddings_reused`). Add `.vera.resume/` to `.gitignore`. An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
+- `vera index --json` and `vera update --json` report request, retry, timeout, and failed-batch counts, plus time spent in each stage. Slow runs print progress to stderr even without a terminal. On failure, stdout stays empty and the error is the last line on stderr.
+- Error messages no longer include endpoint URLs, and tokens and credentials in provider responses are redacted.
+- Potion Code embeds each chunk on its own, so a chunk's vector no longer depends on which other chunks shared its batch, and local indexing is faster. Older indexes keep working; run `vera index` to refresh their vectors.
 
 ### Search and configuration
 
-- `vera search --json --rerank-status` reports whether results were reranked and why not. A reranker that is enabled but missing or broken prints a `reranker unavailable` warning.
-- Saved `embedding.query_prefix` and `embedding.document_prefix` now reach API requests. Saved ignore and exclude settings are no longer reset by absent CLI flags, and every documented config key works with `vera config get` and `set`.
-- Budgeted JSON search output stays within `retrieval.max_output_chars` even when result content needs escaping.
-- Each Docker image sets its own `VERA_BACKEND`, so GPU images now use the GPU. See [Docker](docker.md).
-- `yoke-derive` moves off a yanked release.
+- `vera search --json --rerank-status` reports whether results were reranked, and if not, why. When reranking is enabled but the reranker is missing or broken, search prints a `reranker unavailable` warning.
+- Saved `embedding.query_prefix` and `embedding.document_prefix` values now reach API requests. Saved ignore and exclude settings are no longer reset when the matching CLI flags are absent. Every documented config key works with `vera config get` and `vera config set`.
+- JSON search output stays within `retrieval.max_output_chars` even when result content needs escaping.
+- Each Docker image sets its own `VERA_BACKEND`, so the GPU images now use the GPU. See [Docker](docker.md).
 
 ## v1.4.2
 
-Updates rustls to `0.23.45` for the [RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0285.html). Release version stamping preserves the reviewed dependency lockfile.
+- Security update: rustls is updated to 0.23.45 for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
 
 ## v1.4.1
 
-### Agent ergonomics and correctness
+### Working with agents
 
-- Commands now work from subdirectories: search, grep, structural, references, overview, stats, and update resolve the nearest `.vera/` index up the directory tree and operate on the repository root, so agents no longer need to `cd` to the root. A bare `.vera/` directory without an index (including the legacy Vera home) is never mistaken for an index.
-- Absolute `--path` filters inside the repository are rewritten to root-relative form instead of silently matching nothing.
-- `vera grep "pattern" -n` (a habitual grep invocation) no longer errors: a trailing bare `-n` means the default limit of 20. Parse errors mentioning `--limit` print a one-line hint.
-- Stale-index warnings are deduplicated per index: an identical warning prints at most once every 10 minutes (`VERA_STALE_WARNING_ALWAYS=1` restores per-run printing).
-- The binary-update hint only prints on an interactive terminal, and reranker retry logs moved to debug level so agent output stays clean.
-- The agent instructions shipped by `vera agent install` were rewritten around observed failure modes: first-search routing, per-question-type command table, recovery path from usage-site hits, and root-relative `--path` guidance.
-- `vera setup` on Windows executes the Direct3D 12 probe on real Windows in CI (the `windows-probe` job), pinning the probe plumbing for every future run.
-- `vera launcher list` reports unproven launchers instead of silently ignoring them.
-- Linux release binaries link glibc 2.28 through cargo-zigbuild (portable to Ubuntu 20.04, Debian 10, RHEL 8), and the musl binary now bundles a real musl C++ runtime, fixing the v1.4.0 musl segfault on repositories containing `.sql` files.
+- Commands work from any subdirectory. `search`, `grep`, `structural`, `references`, `overview`, `stats`, and `update` find the nearest `.vera/` index above the current directory and run against that repository root, so agents no longer need to `cd` first. An empty `.vera/` directory (including an old Vera data directory at `~/.vera`) is never mistaken for an index.
+- An absolute `--path` inside the repository is converted to a root-relative path instead of matching nothing.
+- `vera grep "pattern" -n`, a habit carried over from grep, no longer errors: a trailing bare `-n` means the default limit of 20. Errors about `--limit` print a one-line hint.
+- A stale-index warning prints at most once every 10 minutes per index. Set `VERA_STALE_WARNING_ALWAYS=1` to print it on every run.
+- The update-available hint prints only in an interactive terminal, and reranker retry messages moved to debug logging, so agent output stays clean.
+- The skill installed by `vera agent install` was rewritten around mistakes agents actually made: which command to use for the first search, a command for each kind of question, what to do when the top hit is a usage site, and how to write root-relative `--path` filters.
+
+### Install and platform fixes
+
+- `vera uninstall` reports a Vera launcher it cannot prove it created and leaves it in place, instead of silently ignoring it.
+- Linux release binaries now need only glibc 2.28, so they run on Ubuntu 20.04, Debian 10, RHEL 8, and newer.
+- The musl binary bundles a working C++ runtime, which fixes the v1.4.0 crash on repositories containing `.sql` files.
 
 ### Docs
 
-- Agent-benchmark claims are scoped to what the data supports: only the Qwen arm's context saving is statistically significant; the older kimi/opus lanes are labeled as history.
-- README's agent section now leads with the CLI plus skill as the preferred integration, with the MCP server documented as an optional dropdown.
+- Agent benchmark claims now match what the data supports: only the Qwen backend's context saving is statistically significant, and the two older runs are labeled as history.
+- The README presents the CLI plus the agent skill as the recommended agent setup, with the MCP server as an option.
 
 ## v1.4.0
 
-### Filtered search latency
+### Faster filtered search
 
-- Filter-during-scan is now the default for filtered vector searches. When a query carries path, glob, or language filters, the flat SIMD vector scan skips ineligible chunks before hydration instead of hydrating the whole index and filtering afterward. Measured on the full 1,251-task Semble suite (AMD Ryzen 7 9800X3D, local Potion Code embeddings, three interleaved runs per arm): full-suite p50 dropped from 12.00 ms to 6.35 ms and p95 from 139.12 ms to 65.03 ms, with ranking unchanged (same-head nDCG parity within 0.000005, well inside the ±0.001 noise band). Results are byte-identical to the unfiltered path, verified by the differential exactness suite. Disable or force with `retrieval.vector_filter_during_scan` in config or `VERA_VECTOR_FILTER_DURING_SCAN` in the environment. The evidence chain and decision record: [adr/008-filter-during-scan-default.md](adr/008-filter-during-scan-default.md). The originating investigation closed in [issue #197](https://github.com/VeraTools/Vera/issues/197).
-- The shipped full-suite nDCG is about 0.0011 lower than the investigation-opening state; [ADR 008](adr/008-filter-during-scan-default.md) records the same-head parity result and attribution.
+When a query uses `--path`, a glob, or `--lang`, the vector scan now skips chunks that do not match the filter, instead of loading the whole index and filtering afterward. Across the full 1,251-task Semble suite (Ryzen 7 9800X3D, local Potion Code embeddings, three runs each), median query time dropped from 12.0 ms to 6.35 ms and p95 from 139 ms to 65 ms. Results are identical to the old path. To turn it off, set `retrieval.vector_filter_during_scan` in config or `VERA_VECTOR_FILTER_DURING_SCAN` in the environment. [ADR 008](adr/008-filter-during-scan-default.md) has the measurements.
 
-### Agent-level benchmark
+### Agent benchmark
 
-A four-arm sweep ran GLM-5.3 (high effort) against 10 cross-file Flask questions: local Vera (Potion Code), Vera with the Qwen API embedding and reranker pair, Semble CLI, and a control arm with both tools blocked. All four arms scored a perfect 10/10 from the blind judge, so at this effort budget the questions saturate and quality cannot discriminate. The discriminating measures: Vera arms consumed 27% (local) and 48% (Qwen pair) less prompt context than the control arm, versus 12% for Semble's CLI arm, and agents activated `vera` in 5/10 (local) and 8/10 (Qwen) cells versus 5/10 for Semble. Only the Qwen pair's 48% is statistically significant across the 10 paired questions (paired t = -3.6, Wilcoxon p = 0.037); the local arm's 27% and Semble's 12% are within run-to-run noise at that sample size. Two earlier two-arm lanes on other models at medium effort (see Benchmark history) ran an earlier integration surface and did not reproduce the savings direction, so they are history, not cross-model evidence. Full tables: [benchmarks-history.md](benchmarks-history.md#agent-level-benchmark).
+A new run with GLM-5.3 (high reasoning effort) answered 10 cross-file questions about Flask in four setups: Vera with the local backend, Vera with the Qwen API backend, the Semble CLI, and grep and file reads only. Every setup answered all 10 correctly. Compared with grep and file reads, agents used 27% less context with local Vera, 48% less with the Qwen backend, and 12% less with Semble. With only 10 questions, the 48% reduction is the only statistically significant result. Two earlier runs on other models used an older integration and did not show the same savings, so they are kept as history. Full results: [agent-level benchmark](benchmarks-history.md#agent-level-benchmark).
 
 ## v1.3.1
 
-- `vera grep` now prints a path-filter hint when every `--path` pattern matches nothing and suggests a wildcard directory alternative.
-- `vera setup` on Windows now probes Direct3D 12 to decide whether DirectML can run instead of accepting any non-Basic adapter.
-- `vera uninstall` recognizes the installed shim by matching what the installer wrote and handles non-default `CARGO_HOME`.
+- When every `--path` pattern matches nothing, `vera grep` says so and suggests a wildcard directory form.
+- On Windows, `vera setup` now runs a Direct3D 12 check to decide whether DirectML can work, instead of accepting any non-Basic display adapter.
+- `vera uninstall` recognizes the `vera` command the installers wrote by its exact contents, and handles a non-default `CARGO_HOME`.
 
 ## v1.3.0
 
 ### Search correctness
 
-- Split symbols keep their identity. The chunker stores the bare symbol name plus a distinct part index, so `vera structural definitions` finds split symbols by bare name, `vera references` resolves their single call site, `vera dead-code` deduplicates parts by (symbol, file), exact-name augmentation reaches split chunks, JSON carries bare name with part index and text display keeps `(part N)` with single-sourced formatting.
-- Filtered vector search above 4,096 candidates no longer truncates. Path, language and exact-path filters reach low-ranked island results that previously returned zero hits on the over-cap fixture, with deterministic ordering, batched hydration beyond 999 SQL parameters, and order preservation. Flat scan is now unbounded, the spurious below-cap truncation warning is gone, and vec0 diagnostics fire only when clamping could lose results with an actionable message naming the backend and remedy.
-- The per-query vector-store open is now deduplicated, halving manifest reads per query while preserving stamp-guarded staleness and the LRU-4 memory bound.
+- Long symbols that are split into several chunks keep their identity. `vera structural definitions` finds them by bare name, `vera references` resolves their call sites, and `vera dead-code` lists each symbol once per file. JSON output carries the bare name plus a part index; text output shows `(part N)`.
+- Filtered vector searches no longer stop at 4,096 candidates, so path and language filters find matches that rank far down the list. The incorrect truncation warning is gone. The sqlite-vec fallback (`VERA_VECTOR_SCAN=vec0`) warns only when its limit could actually drop results, and says how to fix it.
+- Each query opens the vector store once instead of twice.
 
-### Indexing progress and reuse
+### Indexing progress
 
-- The embedding progress bar shows open-ended progress with no percentage while parsing is still running, then switches to a fixed total at `ParsingDone` and fills monotonically to 100%. Cancellation and mid-run failures no longer imply success, small single-window repos show a fixed total directly, and non-TTY, `--no-progress` and `--json` modes are unchanged.
-- Evaluation lanes can reuse a current index when identity gates pass. `reuse_index: true` skips indexing only when the on-disk index matches embedding model name (including `model_aliases` and `VERA_EMBEDDING_MODEL_ALIASES`), document prefix, staleness, embedding dimension, content-affecting indexing config, and format version, with correct size accounting and BM25 never reusing.
+- While files are still being parsed, the embedding progress bar shows activity without a percentage. Once parsing finishes it switches to a fixed total and fills to 100%. Cancelled or failed runs no longer look successful. Output with `--no-progress`, `--json`, or no terminal is unchanged.
 
-### Ranking and retrieval
+### Ranking and reranking
 
-- Three ranking signals for issue #196 are now toggleable with mechanism-first rationales: filename-stem boost, definition boost, and recall-pool expansion. Each has a config knob and `VERA_RANKING_*` env override, implemented separately from measurement and proven by dual-set ablations on the 320-task subset and 180-task independent set with full-suite confirmation before any quality claim.
-- Three additional hypotheses (multiplicative path penalties, candidate-pool multiplier, 750-char chunks) were implemented as default-off knobs with index-identity checks. Dual-set ablations on the 320-task subset and 180-task independent set plus full 1,251-task confirmation showed each below the 0.5% full-suite aggregate bar or with regression, so all three stayed default off. Their implementations and controls were removed in v2.0.0; the negative results remain recorded. The chunk arm cites the prior 2048 window and cap negatives and reports its own index-time and storage cost.
-- Reranker protocol now cleanly separates generic (`top_n` / `results`) from Voyage (`top_k` / `data`) with explicit config override over hostname auto-detection, and resilience covers permanent 4xx no-retry, capped `Retry-After` and `X-RateLimit-Reset` waits, cancellation, and graceful degradation.
+- Three ranking signals (filename-stem boost, definition boost, and recall-pool expansion) can each be turned off with a config key (`retrieval.ranking_filename_stem_boost`, `retrieval.ranking_definition_boost`, `retrieval.ranking_recall_pool_expansion`) or a `VERA_RANKING_*` environment variable.
+- Three more ranking and chunking ideas were tested on the full benchmark and stayed off because none reached the 0.5% improvement required to ship. v2.0.0 removed them. The measurements are in [benchmark history](benchmarks-history.md#rejected-ranking-and-chunking-hypotheses-2026-09-01).
+- Reranker requests use the right format for generic endpoints (`top_n` and `results`) and Voyage (`top_k` and `data`). A protocol set in config overrides detection from the hostname. Permanent 4xx errors are not retried, `Retry-After` and `X-RateLimit-Reset` waits are capped, and if reranking fails, search returns unreranked results.
 
-### Setup and first-run
+### Setup
 
-- `vera setup` ships a Qwen (OpenRouter) preset in the interactive `vera setup` flow with single-key hardening, with `installation.md` and `models.md` updated in the same commits. The first-run flow is streamlined to a single key with auto protocol selection, and `README.md` plus both package READMEs move together for user-facing changes.
-- `vera doctor` now tolerates blank env values and probes DirectML more accurately, `vera uninstall` reports shim classification more precisely, and `retrieval.max_output_chars` help correctly shows `0 = unlimited`.
-
-### Evaluation and provenance
-
-Benchmark methodology and provenance are maintained in [Benchmarks](benchmarks.md).
+- The interactive `vera setup` offers a Qwen preset through OpenRouter that needs a single API key and picks the protocol automatically.
+- `vera doctor` accepts intentionally blank environment variables and checks DirectML more accurately. `vera uninstall` reports more precisely what it found. The help for `retrieval.max_output_chars` now says `0` means unlimited.
 
 ### Compatibility
 
-No breaking CLI changes. Existing indexes open and search as before. New indexes carry split-symbol part indices and improved filtered-vector behavior, and the evaluation harness remains backward compatible with old result JSONs.
+No breaking CLI changes. Existing indexes open and search as before. New indexes store split-symbol part numbers.
 
 ## v1.2.0
 
 ### Query latency
 
-- The ranked exact-match augmentation no longer re-scans the chunk metadata for the indexed file list on every query. The list is cached per open index and revalidated with a database-plus-WAL stamp, so edits still invalidate it immediately. On the zig repository (about 336,000 chunks) the augmentation stage dropped from p50 18.4 ms to 1.4 ms and total warm p50 from 31.1 ms to 14.1 ms. Full-suite p95 improved from 73.3 ms to 64.5 ms.
+- Exact-name matching no longer re-reads the list of indexed files on every query. The list is cached per open index and refreshed as soon as the database changes. On the zig repository (about 336,000 chunks), that step dropped from 18.4 ms to 1.4 ms at the median, and total warm query time from 31.1 ms to 14.1 ms. Full-suite p95 improved from 73.3 ms to 64.5 ms.
 
-### Indexing throughput
+### Indexing speed and memory
 
-- Full builds now overlap the parse, embed, and store stages: parsing runs one window ahead on a worker, and a dedicated store thread owns all staging writes behind a bounded channel, so the embedding thread never waits on SQLite or Tantivy. Tantivy writes go through a single bulk writer with one final commit, and fresh vector builds use a two-statement insert path.
-- Full Semble corpus indexing dropped from 213.5 s to about 137 s (-36%); the zig repository alone went from 62.7 s to 36.7 s. Peak RSS stays within the windowed budget (533 MB on zig). Search output over the resulting index was verified byte-identical to the previous pipeline.
+- Full builds parse, embed, and store at the same time instead of in sequence, so embedding never waits on disk writes. Indexing the full Semble corpus dropped from 213.5 s to about 137 s (36% faster); the zig repository alone went from 62.7 s to 36.7 s.
+- Full builds process the repository in bounded windows instead of holding every chunk and embedding in memory. On a 638 MB corpus with 27,252 chunks, peak memory dropped from 2,746 MB to 640 MB. Search results over the new indexes are identical to before.
+- Full builds write to a `.vera.build` staging directory and keep the previous index in `.vera.old` until the swap finishes. If a crash interrupts the swap, the next run restores the previous index and cleans up. File discovery and watchers always skip these two directories.
 
 ### Ranking
 
-- The content-based symbol definition boost no longer treats fixture definitions in test, example, and bench trees as definition sites unless the query asks for them. A `TaskRegistry` lookup previously ranked a test fixture above the real class; the fix keys off directory components and conventional test-file names, so first-class modules like click's `testing.py` keep their boost.
-
-### CI and supply chain
-
-- Pull requests now run a CI workflow: rustfmt, clippy with warnings as errors, the full test suite, cargo deny, cargo machete, and cargo audit, plus a pinned MSRV check job.
-- `cargo deny` now fails on unsound advisories from transitive dependencies, not just workspace crates. The one currently known instance (RUSTSEC-2026-0253, `lru` via tantivy) is documented in `deny.toml` with a reachability analysis and a removal trigger.
-- The declared MSRV is corrected to 1.88: the tree has used let-chains for some time, so 1.86 could never build it. The lockfile pins `ordered-float` 5.0.0 so no locked dependency requires more than 1.88.
-
-### Indexing memory and crash recovery
-
-- Full indexing now processes bounded parse, embed, and store windows instead of holding every chunk and embedding for the repository in memory. On a 638 MB corpus with 27,252 chunks, measured peak RSS dropped from 2,746 MB to 640 MB.
-- Full builds publish through a `.vera.build` staging directory and keep the previous index in `.vera.old` until the swap completes. Startup removes stale staging directories and restores the previous index when a crash interrupted publication.
-- Discovery and file watchers always exclude `.vera.build` and `.vera.old`, even when default excludes are disabled.
-- The windowed build was verified byte-identical to the previous single-pass build on curl: 27,252 chunks and 4,256 file hashes matched exactly.
+- The definition boost no longer treats definitions in test, example, and benchmark directories as the real definition unless the query asks for them. Before, a test fixture could outrank the real class. Modules whose names only look like tests, such as click's `testing.py`, keep their boost.
 
 ### Search and storage
 
-- Filtered BM25 search now hydrates the likely result head one row at a time and pages only the rejection tail. Interleaved A/B probes kept unfiltered p50 at parity while reducing filtered p95 from 55.1 ms to 51.8 ms.
-- `vera stats`, call-graph queries, and update staleness checks can open an existing index read-only with schema validation instead of creating or mutating an index on read paths.
-- Filtered overview statistics use SQL aggregate queries with bounded parameter batches instead of hydrating every row.
-- Vector counts now come from stored chunks, and vector deletions propagate so stale mappings do not inflate index statistics.
+- Filtered keyword searches are faster at the tail: p95 dropped from 55.1 ms to 51.8 ms, with unfiltered searches unchanged.
+- `vera stats`, call-graph queries, and update checks open the index read-only, so reading never creates or changes an index.
+- Filtered `vera overview` statistics are computed in the database instead of loading every row.
+- Vector counts in `vera stats` come from stored chunks, and deleted vectors no longer inflate them.
 
-### Model and API compatibility
+### Models and API
 
-- API embedding providers support document prefixes through `EMBEDDING_DOCUMENT_PREFIX`, with model-ID auto-detection when the variable is unset.
-- The indexed document-prefix identity is stored in index metadata. If the active prefix changes, search falls back to BM25-only and update asks for a re-index instead of mixing vectors from different input formats.
-- ROCm GPU detection accepts both `rocm-smi` CSV layouts, derives free VRAM when only total and used columns exist, uses a stable GPU fingerprint, and handles near-zero free VRAM conservatively.
+- API embedding providers support document prefixes through `EMBEDDING_DOCUMENT_PREFIX`, detected from the model ID when unset.
+- The document prefix used to build an index is stored with it. If the active prefix changes, search falls back to keyword-only results and `vera update` asks for a re-index, rather than mixing vectors built from different inputs.
+- ROCm GPU detection handles both `rocm-smi` output layouts and treats near-zero free VRAM conservatively.
 
-### Parsing, CLI, MCP, and serve fixes
+### Other fixes
 
-- Markdown chunking respects code fences, Python inheritance extraction is more accurate, and archive-backed token scoping no longer leaks across files.
-- `vera doctor` no longer treats intentionally blank environment values as missing, `vera uninstall` reports partial failures accurately, and `vera agent install` refuses to prompt on a non-interactive terminal.
-- Update checks compare full semantic versions, helper output honors `max_output_chars` in JSON and raw modes, and CLI state writes use a plain atomic rename.
-- MCP watchers are scoped per working directory, coalesce repeated updates, and ignore index staging writes. `vera serve` caps inbound frame size.
+- Markdown chunking respects code fences, and Python class inheritance is extracted more accurately.
+- Files with names like `snapshot_writer.rs` are no longer misclassified as archived content and hidden from source-scoped searches.
+- `vera doctor` no longer treats intentionally blank environment variables as missing, `vera uninstall` reports partial failures accurately, and `vera agent install` refuses to prompt without an interactive terminal.
+- Update checks compare full version numbers, and helper output honors `max_output_chars` in JSON and raw modes.
+- MCP file watchers are scoped per working directory, merge repeated updates, and ignore index staging writes. `vera serve` limits the size of incoming requests.
+
+### Building from source
+
+- Building from source needs Rust 1.88 or later. The previously stated minimum, 1.86, could not build the code.
 
 ### Compatibility
 
-Existing v1.1.0 indexes still open. If an index predates an active API document prefix, Vera deliberately disables the vector side for that index until it is rebuilt rather than mixing embedding spaces. There are no breaking CLI changes.
+v1.1.0 indexes still open. If an index was built without the API document prefix that is now active, Vera turns off its vector search until you rebuild it, rather than mixing embeddings. No breaking CLI changes.
 
 ## v1.1.0
 
-### Search quality and model choice
+### Search quality and default model
 
-- The default local embedding model is `minishlab/potion-code-16M-v2`, pinned to revision `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`. It runs locally on CPU without ONNX Runtime or a GPU.
-- The final Semble comparison used the same model, harness, and graded metric contract for both tools. Vera scored `0.8441` nDCG@10 versus Semble's `0.8514` on the full 1,251-task suite, `0.8540` versus `0.8494` on the 320-task subset, and `0.7644` versus `0.7655` on the independent contamination-check set.
-- Deterministic ranking gained file-coherence, keyword-path, content-coverage, definition, and concept-pool signals through dual-set ablations. Signals that did not clear the keep threshold were dropped.
-- Cross-encoder reranking remains opt-in. The dual-set screening found no tested cross-encoder above the no-reranker baseline; `mxbai-rerank-xsmall-v1` is documented as the recommended local override when reranking is needed.
+- The default local embedding model is `minishlab/potion-code-16M-v2`, pinned to revision `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`. It runs on the CPU without ONNX Runtime or a GPU.
+- With the same model, harness, and scoring for both tools, Vera scored 0.8441 nDCG@10 against Semble's 0.8514 on the full 1,251-task suite, 0.8540 against 0.8494 on the 320-task subset, and 0.7644 against 0.7655 on the independent 180-task set.
+- New ranking signals: file coherence, keyword-path matching, content coverage, definitions, and a concept pool. Each was measured with and without on both the 320-task subset and the independent set, and signals that did not clear the bar were dropped.
+- Cross-encoder reranking stays opt-in. No tested cross-encoder beat search without a reranker. If you want local reranking anyway, `mxbai-rerank-xsmall-v1` is the recommended model.
 
-### Query performance
+### Query speed
 
-- Vector search uses an exact flat SIMD scan over memory-mapped vectors, with sqlite-vec retained as the write path and fallback. Query p50 dropped from 15.1 ms to 9.9 ms on the Semble comparison.
-- On the largest tested repository, zig with about 336,000 chunks, the vector stage dropped from roughly 460 ms to 21 ms per query.
-- Search stores are reused across queries, reranker construction is lazy, and local rerank batches are sorted by length to reduce padding waste.
+- Vector search scans memory-mapped vectors directly with SIMD instructions, with sqlite-vec kept for writes and as a fallback. Median query time on the Semble comparison dropped from 15.1 ms to 9.9 ms.
+- On the largest tested repository, zig (about 336,000 chunks), the vector step dropped from about 460 ms to 21 ms per query.
+- Search stores are reused across queries, the reranker loads only when needed, and local rerank batches are sorted by length to reduce wasted work.
 
-### Local model supply chain
+### Model download integrity
 
-- Local model downloads can be pinned to immutable Hugging Face revisions. Built-in assets carry commit pins and compiled-in SHA-256 verification.
-- Custom downloads persist digest sidecars, ORT archives are verified before extraction, and multi-shard ONNX external weights are supported.
-- The local reranker can be replaced through `LOCAL_RERANKER_*` environment variables.
-- Source reads are descriptor-relative through `cap-std`, reducing path traversal risk in repository file handling.
+- Local model downloads can be pinned to fixed Hugging Face revisions. Built-in models carry pinned revisions and SHA-256 checks compiled into the binary.
+- Custom downloads record their checksums, ONNX Runtime archives are verified before extraction, and ONNX models with weights split across several files are supported.
+- The local reranker can be replaced with `LOCAL_RERANKER_*` environment variables.
+- Repository files are opened relative to the repository directory, which reduces the risk of reading files outside it through crafted paths.
 
-### Indexing, parsing, and MCP reliability
+### Indexing, parsing, and MCP
 
-- RST include fan-out is bounded and cached, preventing include graphs from exploding index work.
-- Jina v5 uses last-token pooling plus its Query and Document prefixes. Lua function-valued assignments, Bash case arms, JSX call sites, nested Rust modules, and container-member boundaries are extracted more accurately.
-- Update publication is cancellation-safe, parallelized where safe, and writes freshness metadata only after the stores are rebuilt.
-- MCP multi-query results are fused instead of concatenated, stale-index warnings are surfaced, and the watcher reuses its runtime and provider across debounce cycles.
-- `vera serve` caches one model per slot and keeps in-flight loads alive when the initiating client disconnects.
+- RST include chains are bounded and cached, so large include graphs cannot blow up indexing.
+- Jina v5 uses last-token pooling and its query and document prefixes. Symbol extraction improved for Lua function assignments, Bash case arms, JSX call sites, nested Rust modules, and members of containers.
+- `vera update` can be cancelled safely, runs in parallel where safe, and records freshness only after the stores are rebuilt.
+- MCP multi-query results are merged by rank instead of concatenated, MCP results include stale-index warnings, and the watcher reuses its model between updates.
+- `vera serve` keeps one loaded model per slot and finishes a model load even if the client that requested it disconnects.
 
-### Platform and release engineering
+### Platform
 
-- The dependency stack moved to Tantivy 0.26.1 and MSRV 1.86.
-- Docker publishing covers CPU, CUDA, ROCm, and OpenVINO images. The release workflow packages the same Linux binary into the images instead of compiling a second time.
-- The ROCm base image is mirrored by digest into GHCR, and failed Docker publishes can retry through the runner daemon instead of a persistent builder cache.
+- Upgraded to Tantivy 0.26.1.
+- Docker images are published for CPU, CUDA, ROCm, and OpenVINO, and contain the same Linux binary as the GitHub release.
 
 ## v1.0.1
 
-- `vera index` gained `--no-progress`, and progress output is gated on an interactive stderr.
-- Flag-driven setup works without a terminal and validates blank or partial API credential sets.
-- Agent configuration sync is quiet and preserves user edits outside Vera's managed markers.
-- Upgrade reporting verifies the applied binary version instead of trusting installer exit codes.
-- CoreML reranking uses the supported CPU path instead of the problematic fp16 path.
-- sqlite-vec KNN requests are clamped to the backend limit without silently disabling vector search.
-- Release and Docker workflows moved to Blacksmith runners.
+- `vera index` gained `--no-progress`, and progress output appears only when stderr is a terminal.
+- Flag-driven setup works without a terminal and rejects blank or incomplete API credentials.
+- Agent configuration sync runs quietly and keeps your edits outside Vera's marked sections.
+- `vera upgrade` checks the version of the installed binary instead of trusting the installer's exit code.
+- CoreML reranking uses the CPU path, avoiding a problem with fp16.
+- sqlite-vec searches are clamped to that backend's limit without turning off vector search.
 
 ## v1.0
 
-Vera 1.0 is the feature-complete milestone. The hybrid search pipeline, code-intelligence commands, agent integrations, and local inference backends are all in place, and a wave of community PRs and user-reported fixes hardened them along the way.
+Vera 1.0 brought together the hybrid search pipeline, the code-intelligence commands, agent integrations, and local inference backends. Many fixes along the way came from community pull requests and user reports.
 
 ### Search quality
 
-The v1.0.0 release candidate was measured on the full 1,251-task Semble v0.5.5 snapshot across 63 repositories, using hybrid BM25 and vector retrieval, RRF fusion, and a local ONNX cross-encoder reranker on the `vera-cuda` lane. These numbers use Vera's graded metric contract; [benchmark provenance](benchmarks.md#provenance) explains how it differs from Semble's published metric.
+The v1.0.0 release candidate was measured on the full 1,251-task Semble v0.5.5 suite across 63 repositories, using hybrid keyword and vector search with a local ONNX cross-encoder reranker on a CUDA GPU. The scores use Vera's graded scoring, which differs from Semble's published metric; see [benchmark methodology](benchmarks.md#provenance).
 
 | Metric | v1.0.0-rc |
 |--------|-----------|
-| nDCG@10 | `0.7327` |
-| Recall@1 | `0.5476` |
-| Recall@5 | `0.8144` |
-| Mean search latency | `2421 ms` |
+| nDCG@10 | 0.7327 |
+| Recall@1 | 0.5476 |
+| Recall@5 | 0.8144 |
+| Mean search latency | 2421 ms |
 
-The mean latency is reranker-dominated. The BM25-only scoped-filter reference lane is about `54 ms` p95, so the two numbers describe different pipeline costs.
+The reranker accounts for most of that latency. Keyword-only search with path filters ran at about 54 ms p95 at the time, so the two figures describe different setups.
 
-The gains came from a reworked default retrieval pipeline: BM25 stemming and identifier-aware tokenization, stronger definition ranking, concept-to-filename augmentation, adaptive RRF weighting, file saturation decay, and parallel hybrid retrieval, plus a fix for scoped BM25 candidate starvation. Release ablations then determined which further ranking changes belonged in the default pipeline:
+The gains came from a reworked default pipeline: stemming and identifier-aware tokenization for keyword search, stronger ranking of definitions, matching concepts to file names, adaptive weighting when merging keyword and vector results, a penalty for many results from one file, and running keyword and vector search in parallel. A bug that starved filtered keyword searches of candidates was also fixed. Three further changes were measured before release:
 
-| Change | Release decision |
-|--------|------------------|
-| C1: rerank no-surplus skip | Shipped as a latency guard. Vera skips reranking when the fused pool has no surplus over the requested result limit, with a `-0.0002` nDCG delta and `-2.4 ms` mean latency effect. |
-| C2: rerank path-glob searches | Shipped. Path-scoped searches remain eligible for reranking, improving full-suite nDCG by `+0.0113`. |
-| Structural graph augmentation | Merged as an experimental opt-in under `VERA_GRAPH_AUGMENT=1`. It adds bounded caller and implementation chunks to the rerank pool, gaining `+0.0047` nDCG at roughly `+83%` mean latency. The latency cost outweighed the gain and Recall@5 did not move; the opt-in implementation was removed in v2.0.0. |
+| Change | Decision |
+|--------|----------|
+| Skip reranking when there are no extra candidates beyond the requested result count | Shipped. nDCG@10 changed by -0.0002 and mean latency dropped 2.4 ms. |
+| Rerank searches that use `--path` filters | Shipped. Full-suite nDCG@10 rose by 0.0113. |
+| Add callers and implementations to the rerank pool (structural graph augmentation) | Released as an experimental opt-in (`VERA_GRAPH_AUGMENT=1`). It gained 0.0047 nDCG@10 but added about 83% to mean latency, and Recall@5 did not move. Removed in v2.0.0. |
 
-### Agent-level benchmark
+### Agent benchmark
 
-The benchmark used 10 cross-file Flask questions, fresh agents, and two A/B arms: `with-vera` had a local index and project skill installed, while `control` had the Vera CLI blocked by a shim that exits 127. A judge graded answers blind against a verified answer key.
+Ten cross-file questions about Flask were each answered by a fresh agent, once with Vera installed and once with the Vera command blocked. A judge model graded the answers blind against a verified answer key.
 
-| Tested model | With Vera | Control | Observed result |
-|--------------|-----------|---------|-----------------|
-| `claude-opus-5` | `10.0/10` | `10.0/10` | Quality parity and efficiency parity on this run |
-| `kimi-k3` | `10.0/10` | `9.9/10` | With Vera used 17% fewer input tokens: `230.6k` versus `278.0k` |
+| Model | With Vera | Without Vera | Result |
+|-------|-----------|--------------|--------|
+| `claude-opus-5` | 10.0/10 | 10.0/10 | Same quality and same efficiency |
+| `kimi-k3` | 10.0/10 | 9.9/10 | 17% fewer input tokens with Vera (230.6k vs 278.0k) |
 
-This is a small workload signal, not a general performance claim. The question set, reproduction commands, raw measurements, and limitations are in the [agent benchmark README](../benchmarks/agent-bench/README.md).
+This is a small-sample result, not a general claim. Questions, reproduction steps, raw data, and limits are in the [agent benchmark README](../benchmarks/agent-bench/README.md).
 
 ### Code intelligence and agent workflows
 
-- `vera structural` runs agent-oriented structural search intents: `definitions`, `env`, `routes`, `sql`, and `impls`. Implementations, conformances, inheritance, and Rust trait relations are indexed explicitly, so `impls` answers from the index instead of text matching.
-- Git-aware search scopes restrict queries to a diff: `--changed` for working-tree changes, `--since <rev>` for files changed since a revision, and `--base <rev>` for files changed since the merge base with a revision. They work with `vera search`, `vera grep`, `vera overview`, and `vera references`.
-- `vera explain-path <path>` reports why a file is or is not indexed.
-- Stale-index detection warns when the index no longer matches the working tree, and `vera stats` reports persisted parser-health metrics, so damaged or partial indexes are visible instead of silently degrading results.
-- Repeat `--path` to search several path patterns with OR semantics. Other filters still combine with AND semantics, so `--lang`, `--type`, and `--scope` continue to narrow the combined path match.
-- Function and method symbol types are aliases, so `--type function` and `--type method` can be used interchangeably when selecting callable symbols.
+- `vera structural` answers structural questions: `definitions`, `env`, `routes`, `sql`, and `impls`. Implementations, conformances, inheritance, and Rust trait implementations are stored in the index, so `impls` answers from the index rather than by matching text.
+- Git-aware scopes limit a query to changed files: `--changed` for working-tree changes, `--since <rev>` for files changed since a revision, and `--base <rev>` for files changed since the merge base with a revision. They work with `vera search`, `vera grep`, `vera overview`, and `vera references`.
+- `vera explain-path <path>` explains why a file is or is not indexed.
+- Vera warns when the index no longer matches the working tree, and `vera stats` reports parser health, so a damaged or partial index is visible instead of quietly returning worse results.
+- `--path` can be repeated to match any of several patterns. Other filters still narrow the result: `--lang`, `--type`, and `--scope` apply on top of the combined path match.
+- `--type function` and `--type method` are interchangeable.
 
 ### MCP server
 
-The MCP server grew from four tools to seven: `structural_search`, `find_references`, and `explain_path` join the existing tools, and the search tools gained the same path filters and git scopes as the CLI.
+The MCP server went from four tools to seven: `structural_search`, `find_references`, and `explain_path` were added, and the search tools gained the CLI's path filters and git scopes.
 
 ### Models and local backends
 
-- `vera setup --potion-code` selects the default `minishlab/potion-code-16M-v2` static embedding model. It runs locally on CPU on any supported machine; no GPU or ONNX Runtime needed.
-- Loaded embedding and reranker models are cached and reused across repeated searches, multi-query and deep search, and MCP calls instead of being reloaded per query.
-- Voyage AI rerank endpoints are supported, including the `rerank-2` API format.
-- `VERA_EMBEDDING_MODEL_ALIASES` lets compatible deployment names share an index after the normal dimension check. Alias groups are separated with semicolons and names within a group with commas.
-- Local mode checks ONNX model integrity and gives `vera doctor` and `vera repair` enough information to recover damaged or incomplete assets.
-- CoreML embedding batches scale with available Apple Silicon unified memory.
-- OpenAI-compatible embedding providers can report a token-limit error and have the oversized input truncated and retried automatically.
+- `vera setup --potion-code` selects the `minishlab/potion-code-16M-v2` static embedding model, which runs on any supported machine's CPU with no GPU or ONNX Runtime.
+- Loaded embedding and reranker models are reused across searches, multi-query and deep searches, and MCP calls.
+- Voyage AI rerank endpoints are supported, including the `rerank-2` format.
+- `VERA_EMBEDDING_MODEL_ALIASES` lets different deployment names for the same model share an index (after the usual dimension check). Separate groups with semicolons and names within a group with commas.
+- Local mode checks ONNX model files, and `vera doctor` and `vera repair` can recover damaged or incomplete downloads.
+- CoreML embedding batches scale with the available unified memory on Apple Silicon.
+- When an OpenAI-compatible embedding provider reports that an input is too long, Vera truncates it and retries.
 
 ### HTTP inference server
 
-`vera serve` starts a local HTTP inference server exposing OpenAI-compatible embeddings (`POST /v1/embeddings`), Cohere/Jina-compatible reranking (`POST /v1/rerank`), and a health endpoint, with bearer-token authentication, `--host`, `--port`, and `--idle-timeout` model caching. Requests are cancelled when clients disconnect, empty keys cannot bypass authentication, and internal errors are redacted from responses.
+`vera serve` runs a local HTTP server with OpenAI-compatible embeddings (`POST /v1/embeddings`), Cohere- and Jina-compatible reranking (`POST /v1/rerank`), and a health endpoint. It supports bearer-token authentication, `--host`, `--port`, and `--idle-timeout` for how long models stay loaded. Requests are cancelled when the client disconnects, an empty key cannot bypass authentication, and internal errors are not exposed in responses.
 
 ### Agent configuration sync
 
-`vera agent install` writes the skill files for supported agent clients. Managed synchronization refreshes Vera's own marked sections in agent configuration files (AGENTS.md, CLAUDE.md, and similar) during normal CLI use and preserves user edits outside the managed markers.
+`vera agent install` writes the skill files for supported agent clients. During normal use, Vera keeps its own marked section in files such as `AGENTS.md` and `CLAUDE.md` up to date and leaves your edits outside that section alone.
 
 ### Indexing and updates
 
-- Index and update commands show phase progress for discovery, parsing, and embedding. Use `--no-progress` or `--json` when a machine-readable or quiet interface is needed (`vera update` at v1.0.0; `vera index` gained `--no-progress` in v1.0.1).
-- `vera update . --max-files <N>` bounds the added or modified files processed in one run and reports deferred files for a later update.
-- Indexing and update runs are cancellable: interrupting a run stops in-flight embedding work, and bounded remote calls keep abandoned runs from consuming API quota.
-- Update failure handling is more atomic: a failed update keeps the previously indexed parse and chunk data instead of dropping both.
+- `vera index` and `vera update` show progress for discovery, parsing, and embedding. Use `--no-progress` or `--json` for quiet or machine-readable output (`vera update` had `--no-progress` in v1.0.0; `vera index` gained it in v1.0.1).
+- `vera update . --max-files <N>` limits how many added or modified files one run processes and reports the rest for a later run.
+- Indexing and updates can be interrupted: in-flight embedding work stops, and time limits on remote calls keep an abandoned run from using up API quota.
+- A failed update keeps the previously indexed data for affected files instead of dropping it.
 
 ### Fixes
 
-- Bare directory patterns such as `--path src/app` now match files below that directory instead of returning no results.
-- `--intent` no longer leaks its intent prefix into BM25 field queries, fixing the BM25 error path for intent searches.
-- Files with invalid UTF-8 are read lossily during indexing and retrieval, so they are no longer silently skipped.
-- Unicode file paths are handled correctly by path glob matching and grep byte-to-character offsets.
-- Embedding cache keys include the model namespace, preventing cached vectors from one model from being reused for another model.
-- TypeScript and JavaScript class-method indexing, Java enum-method indexing, TypeScript interface methods, and generic type-relation handling were corrected, improving `references` and structural results.
-- `crossbeam-epoch` was updated to address the tracked RustSec advisory.
-
-Many of these fixes came from community PRs and Discord user reports; thank you to everyone who filed and fixed them.
+- Directory patterns such as `--path src/app` match files below that directory instead of returning nothing.
+- `--intent` no longer leaks into keyword queries, which had caused errors for intent searches.
+- Files with invalid UTF-8 are read with replacement characters instead of being skipped.
+- Unicode file paths work with path globs and with `vera grep` match positions.
+- Cached embeddings are keyed by model, so vectors from one model are never reused for another.
+- Indexing of TypeScript and JavaScript class methods, Java enum methods, TypeScript interface methods, and generic type relations was corrected, which improves `references` and structural results.
+- `crossbeam-epoch` was updated for a RustSec security advisory.
 
 ### Upgrade notes
 
-Source builds enforce the vendored tree-sitter grammar bootstrap step: if the grammar sources are missing, the build fails early and prints the bootstrap command instead of failing later at link time.
+No breaking CLI changes: search, indexing, update, agent, and MCP commands keep their names and flags.
+
+Existing indexes open and search as before, but they keep pre-1.0 search quality until you rebuild them. Run `vera index .` to pick up the new keyword fields, caller and type-relation data, and index-health metrics.
+
+Building from source now requires fetching four grammar sources that are not tracked in git. If they are missing, the build stops early and prints the command to run:
 
 ```bash
 bash scripts/bootstrap-vendored-grammars.sh
 cargo build --release
 ```
 
-The script downloads the four grammar sources that are not tracked in git. Prebuilt package installs do not need this source-build step. See the [installation guide](installation.md) for the complete source-build instructions.
-
-There are no breaking CLI changes in v1.0. Existing search, indexing, update, agent, and MCP workflows keep their command names and flags.
-
-Existing v1.0 indexes open and search as before. Reindex with `vera index .` to pick up the new stemmed and identifier-tokenized BM25 fields, caller and type-relation data, and index-health metrics. Until then, search quality on old indexes stays at pre-v1 levels.
+Prebuilt binaries and package installs do not need this step. Full source-build instructions are in the [installation guide](installation.md).
 
 ### Distribution
 
-Vera is available as prebuilt binaries on GitHub Releases, the `@vera-ai/cli` npm package, the `vera-ai` PyPI package, and Docker images on `ghcr.io/veratools/vera` (`cpu`, `cuda`, `rocm`, and since v1.0.1 `openvino`). See the [installation guide](installation.md) and the [Docker guide](docker.md).
+Vera is available as prebuilt binaries on GitHub Releases, the `@vera-ai/cli` npm package, the `vera-ai` PyPI package, and Docker images at `ghcr.io/veratools/vera` (`cpu`, `cuda`, `rocm`, and, since v1.0.1, `openvino`). See the [installation guide](installation.md) and the [Docker guide](docker.md).

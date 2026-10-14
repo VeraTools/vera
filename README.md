@@ -9,167 +9,162 @@
 [![npm](https://img.shields.io/npm/v/@vera-ai/cli)](https://www.npmjs.com/package/@vera-ai/cli)
 [![PyPI](https://img.shields.io/pypi/v/vera-ai)](https://pypi.org/project/vera-ai/)
 [![GitHub release](https://img.shields.io/github/v/release/VeraTools/Vera?include_prereleases&sort=semver)](https://github.com/VeraTools/Vera/releases)
-[![Languages](https://img.shields.io/badge/languages-65%2B-green.svg)](docs/supported-languages.md)
+[![Languages](https://img.shields.io/badge/languages-65-green.svg)](docs/supported-languages.md)
 
-[Docs](docs/README.md)
-·
-[Install Guide](docs/installation.md)
-·
-[Features](docs/features.md)
-·
-[Query Guide](docs/query-guide.md)
-·
-[Benchmarks](docs/benchmarks.md)
-·
-[How It Works](docs/how-it-works.md)
-·
-[Models](docs/models.md)
-·
-[Supported Languages](docs/supported-languages.md)
+**Local code search for AI coding agents and the developers who use them.**
 
-**Local, symbol-aware code search for developers and AI agents.**
-
-Describe the behavior you need, then get ranked code chunks with file paths, line ranges, and symbols. Vera combines keyword and vector search across 65 languages, with optional reranking. The index stays on your machine.
+[Install](docs/installation.md) · [Features](docs/features.md) · [Query guide](docs/query-guide.md) · [Benchmarks](docs/benchmarks.md) · [How it works](docs/how-it-works.md) · [All docs](docs/README.md)
 
 <sub>**V**ector **E**nhanced **R**eranking **A**gent</sub>
 
 </div>
 
+Describe what the code does, and Vera finds it. Ask for "where expired sessions are cleaned up" and you get back the functions and classes that do it, ranked, with file paths and line ranges. Exact names work too.
+
+Vera is a single native binary. The index lives in your project, search runs on your machine, and the default model runs on any CPU with no GPU, API key, or server to manage.
+
 ![vera search demo](docs/assets/vera-demo.gif)
 
-## Quick Start
-
-**1. Install**
+## Quick start
 
 ```bash
-bunx @vera-ai/cli install   # or: npx -y @vera-ai/cli install / uvx vera-ai install
-```
+# 1. Install (pick one: bunx, npx, or uvx)
+bunx @vera-ai/cli install        # or: npx -y @vera-ai/cli install / uvx vera-ai install
 
-**2. Set up and index**
-
-Use the default local CPU model. Setup downloads its assets, then indexes the current project:
-
-```bash
+# 2. Download the default local model and index the current project
 vera setup --potion-code --index .
+
+# 3. Search
+vera search "where expired sessions are cleaned up"
 ```
 
-Or run `vera setup` for the full wizard: choose a backend, optionally install agent skills, and optionally index. Local CPU is first and selected by default. Indexing defaults to Yes for local backends and No for API mode.
+Run `vera setup` with no flags in a terminal for a guided setup that can also install the agent skill. Add `.vera/` to your `.gitignore`. The [installation guide](docs/installation.md) covers GPU backends, API mode, prebuilt binaries, and Docker.
 
-For API mode, run `vera setup --api --index .`. Qwen/OpenRouter is the recommended API preset and uses one shared key for embeddings and reranking (paid usage). See [Models](docs/models.md) for the measured tradeoffs and other API or ONNX choices.
+## What Vera does well
 
-**3. Search**
+**It finds code by behavior and by name.** Every query runs keyword search (BM25) and embedding search side by side, merges the two lists, then applies code-aware ranking that prefers definitions over passing mentions and source files over tests and docs. Searching `parse_config` finds that function; searching "load settings from environment variables" finds it too.
+
+**Results are whole functions, not line fragments.** Vera parses files with tree-sitter and indexes functions, classes, methods, structs, and other symbols as separate chunks. 54 of the [65 supported languages](docs/supported-languages.md) get symbol-level chunks; config files, docs, and the rest are split by section, whole file, or line windows. An agent reads the relevant symbol instead of opening the whole file.
+
+**It is fast on an ordinary CPU.** On a desktop CPU (Ryzen 7 9800X3D), Vera indexes its own repository (438 files, about 7,900 chunks) in under a second, and a search from the command line returns in about 0.13 seconds, process startup included. `vera update .` and `vera watch .` re-index only the files that changed.
+
+**Its search quality holds up against the best local tools.** On Semble's 1,251-task code search benchmark, run with the same embedding model, Vera scores within 1% of Semble on nDCG@10 and slightly ahead on Recall@5, with an index about a seventh the size. Details are [below](#benchmarks).
+
+**It does more than search.** The same index answers structural questions: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. You can scope any search to files changed in your working tree or branch.
+
+**It is built for agents.** `vera agent install` adds a Vera skill to more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, and Copilot. Results come back as compact Markdown code blocks with paths and line ranges, which agents read well. An MCP server is included for clients that prefer it.
+
+## Using it with an AI agent
+
+The recommended setup is the CLI plus the Vera skill. The skill tells the agent when to reach for `vera search`, `vera references`, or plain `grep`, and how to write queries that work.
 
 ```bash
-vera search "authentication logic"
+vera agent install                  # interactive: pick agents and global or project scope
+vera agent install --client all     # every supported agent, global scope
 ```
 
-Add `.vera/` to `.gitignore`; the project index can be large. An interactive search offers to create a missing index. JSON and non-interactive searches return an error so scripts can handle it.
-
-## What Sets Vera Apart
-
-| Capability | What it gives you |
-|---|---|
-| **Search by behavior or identifier** | Hybrid keyword and vector retrieval finds both exact names and conceptual matches. |
-| **Relevant code chunks** | Symbol-bounded chunks with paths and line ranges let agents read relevant code without loading every matching file. |
-| **Local CPU default** | Potion Code runs on CPU. After the model download, local indexing and search work offline. |
-| **Incremental indexes** | `vera update .` and watch mode reuse the index and re-embed changed files. |
-| **Code navigation** | Structural queries, heuristic references and dead-code candidates, and project overviews use the same index. |
-
-Vera started as a fork of Pampax and was rebuilt around measured retrieval choices. The [ADRs](docs/adr/000-decision-summary.md) record those decisions; the [feature guide](docs/features.md) covers the command surface.
-
-## Choosing a Backend
-
-Start with local Potion Code on CPU. API mode is the second option when you want a remote embedding or reranking service; Qwen/OpenRouter is recommended within the API presets. Jina ONNX backends support optional local GPU inference.
-
-Indexes live in `.vera/` per project. Configuration and downloaded assets use the Vera data directory. See [Installation](docs/installation.md) for supported platforms and setup, and [Models](docs/models.md) for backend choices and dependencies.
-
-## Privacy
-
-Local inference keeps code and query text on your machine. Initial model downloads need network access. API mode sends chunk text and queries to the configured model endpoints. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.
-
-Vera complements ripgrep: use `rg` when you know the exact string, and Vera when you know what the code does but not what it is called.
-
-## Use with AI Agents
-
-The preferred agent integration is the CLI plus the Vera skill: `vera agent install` installs it for supported coding agents and can add a short usage snippet to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, or editor rules file.
-
-```bash
-vera agent install
-vera agent install --client all
-```
-
-If you use the [skills CLI](https://github.com/vercel-labs/skills), you can install Vera there too:
-
-```bash
-npx skills add VeraTools/Vera
-```
+The interactive installer can also add a short Vera section to your project's `AGENTS.md`, `CLAUDE.md`, or editor rules file. If you use the [skills CLI](https://github.com/vercel-labs/skills), `npx skills add VeraTools/Vera` works too.
 
 <details>
-<summary><strong>Optional: MCP server</strong> (for MCP-first clients or teams standardizing on MCP)</summary>
+<summary>MCP server</summary>
 
-Vera also ships an MCP server: `vera mcp`. Setup for each client and the full tool list: [MCP integration](docs/mcp.md).
+`vera mcp` runs an MCP server over stdio with seven tools: `search_code`, `get_overview`, `regex_search`, `structural_search`, `find_references`, `explain_path`, and `get_stats`. It indexes the project on first use and keeps the index current while it runs.
 
 ```bash
-claude mcp add vera -- vera mcp      # Claude Code
+claude mcp add vera -- vera mcp                               # Claude Code
 ```
-
-Cursor, Windsurf, and generic MCP clients:
 
 ```json
-{"mcpServers":{"vera":{"command":"vera","args":["mcp"]}}}
+{"mcpServers": {"vera": {"command": "vera", "args": ["mcp"]}}}
 ```
 
-Vera exposes `search_code`, `get_stats`, `get_overview`, `regex_search`, `structural_search`, `find_references`, and `explain_path`. Client-specific setup and tool details: [MCP integration](docs/mcp.md).
+Setup for Codex, VS Code, and other clients is in the [MCP guide](docs/mcp.md).
 
 </details>
 
-## Usage
+## Common commands
 
-### Search Patterns
+| Task | Command |
+|---|---|
+| Search by behavior | `vera search "retry failed uploads with backoff"` |
+| Try several phrasings at once | `vera search "OAuth token refresh" "JWT expiry" "auth middleware"` |
+| Narrow the results | `vera search "error handling" --lang rust --path "src/**" --type function` |
+| Search only files you changed | `vera search "token validation" --changed` (or `--base main`) |
+| Find a definition | `vera structural definitions parse_config` |
+| Find callers, or what a function calls | `vera references parse_config` / `vera references parse_config --callees` |
+| List routes, env reads, or implementations | `vera structural routes` / `vera structural env` / `vera structural impls Loader` |
+| Exact text or regex in indexed files | `vera grep "TODO\|FIXME"` |
+| Get a project overview | `vera overview` |
+| Keep the index current | `vera update .` or `vera watch .` |
+| Find out why a file is not indexed | `vera explain-path path/to/file` |
+| Check your setup | `vera doctor` |
 
-```bash
-vera search "error handling" --lang rust
-vera search "routes" --path "src/**/*.ts" --path "tests/**/*.ts"
-vera search "OAuth token refresh" "JWT expiry handling" "auth middleware"
-vera search "config" --intent "find where database connection strings are loaded"
-vera search "token validation" --changed
-vera structural definitions parse_config
-vera references parse_config
-vera update .
+Results come back as Markdown code blocks, one per result, labeled with the path, line range, and symbol. Here is a search over the Flask repository with `--compact`, which keeps signatures and drops bodies:
+
+````text
+$ vera search "load config from environment variables" --compact --limit 2
+```src/flask/config.py:50-247 class:Config (part 1)
+class Config(dict):  # type: ignore[type-arg] ...
 ```
 
-Repeat `--path` to match any of several patterns. See the [query guide](docs/query-guide.md) for filters, deep search, and structural queries; `vera --help` lists commands.
-
-### Output
-
-Defaults to Markdown codeblocks:
-
+```src/flask/cli.py:698-763 function:load_dotenv
+def load_dotenv(
+    path: str | os.PathLike[str] | None = None, load_defaults: bool = True
+) -> bool: ...
+```
 ````
-```src/auth/login.rs:42-68 function:authenticate
-pub fn authenticate(credentials: &Credentials) -> Result<Token> { ... }
-```
-````
 
-Use `--json` for compact JSON. `--raw` works with `vera search`, `vera grep`, and `vera references`; `--timing` works with `vera search` and `vera grep`. You can place them before or after the subcommand (for example, `vera --timing search "auth"` or `vera references parse_config --raw`).
+Without `--compact` you get the full code of each result. Use `--json` for machine-readable output. The [query guide](docs/query-guide.md) explains how to write queries that land, and the [feature guide](docs/features.md) covers every command.
 
-### Excluding Files
+## Choosing a model backend
 
-Vera respects `.gitignore` by default. Create a `.veraignore` file (gitignore syntax) for more control, or use `--exclude` flags. Details: [docs/features.md](docs/features.md#flexible-exclusions).
+Indexing, storage, and search always run locally. The backend only decides where the embedding model runs.
 
-If a file is missing from the index and you need the exact reason, run:
+| Backend | Setup | When to use it |
+|---|---|---|
+| Potion Code on CPU (default) | `vera setup --potion-code` | Almost everyone. Small, fast, works offline after a one-time download. |
+| Jina ONNX on GPU | `vera setup --onnx-jina-cuda` (also ROCm, CoreML, DirectML, OpenVINO) | You have a supported GPU and want a transformer embedding model locally. |
+| API | `vera setup --api` | You want hosted models. Qwen3 embeddings plus reranking through OpenRouter scored highest in our model screening. Any OpenAI-compatible endpoint works, including a local llama.cpp server. |
 
-```bash
-vera explain-path path/to/file
-```
+See [models and backends](docs/models.md) for measurements and setup details.
+
+## Privacy
+
+With a local backend, your code and queries stay on your machine; only the first model download needs the network. Code or queries go elsewhere only to endpoints you configure: API mode sends chunk text and queries to the embedding endpoint, an API reranker receives queries and candidate chunks (even with a local backend), and `--deep` with a completion endpoint sends the query to it. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
 
 ## Benchmarks
 
-The [benchmark report](docs/benchmarks.md#current-results) compares Vera and Semble on the full 1,251-task suite, with dated hardware, model, and scoring details. The [benchmark history](docs/benchmarks-history.md#agent-level-benchmark) includes the agent-context experiment and its small-sample limits. Token savings depend on the query, repository, and agent workflow.
+The main benchmark is [Semble](https://github.com/MinishLab/semble)'s task set: 1,251 code search queries across 63 open-source repositories, each with known correct answers. Semble is a popular local code search tool from MinishLab, the team behind the Potion embedding model. Both tools below used that same `potion-code-16M-v2` model and the same tasks and nDCG@10 formula; see the [benchmark page](docs/benchmarks.md#scoring) for how answers were matched.
 
-## Status and Community
+| Tool | nDCG@10 | Recall@1 | Recall@5 | Recall@10 | Index size |
+|---|---:|---:|---:|---:|---:|
+| Vera 2.0.1 | 0.844 | 0.671 | **0.920** | 0.950 | **4.7 GB** |
+| Semble 0.5.5 | **0.851** | **0.675** | 0.918 | **0.966** | 32 GB |
 
-V2 removes rejected experiment controls while preserving ordinary default indexes and search-result fields. See [migration guidance](docs/migration-v2.md) and [What's New](docs/whats-new.md). Bug reports and feature requests go to [Issues](https://github.com/VeraTools/Vera/issues).
+Vera also scored slightly higher than Semble on the 320-task tuning subset (0.854 vs 0.849) and on an independent set of 180 tasks from 10 repositories outside Semble's benchmark (0.767 vs 0.766). That second set exists to check that neither tool, nor the shared embedding model, was tuned to Semble's own tasks.
 
-## Contributing
+In a small agent experiment (10 code-tracing questions about Flask, each answered by a fresh coding agent), every setup answered every question correctly. Agents with Vera used 27% less context than agents limited to grep and file reads, and 48% less with the Qwen API backend; agents with Semble used 12% less. With only 10 questions, the 48% result is the only one that is statistically significant.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Methodology, hardware, latency numbers, and the full history are on the [benchmarks page](docs/benchmarks.md).
+
+## How it works
+
+```text
+query ─┬─ BM25 keyword search (Tantivy) ─┐
+       └─ vector search (embeddings) ────┴─ rank fusion ─ optional reranker ─ code-aware ranking ─ results
+```
+
+Files are parsed with tree-sitter into symbol-sized chunks. Each chunk is indexed twice: as text for keyword search and as an embedding for semantic search. Everything is stored in `.vera/` inside your project (SQLite, a Tantivy index, and a flat vector file), so there is no database or background service to run. [How Vera works](docs/how-it-works.md) has the details, and the [architecture decisions](docs/adr/000-decision-summary.md) record why each piece was chosen.
+
+## Background
+
+Before Vera, I maintained Pampax, my fork of an existing code search tool called PAMPA. I fixed and improved a lot of it, but kept running into limits in its foundation, so I started over. Vera is written from scratch in Rust, and its design choices (storage, chunking, ranking, default model) were each picked by measuring the alternatives. The experiments that did not pan out are documented alongside the ones that did.
+
+## Community and support
+
+- Questions, bug reports, and feature requests: [GitHub Issues](https://github.com/VeraTools/Vera/issues)
+- Chat and help: [Discord](https://discord.gg/rXNQXCTWDt)
+- Release notes: [What's new](docs/whats-new.md). Upgrading from 1.x: [v2 migration](docs/migration-v2.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+Vera is MIT licensed.

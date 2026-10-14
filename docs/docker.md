@@ -1,102 +1,111 @@
 # Docker
 
-Vera provides Docker images for running the MCP server (or any Vera command) in a container. Four variants are available:
+Vera publishes images that run the MCP server, or any other Vera command, in a container. All images are linux/amd64.
 
-| Image | Base | Size | Use case |
-|-------|------|------|----------|
-| `vera:cpu` | `debian:trixie-slim` | ~150 MB | Potion Code on CPU |
-| `vera:cuda` | `nvidia/cuda:13.1.1-runtime` | ~4 GB | NVIDIA GPU acceleration |
-| `vera:rocm` | `rocm/dev-ubuntu-24.04:6.4.4` | ~8 GB | AMD GPU acceleration |
-| `vera:openvino` | `ubuntu:24.04` + OpenVINO | ~1 GB | Intel GPU/iGPU acceleration |
+| Image | Base | Backend | For |
+|---|---|---|---|
+| `ghcr.io/veratools/vera:cpu` | `debian:trixie-slim` | Potion Code | Any machine |
+| `ghcr.io/veratools/vera:cuda` | `nvidia/cuda:13.1.1-runtime` | Jina ONNX, CUDA | NVIDIA GPUs |
+| `ghcr.io/veratools/vera:rocm` | `rocm/dev-ubuntu-24.04:6.4.4` | Jina ONNX, ROCm | AMD GPUs |
+| `ghcr.io/veratools/vera:openvino` | `ubuntu:24.04` with OpenVINO | Jina ONNX, OpenVINO | Intel GPUs and iGPUs |
 
-The CPU image selects Potion Code. GPU variants select the matching Jina ONNX backend. Each image sets `VERA_BACKEND`, which wins over a backend saved with `vera setup`; pass `-e VERA_BACKEND=<backend>` to choose another.
+The `cpu`, `cuda`, `rocm`, and `openvino` tags follow the latest stable release. For repeatable deployments, pin a version tag such as `2.1.3-cpu`.
 
-Indexes built with a pre-v2 `cpu` image need a rebuild; see [v2 migration](migration-v2.md#docker-images).
+Each image sets `VERA_BACKEND`, which takes priority over a backend saved with `vera setup`. Pass `-e VERA_BACKEND=<backend>` to use a different one. If you have indexes built with a `cpu` image from before v2, rebuild them; see [v2 migration](migration-v2.md#docker-images).
 
-Mutable `cpu`, `cuda`, `rocm`, and `openvino` tags follow the newest stable release; pin a version such as `2.0.0-cpu` for repeatable deployments. Published version tags are preserved on retries.
+## Run the MCP server
 
-## Running the MCP server
+The container starts `vera mcp` by default. Mount your project at `/workspace` and make it the working directory with `-w`. Keep `-i` so the server can read from stdin.
 
-The primary use case is running Vera's MCP server as a background process for your editor or AI agent.
-
-**CPU:**
+CPU:
 
 ```bash
-docker run --rm -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu
+docker run --rm -i -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:cpu
 ```
 
-**CUDA (NVIDIA):**
+NVIDIA:
 
 ```bash
-docker run --rm --gpus all -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:cuda
+docker run --rm -i --gpus all -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:cuda
 ```
 
-**ROCm (AMD):**
+AMD:
 
 ```bash
-docker run --rm --device=/dev/kfd --device=/dev/dri -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:rocm
+docker run --rm -i --device=/dev/kfd --device=/dev/dri -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:rocm
 ```
 
-**OpenVINO (Intel):**
+Intel:
 
 ```bash
-docker run --rm --device=/dev/dri -i -v "$(pwd):/workspace" ghcr.io/veratools/vera:openvino
+docker run --rm -i --device=/dev/dri -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:openvino
 ```
 
-The container starts `vera mcp` by default (JSON-RPC over stdio). The `-i` flag keeps stdin open for communication. The volume mount gives Vera access to your project files.
+## Configure an MCP client
 
-## MCP client configuration
-
-Point your MCP client (Claude Desktop, Cursor, etc.) at the Docker container:
+Point the client at `docker` instead of `vera`:
 
 ```json
 {
   "mcpServers": {
     "vera": {
       "command": "docker",
-      "args": ["run", "--rm", "-i", "-v", "/path/to/project:/workspace", "ghcr.io/veratools/vera:cpu"]
+      "args": ["run", "--rm", "-i", "-v", "/path/to/project:/workspace", "-w", "/workspace", "ghcr.io/veratools/vera:cpu"]
     }
   }
 }
 ```
 
-For GPU variants, add the appropriate device flags to `args`:
+For a GPU image, add its device flags to `args`, for example:
 
 ```json
 {
-  "args": ["run", "--rm", "--gpus", "all", "-i", "-v", "/path/to/project:/workspace", "ghcr.io/veratools/vera:cuda"]
+  "mcpServers": {
+    "vera": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i", "--gpus", "all", "-v", "/path/to/project:/workspace", "-w", "/workspace", "ghcr.io/veratools/vera:cuda"]
+    }
+  }
 }
 ```
 
-## First run
+## Keep downloaded models between runs
 
-The CPU image downloads Potion Code assets on first use. GPU images download their ONNX models and runtime. A fresh container stores these in `/root/.local/share/vera/`. To reuse downloads across restarts, mount a volume:
+On first use, the CPU image downloads Potion Code, and the GPU images download their ONNX models and runtime. They are stored in `/root/.local/share/vera/` inside the container. Mount a volume there so later runs reuse them:
 
 ```bash
 docker run --rm -i \
-  -v "$(pwd):/workspace" \
+  -v "$(pwd):/workspace" -w /workspace \
   -v vera-models:/root/.local/share/vera \
   ghcr.io/veratools/vera:cpu
 ```
 
-Subsequent starts reuse the cached assets. Existing `/root/.vera/` installs remain supported; keep their volume mounted there, or set `VERA_HOME` to an explicit data path.
+Older setups that mount a volume at `/root/.vera/` still work. You can also set `VERA_HOME` to choose the data path.
 
-## Running other commands
+## Run other commands
 
-Override the default `mcp` command to run any Vera command:
+Pass a command after the image name to replace `mcp`:
 
 ```bash
-docker run --rm -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu index /workspace
-docker run --rm -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu search "authentication logic"
-docker run --rm -v "$(pwd):/workspace" ghcr.io/veratools/vera:cpu stats
+docker run --rm -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:cpu index .
+docker run --rm -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:cpu search "authentication logic"
+docker run --rm -v "$(pwd):/workspace" -w /workspace ghcr.io/veratools/vera:cpu stats
 ```
 
-## Building locally
+## GPU requirements
 
-The Dockerfiles package a prebuilt binary, so build it first. The binary must be a Linux build matching the image architecture (the published images are linux/amd64), so run the build on a Linux x86_64 machine, or on macOS/Windows inside a Linux container, e.g. `docker run --rm -v "$(pwd):/src" -w /src rust:1.88 bash -c './scripts/bootstrap-vendored-grammars.sh && cargo build --locked --release -p vera-cli'`. From the repo root:
+| Image | Host requirements |
+|---|---|
+| `cuda` | NVIDIA driver that supports CUDA 13.1, and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| `rocm` | AMD GPU with ROCm 6 drivers; `/dev/kfd` and `/dev/dri` accessible |
+| `openvino` | Intel GPU or iGPU with the Intel compute runtime; `/dev/dri` accessible; Linux x86_64 only |
+
+## Build the images yourself
+
+The Dockerfiles package a prebuilt binary, so build Vera first. It must be a Linux x86_64 build. From the repository root on a Linux x86_64 machine:
 
 ```bash
-./scripts/bootstrap-vendored-grammars.sh  # downloads grammars required by vera-core's build script
+./scripts/bootstrap-vendored-grammars.sh
 cargo build --locked --release -p vera-cli
 mkdir -p dist && cp target/release/vera dist/
 
@@ -106,10 +115,11 @@ docker build -f docker/Dockerfile.rocm -t vera:rocm .
 docker build -f docker/Dockerfile.openvino -t vera:openvino .
 ```
 
-## GPU requirements
+The bootstrap script downloads grammar sources that the build needs. On macOS or Windows, run the build inside a Linux container:
 
-**CUDA:** Requires NVIDIA drivers with CUDA 12+ support and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+```bash
+docker run --rm --platform linux/amd64 -v "$(pwd):/src" -w /src rust:1.88 \
+  bash -c './scripts/bootstrap-vendored-grammars.sh && cargo build --locked --release -p vera-cli && mkdir -p dist && cp target/release/vera dist/'
+```
 
-**ROCm:** Requires AMD GPU with ROCm 6.x drivers. The `/dev/kfd` and `/dev/dri` devices must be accessible.
-
-**OpenVINO:** Requires Intel GPU/iGPU with the Intel compute runtime installed. The `/dev/dri` device must be accessible. Linux x86_64 only.
+The ROCm Dockerfile pulls its base from Vera's GitHub Container Registry mirror, which can require `docker login ghcr.io`.

@@ -1,10 +1,27 @@
 # Configuration
 
-`vera config show` prints the saved configuration. Use `vera config get <key>` and `vera config set <key> <value>` for individual saved values. Runtime precedence is valid environment variable > saved config > built-in default. Environment values are never saved to `config.json`; invalid overrides keep the saved value or default. Aliases are listed together below.
+Vera reads settings from three places, in this order of priority:
+
+1. Environment variables, when the value is valid.
+2. Saved config in `config.json`, changed with `vera config set`.
+3. Built-in defaults.
+
+```bash
+vera config show                              # all saved values
+vera config get retrieval.default_limit       # one value
+vera config set retrieval.default_limit 10    # save a value
+```
+
+Environment variables are never written to `config.json`. An invalid environment value is ignored, and the saved value or default applies. Where a key has aliases, they are listed in parentheses after it.
 
 ## Backend/API
 
-Backend selection adjusts effective embedding parameters: Potion Code uses a batch ceiling of 1024 and one worker; ONNX CPU uses 4 and one worker; GPU backends use batches of 16, one worker, and shrink the batch to 4 below 3 GB of free GPU memory and to 1 below 512 MB; `embedding.low_vram` always uses 1. Every backend is also capped by `embedding.max_in_flight_inputs`, so Potion Code embeds at most 256 inputs at a time by default. Potion Code stores at most 256 vector dimensions. Saved values shown by `vera config show` can differ from these runtime limits.
+The backend adjusts some embedding settings at runtime, so the effective values can differ from what `vera config show` prints:
+
+- Potion Code sends batches of up to 1024 inputs from one worker and stores at most 256 vector dimensions.
+- Jina ONNX on CPU uses batches of 4 from one worker.
+- GPU backends use batches of 16 from one worker, dropping to 4 below 3 GB of free GPU memory and to 1 below 512 MB. `embedding.low_vram` always uses 1.
+- Every backend is also capped by `embedding.max_in_flight_inputs`, so by default no more than 256 inputs are embedded at once.
 
 ### `vera config` keys
 

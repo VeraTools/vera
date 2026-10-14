@@ -1,172 +1,134 @@
-# Query Guide
+# Query guide
 
-## Writing Good Queries
+Vera works best when you describe what the code does. This page covers how to phrase queries, how to narrow results, and which command fits which question. The full list of flags is in [features](features.md).
 
-Vera works best with queries that describe what the code *does*, not just a keyword. Think of it like asking "find me the code that handles X" rather than searching for a variable name.
+## Pick the right command
 
-**Strong queries:**
+| You want to know | Use |
+|---|---|
+| How or where something works | `vera search "how expired sessions are cleaned up"` |
+| Where a named symbol is defined | `vera structural definitions SessionStore` |
+| Who calls a function, or what it calls | `vera references cleanup_sessions` / `--callees` |
+| Every route, env var read, or implementation | `vera structural routes` / `env` / `impls <symbol>` |
+| An exact string or regex | `vera grep "SESSION_TTL"` |
+| What a codebase looks like overall | `vera overview` |
+| Something in the docs | `vera search "deploying behind a proxy" --scope docs` |
+
+## Write queries that describe behavior
+
+Good queries say what the code does:
 
 ```bash
-vera search "authentication middleware"
 vera search "JWT token validation"
-vera search "request rate limiting" --lang rust
+vera search "retry failed requests with backoff"
 vera search "database connection pooling"
-vera search "routes" --path "src/**/*.ts" --path "tests/**/*.ts"
-vera search "handler" --type function --limit 5
+vera search "where uploaded files are written to disk"
 ```
 
-**Weak queries:**
+Single generic words match too much to rank well:
 
 ```bash
-vera search "code"
+vera search "auth"     # which part of auth?
 vera search "utils"
-vera search "file"
+vera search "handler"
 ```
 
-Single generic words return too many results. Be specific about the behavior or concept you're looking for.
-
-## Narrowing Results
-
-If your first search returns too much, add filters one at a time:
-
-- `--lang rust`: restrict to a specific language
-- `--path "src/**/*.ts"`: restrict to a file path pattern; repeat it to OR several patterns
-- `--type function`: restrict to functions and methods (function and method are aliases in both directions)
-- `--scope docs`: restrict to docs and markdown
-- `--scope runtime`: restrict to extracted runtime trees and bundled app code
-- `--include-generated`: include dist/minified/generated artifacts
-- `--limit 5`: return fewer results
-
-These stack, so you can combine them:
+If you know the name, search for it. Keyword search handles exact identifiers, file names, and config keys directly:
 
 ```bash
-vera search "error handling" --lang rust --type function --limit 5
-vera search "mod loader" --scope runtime --include-generated
-```
-
-## Git-Scoped Search
-
-When the task is limited to your working tree or a PR diff, scope the search before broadening the query:
-
-```bash
-vera search "token validation" --changed
-vera grep "TODO|FIXME" --changed
-vera overview --base origin/main
-```
-
-Use:
-
-- `--changed` for modified, staged, and untracked files
-- `--since <rev>` for changes since a specific revision
-- `--base <rev>` for changes since `merge-base(HEAD, <rev>)`
-
-## Multi-Query Search
-
-If one phrasing is too narrow, pass 2-3 varied queries in one call:
-
-```bash
-vera search "OAuth token refresh" "JWT expiry handling" "auth middleware"
-```
-
-Vera runs each query, then merges the results with reciprocal rank fusion. Downstream ranking signals can reorder the fused candidates (definition chunks get a boost by default).
-
-## Intent
-
-If the query is short but your goal is specific, add `--intent`:
-
-```bash
-vera search "config" --intent "find where database connection strings are loaded from environment variables"
-```
-
-This works best when the query alone is too ambiguous to steer ranking.
-
-## Exact Symbol Names
-
-If you already know the symbol name, use the structural definition lookup. Search can also find mentions or related implementations:
-
-```bash
-vera structural definitions parse_config
 vera search "AuthMiddleware"
+vera search "max_connections"
 ```
 
-Vera's hybrid pipeline handles both natural language intent and exact symbol lookups.
+For a definition, `vera structural definitions AuthMiddleware` is more direct: it returns the declaration instead of every place the name appears.
 
-## Default Search Bias
+## When the first search misses
 
-Vera favors source files by default. Docs, archives, runtime extracts, and generated files are still available, but they are no longer treated as equally good defaults for everyday coding tasks. Definition chunks get a ranking boost by default (`retrieval.ranking_definition_boost`).
+Try these in order:
 
-Use `--scope docs` when you are reading guides or ADRs. Use `--scope runtime` when you're debugging extracted app bundles or decompiled runtime code. Add `--include-generated` when you intentionally want minified or generated files in the result set.
+1. **Rephrase in two or three ways at once.** Vera merges the results, so one call covers several angles:
 
-## When to Use `vera grep` vs `rg`
+   ```bash
+   vera search "OAuth token refresh" "JWT expiry handling" "auth middleware"
+   ```
 
-Use `vera grep` when you want exact text or regex matches limited to indexed files:
+2. **Add your goal with `--intent`** when the query is short or ambiguous:
 
-- `vera grep "EMBEDDING_MODEL_BASE_URL"`
-- `vera grep "TODO\(" -i`
-- `vera grep "queryClient|invalidateQueries" --path "frontend/src/**"`
+   ```bash
+   vera search "config" --intent "find where database connection strings are loaded from environment variables"
+   ```
 
-Vera uses Rust regex syntax. Use `|` for alternation. `\|` matches a literal pipe. When every `--path` pattern matches zero-indexed files, `vera grep` prints a hint to stderr suggesting a wildcard directory alternative (for example `src/**/` instead of `src/`).
+3. **Narrow with filters** (next section).
+4. **Use `--deep`** for questions whose answer spans several files. See [deep search](features.md#deep-search).
 
-Use `rg` when you need:
+If the top hit is a place that uses the symbol rather than defines it, take the name from that hit and run `vera structural definitions <name>` instead of trying more phrasings.
 
-- Counting occurrences
-- Find-and-replace prep
-- File name search
-- Files outside the Vera index
+## Narrow the results
 
-## Structural Search
-
-Use `vera structural` for the common structural cases where you want an intent, not raw query syntax:
+Add filters one at a time:
 
 ```bash
-vera structural definitions parse_config
-vera structural env DATABASE_URL
-vera structural routes --path "src/**"
-vera structural sql
-vera structural impls Loader
+vera search "error handling" --lang rust
+vera search "error handling" --lang rust --type function
+vera search "routes" --path "src/**/*.ts" --path "tests/**/*.ts"
+vera search "mod loader" --scope runtime --include-generated
+vera search "token validation" --changed
 ```
 
-This is the better default for agents. `vera structural definitions` accepts bare symbol names for split symbols and deduplicates to the earliest declaration.
+- `--path` is relative to the repository root. A bare directory such as `--path src/api` matches everything below it.
+- `--type function` also matches methods, and the reverse.
+- `--scope docs` searches documentation; `--scope runtime` searches extracted or bundled app code; `--scope all` lets every content class except generated files match, as no `--scope` does, and source code still ranks first.
+- `--changed` limits the search to modified, staged, and untracked files; `--base <rev>` to files changed since the merge base with `<rev>` (a branch diff); `--since <rev>` to files changed since `<rev>`.
 
-Use `vera structural impls <symbol>` for explicit inheritance or conformance declarations. It does not infer implicit interface satisfaction.
+Vera ranks source code above docs and tests; use `--scope` to search only one kind of file. Generated files such as minified bundles are left out of results unless you pass `--include-generated`. Directories such as `dist`, `build`, and `node_modules` are not indexed at all by default; see [Configuration](configuration.md) to change the exclusions.
 
-Use `vera references` for exact caller/callee questions:
+## Callers and same-named symbols
+
+`vera references` matches calls by name. If two classes both define `get`, their callers come back together. When the calls use at least two different receiver names, the output lists them:
 
 ```bash
-vera references parse_config
-vera references parse_config --callees
-vera references parse_config --changed
-vera references get --receiver app          # only calls written as app.get(...)
+vera references get                  # all calls to anything named get, with receiver counts
+vera references get --receiver app   # only calls written as app.get(...)
 ```
 
-Callers are matched by symbol name, so two definitions sharing a name land in
-one answer. When that happens the output names the receivers the calls went
-through and their counts; rerun with `--receiver <name>` to keep only the calls
-made through one of them. Calls written without a receiver (a plain
-`parse_config()`) are not matched by any `--receiver` value. `vera references` resolves split-symbol call sites, and `vera dead-code` deduplicates split parts by (symbol, file).
+Calls with no receiver, such as a plain `get()`, do not match any `--receiver` value.
 
-## Missing Files Or Surprising Exclusions
+## When to use `vera grep` vs `rg`
 
-If a file is missing from search results and you need the exact reason, ask Vera directly:
+Use `vera grep` for exact text or regex in indexed files. It shares `vera search`'s filters and git scopes:
 
 ```bash
-vera explain-path path/to/file
+vera grep "EMBEDDING_MODEL_BASE_URL"
+vera grep "TODO\(" -i
+vera grep "queryClient|invalidateQueries" --path "frontend/src/**"
 ```
 
-If `vera search` or `vera grep` warns that the index may be stale, refresh it:
+It uses Rust regex syntax: `|` is alternation and `\|` matches a literal pipe. If none of your `--path` patterns match an indexed file, Vera suggests a pattern that would.
+
+Use `rg` when you need to:
+
+- search files that are not indexed (dependencies, ignored or generated trees)
+- count occurrences
+- find files by name
+- prepare a find-and-replace
+
+## Keep results fresh
+
+If Vera warns that the index is stale, or results miss code you just wrote:
 
 ```bash
-vera update .
+vera update .      # once
+vera watch .       # continuously while you work
 ```
 
-Use `vera watch .` when you want the index to stay current while you work.
+If a file never shows up, `vera explain-path path/to/file` tells you why it is not indexed. More fixes are in [troubleshooting](troubleshooting.md).
 
-Use `vera stats --json` when you want the repo-wide health view for parse failures, tree-sitter errors, and Tier 0 fallback.
+## Reading results
 
-## Output Format
+Each result is labeled with its path, line range, symbol type, and name:
 
-See [features: output formats](features.md#multiple-output-formats) for all options (`--json`, `--raw`, `--timing`). `--raw` works with `vera search`, `vera grep`, and `vera references`; `--timing` works with `vera search` and `vera grep`. They can appear before or after the subcommand. `vera search --timing` prints per-stage timings; `vera grep --timing` prints total regex-search time. In JSON, `symbol_name` is the bare string and split symbols add a `part_index` field. `retrieval.max_output_chars` defaults to 0 (unlimited output) and when non-zero truncates lower-ranked results first.
+````text
+```src/flask/cli.py:698-763 function:load_dotenv
+````
 
-## Keeping Results Fresh
-
-If results feel stale after code changes, run `vera update .`. See [troubleshooting](troubleshooting.md#results-are-stale) for details.
+Results are in ranked order; trust the order. When JSON output includes a `score`, it only ranks results within that query and cannot be compared across queries. Large symbols are split into parts and labeled `name (part N)`; in JSON, `symbol_name` holds the bare name and `part_index` the part.
