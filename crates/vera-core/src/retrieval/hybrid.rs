@@ -833,6 +833,14 @@ async fn search_hybrid_inner(
 
     match (bm25_results, vector_results) {
         (Ok(bm25), Ok(vector)) => {
+            // Indexing stores a vector for every chunk, so BM25 hits over an
+            // empty vector store mean the vector database was lost or emptied.
+            if index_count == 0 && !bm25.is_empty() {
+                let reason =
+                    "the vector database is missing or empty; re-index to restore vector search";
+                warn!("{reason}; using BM25-only search");
+                timings.semantic_fallback = Some(reason.to_string());
+            }
             debug!(
                 bm25_count = bm25.len(),
                 vector_count = vector.len(),
