@@ -97,20 +97,26 @@ fn degraded_search_notices(
     timings: &vera_core::retrieval::search_service::SearchTimings,
     multi_query: bool,
 ) -> Vec<String> {
-    let scope = if multi_query {
-        "Results from at least one query are"
+    let (keyword_only, unreranked) = if multi_query {
+        (
+            "At least one query ran keyword-only (BM25)",
+            "At least one query was not reranked",
+        )
     } else {
-        "These results are"
+        (
+            "These results are keyword-only (BM25)",
+            "These results are not reranked",
+        )
     };
     let mut notices = Vec::new();
     if let Some(reason) = &timings.semantic_fallback {
         notices.push(format!(
-            "warning: semantic search unavailable ({reason}). {scope} keyword-only (BM25), so prefer exact identifiers in queries."
+            "warning: semantic search unavailable ({reason}). {keyword_only}, so prefer exact identifiers in queries."
         ));
     }
     if let vera_core::retrieval::RerankOutcome::Fallback(reason) = &timings.rerank_outcome {
         notices.push(format!(
-            "warning: reranker unavailable ({reason}). {scope} not reranked."
+            "warning: reranker unavailable ({reason}). {unreranked}."
         ));
     }
     notices
@@ -773,7 +779,7 @@ mod tests {
         let notices = degraded_search_notices(&timings, true);
         assert_eq!(notices.len(), 1);
         assert!(
-            notices[0].contains("Results from at least one query are keyword-only"),
+            notices[0].contains("At least one query ran keyword-only (BM25)"),
             "{}",
             notices[0]
         );

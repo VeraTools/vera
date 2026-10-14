@@ -4,7 +4,7 @@ Release highlights from v1.0 onward. For the current benchmark tables and method
 
 ## v2.1.1
 
-- MCP search results say when they are degraded: keyword-only because semantic search failed (for example, an expired embedding key) or unreranked because the reranker failed. The CLI already printed these on stderr; MCP agents saw nothing.
+- MCP search results say when they are degraded: keyword-only because semantic search failed or was skipped (for example, an expired embedding key) or unreranked because the reranker failed. The CLI already printed these on stderr; MCP agents saw nothing.
 - `retrieval.rrf_k` now applies to ordinary search. It used to affect only multi-query merging. The default (60) is unchanged; an invalid saved value falls back to it.
 
 ## v2.1.0
