@@ -4,7 +4,7 @@ Release highlights from v1.0 onward. For the current benchmark tables and method
 
 ## v2.1.3
 
-- `vera update` restores lost vectors. Files whose chunks have no stored vector (for example, after `.vera/vectors.db` was deleted) are re-embedded instead of being reported as up to date, and the search warning now points to `vera update`.
+- `vera update` restores lost vectors. Files whose chunks have no stored vector (for example, after `.vera/vectors.db` was deleted) are re-embedded instead of being reported as up to date, and the search warning now points to `vera update .`.
 
 ## v2.1.2
 

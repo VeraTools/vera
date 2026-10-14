@@ -668,9 +668,9 @@ fn expected_flat_bytes(dim: usize, max_rowid: i64) -> Result<u64> {
         .context("flat vector storage size overflow")
 }
 
-/// Read the chunk id map without opening the store, so a missing database is
+/// Read the vector tables without opening the store, so a missing database is
 /// not created and the flat sidecar is not loaded. A missing database or table
-/// holds no ids.
+/// holds no vectors.
 fn read_stored_chunk_map<T: Default>(
     db_path: &Path,
     read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
@@ -678,16 +678,17 @@ fn read_stored_chunk_map<T: Default>(
     if !db_path.exists() {
         return Ok(T::default());
     }
+    register_sqlite_vec();
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("failed to open vector db: {}", db_path.display()))?;
-    let has_map: bool = conn
+    let tables: i64 = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunk_id_map')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('chunk_id_map', 'vec_chunks')",
             [],
             |row| row.get(0),
         )
         .context("failed to inspect vector db schema")?;
-    if !has_map {
+    if tables < 2 {
         return Ok(T::default());
     }
     read(&conn).context("failed to read stored vector ids")
@@ -1148,22 +1149,24 @@ impl VectorStore {
         Self::from_connection(conn, dim, scan_mode, Some(sidecar_dir))
     }
 
-    /// Number of chunk ids stored in the vector database at `db_path`.
+    /// Number of vectors stored in the vector database at `db_path`.
     pub fn stored_chunk_count(db_path: &Path) -> Result<u64> {
         read_stored_chunk_map(db_path, |conn| {
-            conn.query_row("SELECT COUNT(*) FROM chunk_id_map", [], |row| {
+            conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |row| {
                 row.get::<_, i64>(0)
             })
             .map(|count| count as u64)
         })
     }
 
-    /// Chunk ids stored in the vector database at `db_path`.
+    /// Ids of the chunks that have a stored vector in the database at `db_path`.
     pub fn stored_chunk_ids(db_path: &Path) -> Result<HashSet<String>> {
         read_stored_chunk_map(db_path, |conn| {
-            conn.prepare("SELECT chunk_id FROM chunk_id_map")?
-                .query_map([], |row| row.get(0))?
-                .collect()
+            conn.prepare(
+                "SELECT chunk_id FROM chunk_id_map WHERE rowid IN (SELECT rowid FROM vec_chunks)",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
         })
     }
 

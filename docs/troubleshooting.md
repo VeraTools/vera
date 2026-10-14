@@ -134,7 +134,7 @@ A warning ending in `using BM25-only search` or `falling back to BM25-only resul
 
 - The embedding endpoint failed, for example an expired key or a provider outage. See [API errors](#api-errors).
 - The index was built with a different embedding model or document prefix than the active configuration, or with more dimensions than the active model produces. Re-index with `vera index .`.
-- The index has no stored vectors, for example because `.vera/vectors.db` was deleted. Run `vera update`, which re-embeds every file whose vectors are missing.
+- The index has no stored vectors, for example because `.vera/vectors.db` was deleted. Run `vera update .`, which re-embeds every file whose vectors are missing.
 
 ## Reranker unavailable
 

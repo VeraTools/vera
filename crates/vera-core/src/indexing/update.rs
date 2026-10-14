@@ -469,13 +469,8 @@ where
         .map(|file| file.relative_path.as_str())
         .collect();
 
-    let vectorless_files = files_missing_vectors(&metadata_store, &idx_dir.join("vectors.db"))?;
-    if !vectorless_files.is_empty() {
-        warn!(
-            files = vectorless_files.len(),
-            "indexed files have no stored vectors; re-embedding them"
-        );
-    }
+    let vectorless_files =
+        repair_vector_coverage(&metadata_store, &idx_dir.join("vectors.db"), stored_dim)?;
 
     // Classify files.
     let mut modified = Vec::new();
@@ -899,25 +894,45 @@ where
 }
 
 /// Files with a chunk that has no stored vector, as left by a deleted or
-/// emptied vector database. Indexing stores a vector for every chunk, so the
-/// id lists are only compared when the vector count falls short.
-fn files_missing_vectors(
+/// damaged vector database; update re-embeds them. Vectors whose chunk is gone
+/// are deleted. Indexing stores exactly one vector per chunk, so the id lists
+/// are only compared when the counts differ.
+fn repair_vector_coverage(
     metadata_store: &MetadataStore,
     vector_path: &Path,
+    stored_dim: usize,
 ) -> Result<HashSet<String>> {
     let chunk_count = metadata_store
         .chunk_count()
         .context("failed to count chunks")?;
-    if VectorStore::stored_chunk_count(vector_path)? >= chunk_count {
+    if VectorStore::stored_chunk_count(vector_path)? == chunk_count {
         return Ok(HashSet::new());
     }
-    let vector_ids = VectorStore::stored_chunk_ids(vector_path)?;
-    Ok(metadata_store
-        .chunk_ids_with_files()?
-        .into_iter()
-        .filter(|(id, _)| !vector_ids.contains(id))
-        .map(|(_, file)| file)
-        .collect())
+    let mut orphan_ids = VectorStore::stored_chunk_ids(vector_path)?;
+    let mut vectorless_files = HashSet::new();
+    for (id, file) in metadata_store.chunk_ids_with_files()? {
+        if !orphan_ids.remove(&id) {
+            vectorless_files.insert(file);
+        }
+    }
+    if !orphan_ids.is_empty() {
+        warn!(
+            vectors = orphan_ids.len(),
+            "deleting vectors whose chunk is no longer indexed"
+        );
+        let vector_store = VectorStore::open(vector_path, stored_dim)
+            .context("failed to open vector store for repair")?;
+        for id in &orphan_ids {
+            vector_store.delete(id)?;
+        }
+    }
+    if !vectorless_files.is_empty() {
+        warn!(
+            files = vectorless_files.len(),
+            "indexed files have no stored vectors; re-embedding them"
+        );
+    }
+    Ok(vectorless_files)
 }
 
 fn chunk_file_for_update(
@@ -1430,6 +1445,17 @@ mod regression_tests {
             .await
             .unwrap();
         assert_eq!((summary.files_modified, summary.files_unchanged), (0, 2));
+
+        // A vector without a chunk is deleted, so the counts agree again.
+        let store = VectorStore::open(&vector_path, 8).unwrap();
+        store.insert("gone.rs:1:1", &[0.5; 8]).unwrap();
+        update_repository(dir.path(), &provider, &config, "mock-model")
+            .await
+            .unwrap();
+        assert_eq!(
+            VectorStore::stored_chunk_count(&vector_path).unwrap(),
+            chunk_count
+        );
     }
 
     #[tokio::test]
