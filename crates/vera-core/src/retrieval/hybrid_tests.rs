@@ -957,7 +957,7 @@ async fn search_hybrid_reranked_degrades_on_embedding_failure() {
     let reranker = MockReranker::new();
 
     // Should fall back to BM25-only results (not crash/hang).
-    let (results, _timings) = search_hybrid_reranked(
+    let (results, timings) = search_hybrid_reranked(
         &index_dir,
         &provider,
         &reranker,
@@ -979,6 +979,10 @@ async fn search_hybrid_reranked_degrades_on_embedding_failure() {
         !results.is_empty(),
         "should return BM25-only results when embedding API fails"
     );
+    let reason = timings
+        .semantic_fallback
+        .expect("fallback must be reported");
+    assert!(reason.contains("embedding API down"), "{reason}");
 }
 
 #[tokio::test]
@@ -992,7 +996,7 @@ async fn search_hybrid_reranked_respects_limit() {
     let provider = MockProvider::new(dim);
     let reranker = MockReranker::new();
 
-    let (results, _timings) = search_hybrid_reranked(
+    let (results, timings) = search_hybrid_reranked(
         &index_dir,
         &provider,
         &reranker,
@@ -1010,6 +1014,7 @@ async fn search_hybrid_reranked_respects_limit() {
     .unwrap();
 
     assert!(results.len() <= 2, "should respect the limit of 2");
+    assert_eq!(timings.semantic_fallback, None);
 }
 
 #[tokio::test]

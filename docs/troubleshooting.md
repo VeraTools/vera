@@ -128,6 +128,13 @@ the index at ... is incomplete because an update stopped before it finished writ
 
 A `vera update` was interrupted while writing. Search and `vera stats` refuse the index instead of reading partial data. Run `vera update` to repair it, or `vera index` to rebuild.
 
+## Keyword-only results
+
+A warning ending in `using BM25-only search` or `falling back to BM25-only results` on stderr, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run and the results come from keyword matching alone. The text gives the cause:
+
+- The embedding endpoint failed, for example an expired key or a provider outage. See [API errors](#api-errors).
+- The index was built with a different embedding model, document prefix, or dimension than the active configuration. Re-index with `vera index .`.
+
 ## Reranker unavailable
 
 `Warning: reranker unavailable (...)` on stderr means search returned unreranked results. The text in parentheses gives the cause. If reranking is enabled but no reranker is configured, configure an endpoint or turn reranking off:
