@@ -390,6 +390,10 @@ jobs:
       - name: Publish npm package
         if: env.PUBLISH == 'true'
         working-directory: packages/npm-cli
+        env:
+          # Provenance names the workflow's commit. A manual run publishes
+          # BUILD_REF from another ref, so only tag pushes may attest.
+          NPM_CONFIG_PROVENANCE: ${{ github.event_name == 'push' }}
         run: |
           VERSION="${RELEASE_TAG#v}"
           if npm view "@vera-ai/cli@$VERSION" version --json > version.json 2> lookup-error.log; then
