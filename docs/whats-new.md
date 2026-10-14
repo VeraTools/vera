@@ -7,6 +7,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 - `vera setup --api` and `vera backend --api` turn reranking on when you configure a reranker, including with the Qwen preset, and turn it off when you set up without one. Before, setup saved the reranker but left reranking off, so searches were never reranked. If you set up API mode with an earlier version, run setup again or `vera config set retrieval.reranking_enabled true`; `vera doctor` now warns when a reranker is saved but reranking is off.
 - Switching from API mode to a local backend drops the saved API reranker and turns reranking off with it, so it does not silently switch to the slower local CPU reranker. Reranking stays on if your shell sets all three `RERANKER_MODEL_*` variables, or if you turned it on for a local backend with no API reranker saved.
 - When a local model fails to load, the hint now links to the manual install guide instead of naming an outdated model path.
+- Security update: rustls is updated to 0.23.46 for [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346.html), [0347](https://rustsec.org/advisories/RUSTSEC-2026-0347.html), [0348](https://rustsec.org/advisories/RUSTSEC-2026-0348.html), and [0349](https://rustsec.org/advisories/RUSTSEC-2026-0349.html).
 
 ## v2.1.3
 
