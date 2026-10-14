@@ -83,7 +83,7 @@ pub async fn create_dynamic_reranker(
         }
         RerankerSource::Local(ep) => {
             let p = LocalReranker::new_with_ep(ep).await.map_err(|e| {
-                anyhow::anyhow!("Failed to initialize local reranker: {e}\nHint: check network connection or manually place model at ~/.vera/models/")
+                anyhow::anyhow!("Failed to initialize local reranker: {e}\nHint: check your network connection, or place the model files by hand: https://github.com/VeraTools/Vera/blob/master/docs/manual-install.md")
             })?;
             Ok(Some(DynamicReranker::Local(p)))
         }

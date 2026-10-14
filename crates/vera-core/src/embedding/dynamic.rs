@@ -147,7 +147,7 @@ pub async fn create_dynamic_provider(
         InferenceBackend::OnnxJina(ep) => {
             let gpu_mem_limit_mb = config.embedding.gpu_mem_limit_mb;
             let p = LocalEmbeddingProvider::new_with_ep_and_mem_limit(ep, gpu_mem_limit_mb).await.map_err(|e| {
-                anyhow::anyhow!("Failed to initialize local embedding provider: {e}\nHint: check network connection or manually place model at ~/.vera/models/")
+                anyhow::anyhow!("Failed to initialize local embedding provider: {e}\nHint: check your network connection, or place the model files by hand: https://github.com/VeraTools/Vera/blob/master/docs/manual-install.md")
             })?;
             Ok((DynamicProvider::Local(p), configured_local_model_name()))
         }

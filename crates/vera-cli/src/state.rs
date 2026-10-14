@@ -166,7 +166,14 @@ pub fn save_api_setup(
 /// endpoint; shell-set RERANKER_MODEL_* vars still signal explicit intent.
 pub fn clear_reranker_setup() -> Result<()> {
     let mut config = load_saved_config()?;
-    config.reranker_api = None;
+    // Reranking enabled for the dropped API reranker must not silently switch
+    // to the much slower local CPU reranker.
+    if config.reranker_api.take().is_some()
+        && !shell_reranker_configured()
+        && let Some(core) = config.core_config.as_mut()
+    {
+        core.retrieval.reranking_enabled = false;
+    }
     save_config(&config)?;
 
     let mut secrets = load_saved_secrets()?;
@@ -369,6 +376,23 @@ fn apply_reranker_env(endpoint: Option<&ApiEndpointConfig>, api_key: Option<&str
             _ => {}
         }
     }
+}
+
+/// Whether the shell, not saved state, supplies every `RERANKER_MODEL_*` value.
+/// Blank values count as unset, matching how setup reads them.
+fn shell_reranker_configured() -> bool {
+    let populated = RERANKER_ENV_FROM_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    RERANKER_ENV_KEYS
+        .iter()
+        .zip(populated.iter())
+        .all(|(key, remembered)| {
+            std::env::var_os(key).is_some_and(|value| {
+                value.to_str().is_some_and(|text| !text.trim().is_empty())
+                    && Some(&value) != remembered.as_ref()
+            })
+        })
 }
 
 fn set_env_value(key: &str, value: &str, force: bool) {
@@ -794,12 +818,9 @@ mod tests {
                 model_id: "reranker".into(),
                 api_key: "reranker-key".into(),
             };
-            save_api_setup(
-                &embedding,
-                Some(&reranker),
-                &vera_core::config::VeraConfig::default(),
-            )
-            .unwrap();
+            let mut runtime = vera_core::config::VeraConfig::default();
+            runtime.retrieval.reranking_enabled = true;
+            save_api_setup(&embedding, Some(&reranker), &runtime).unwrap();
             if shell_override {
                 for key in RERANKER_ENV_KEYS {
                     set_process_env(key, "shell-override");
@@ -812,6 +833,13 @@ mod tests {
                     .all(|key| std::env::var_os(key).is_some())
             );
             clear_reranker_setup().unwrap();
+            assert_eq!(
+                load_saved_core_config()
+                    .unwrap()
+                    .retrieval
+                    .reranking_enabled,
+                shell_override
+            );
             apply_saved_env_force().unwrap();
             for key in RERANKER_ENV_KEYS {
                 assert_eq!(
@@ -821,6 +849,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn blank_shell_reranker_values_do_not_keep_reranking_on() {
+        let _guard = with_stored_config("{}");
+        let endpoint = ApiSetupInput {
+            base_url: "https://reranker.example".into(),
+            model_id: "reranker".into(),
+            api_key: "reranker-key".into(),
+        };
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.reranking_enabled = true;
+        save_api_setup(&endpoint, Some(&endpoint), &runtime).unwrap();
+        for key in RERANKER_ENV_KEYS {
+            set_process_env(key, " ");
+        }
+        apply_saved_env().unwrap();
+        clear_reranker_setup().unwrap();
+        assert!(
+            !load_saved_core_config()
+                .unwrap()
+                .retrieval
+                .reranking_enabled
+        );
+        for key in RERANKER_ENV_KEYS {
+            clear_process_env(key);
+        }
+    }
+
+    #[test]
+    fn clearing_without_a_saved_reranker_keeps_local_reranking_opt_in() {
+        let _guard = with_stored_config("{}");
+        let mut runtime = vera_core::config::VeraConfig::default();
+        runtime.retrieval.reranking_enabled = true;
+        save_runtime_config(&runtime).unwrap();
+        clear_reranker_setup().unwrap();
+        assert!(
+            load_saved_core_config()
+                .unwrap()
+                .retrieval
+                .reranking_enabled
+        );
     }
 
     #[test]
