@@ -1,9 +1,9 @@
 //! Query-type classifier for adaptive retrieval parameters.
 //!
 //! Detects whether a search query is a natural language (NL) intent query
-//! or an identifier/symbol lookup. NL queries benefit from higher vector
-//! weight in RRF fusion (lower k), while identifier queries perform best
-//! with the standard BM25-heavy fusion.
+//! or an identifier/symbol lookup. NL queries use balanced fusion weights and
+//! a deeper vector candidate pool, while identifier queries weight BM25 more
+//! heavily.
 //!
 //! # Heuristics
 //!
@@ -24,9 +24,6 @@ pub enum QueryType {
 /// Retrieval parameters tuned per query type.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QueryParams {
-    /// RRF fusion constant. Lower k amplifies rank differences, giving
-    /// more weight to top-ranked items from each source.
-    pub rrf_k: f64,
     /// Multiplier for vector candidate fetch count relative to limit.
     pub vector_candidate_multiplier: usize,
     /// Weight for BM25 RRF scores during fusion. The vector weight is
@@ -41,16 +38,13 @@ pub struct QueryParams {
 /// Vector search often returns loosely related code that dilutes the
 /// exact-match signal, so a strong BM25 bias is essential.
 const IDENTIFIER_PARAMS: QueryParams = QueryParams {
-    rrf_k: 60.0,
     vector_candidate_multiplier: 3,
     bm25_weight: 2.5,
     vector_weight: 1.0,
 };
 
-/// Parameters for NL intent queries: balanced weights, the shared RRF k, and
-/// a larger vector candidate multiplier for broader semantic recall.
+/// Parameters for NL intent queries: balanced weights and a larger vector candidate multiplier for broader semantic recall.
 const NL_PARAMS: QueryParams = QueryParams {
-    rrf_k: 60.0,
     vector_candidate_multiplier: 5,
     bm25_weight: 1.0,
     vector_weight: 1.0,
@@ -330,19 +324,6 @@ mod tests {
     // ── params_for_query_type tests ─────────────────────────────────
 
     #[test]
-    fn nl_params_share_identifier_rrf_k() {
-        let nl = params_for_query_type(QueryType::NaturalLanguage);
-        let id = params_for_query_type(QueryType::Identifier);
-        assert_eq!(
-            nl.rrf_k, id.rrf_k,
-            "NL and identifier should share RRF k: {} vs {}",
-            nl.rrf_k, id.rrf_k
-        );
-        assert_eq!(nl.rrf_k, 60.0);
-        assert_eq!(id.rrf_k, 60.0);
-    }
-
-    #[test]
     fn nl_params_have_higher_vector_multiplier() {
         let nl = params_for_query_type(QueryType::NaturalLanguage);
         let id = params_for_query_type(QueryType::Identifier);
@@ -357,7 +338,6 @@ mod tests {
     #[test]
     fn identifier_params_preserve_defaults() {
         let id = params_for_query_type(QueryType::Identifier);
-        assert_eq!(id.rrf_k, 60.0);
         assert_eq!(id.vector_candidate_multiplier, 3);
     }
 

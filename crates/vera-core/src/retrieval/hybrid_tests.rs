@@ -211,6 +211,15 @@ fn rrf_k_parameter_affects_scores() {
 }
 
 #[test]
+fn invalid_rrf_k_falls_back_to_default() {
+    let bm25 = vec![make_result("a.rs", 1, 10, 5.0, None)];
+    let expected = fuse_rrf(&bm25, &[], 60.0, 10)[0].score;
+    for k in [-60.0, 0.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(fuse_rrf(&bm25, &[], k, 10)[0].score, expected, "k={k}");
+    }
+}
+
+#[test]
 fn rrf_with_known_inputs_produces_exact_scores() {
     // RRF with k=60:
     // Item A: BM25 rank 1, vector rank 3 → 1/61 + 1/63
@@ -1114,83 +1123,6 @@ fn natural_language_queries_expand_bm25_candidate_pool() {
 #[test]
 fn short_identifier_queries_expand_bm25_candidate_pool() {
     assert_eq!(compute_bm25_candidates("Config", 20), 80);
-}
-
-// ── Integration: NL vs identifier query produces different fusion ──
-
-#[tokio::test]
-async fn nl_query_uses_same_rrf_k_as_identifier() {
-    use crate::embedding::test_helpers::MockProvider;
-    use crate::retrieval::query_classifier::{QueryType, classify_query, params_for_query_type};
-    use crate::retrieval::reranker::test_helpers::MockReranker;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let (index_dir, dim) = setup_test_index(tmp.path()).await;
-
-    let provider = MockProvider::new(dim);
-    let reranker = MockReranker::new();
-
-    // Identifier query → uses default k=60.
-    let id_query = "authenticate";
-    let id_type = classify_query(id_query);
-    assert_eq!(id_type, QueryType::Identifier);
-    let id_params = params_for_query_type(id_type);
-
-    let (id_results, _) = search_hybrid_reranked(
-        &index_dir,
-        &provider,
-        &reranker,
-        id_query,
-        id_query,
-        &SearchFilters::default(),
-        5,
-        5,
-        id_params.rrf_k,
-        dim,
-        10,
-        compute_vector_candidates(5, id_params.vector_candidate_multiplier),
-    )
-    .await
-    .unwrap();
-
-    // NL query → uses same k=60 as identifier queries.
-    let nl_query = "how is authentication handled";
-    let nl_type = classify_query(nl_query);
-    assert_eq!(nl_type, QueryType::NaturalLanguage);
-    let nl_params = params_for_query_type(nl_type);
-
-    let (nl_results, _) = search_hybrid_reranked(
-        &index_dir,
-        &provider,
-        &reranker,
-        nl_query,
-        nl_query,
-        &SearchFilters::default(),
-        5,
-        5,
-        nl_params.rrf_k,
-        dim,
-        10,
-        compute_vector_candidates(5, nl_params.vector_candidate_multiplier),
-    )
-    .await
-    .unwrap();
-
-    // Both should return results (the index has auth content).
-    assert!(
-        !id_results.is_empty(),
-        "identifier query should find results"
-    );
-    assert!(!nl_results.is_empty(), "NL query should find results");
-
-    // The key assertion: same RRF k is used for both query types.
-    assert_eq!(
-        id_params.rrf_k, nl_params.rrf_k,
-        "identifier k ({}) should equal NL k ({})",
-        id_params.rrf_k, nl_params.rrf_k
-    );
-    assert_eq!(id_params.rrf_k, 60.0);
-    assert_eq!(nl_params.rrf_k, 60.0);
 }
 
 // ── Indexed file list cache tests ───────────────────────────────
