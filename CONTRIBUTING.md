@@ -1,33 +1,33 @@
 # Contributing
 
-## Build from Source
+## Build from source
 
-Rust 1.88+ required (see `Cargo.toml` `rust-version` for exact MSRV).
+You need Rust 1.88 or later. The exact minimum is the `rust-version` field in `Cargo.toml`.
 
 ```bash
 git clone https://github.com/VeraTools/vera.git
 cd vera
-bash scripts/bootstrap-vendored-grammars.sh  # Downloads the vendored tree-sitter grammars used by CI.
+bash scripts/bootstrap-vendored-grammars.sh  # downloads the vendored tree-sitter grammars that are not in git
 cargo build --locked
 ```
 
-## Run Tests
+## Run tests
 
 ```bash
 cargo test --locked --workspace       # all tests
 cargo test --locked -p vera-core      # core crate only
 ```
 
-## Lint & Format
+## Lint and format
 
 ```bash
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Workspace lints deny debugging macros, unfinished implementations, unsafe operations without explicit blocks, undocumented unsafe blocks, and unexplained lint suppressions. Keep each necessary suppression narrow and include a specific `reason`. Document the safety invariant at each unsafe operation.
+Workspace lints reject debugging macros, unfinished implementations, unsafe operations outside explicit `unsafe` blocks, unsafe blocks without a safety comment, and lint suppressions without a reason. If you need a suppression, keep it narrow and give it a specific `reason`. Document the safety invariant at each unsafe operation.
 
-CI also checks public rustdoc, workflows with Actionlint and ShellCheck, first-party shell scripts, conservative Ruff rules, and npm JavaScript syntax. CodeQL default setup scans the detected Rust, Actions, Python, JavaScript and grammar C/C++ sources.
+CI also builds the public rustdoc, lints workflows with actionlint, lints shell scripts with ShellCheck, runs a conservative set of Ruff rules on the Python code, and syntax-checks the npm wrapper. CodeQL scans the Rust, Actions, Python, JavaScript, and grammar C/C++ sources. To run the same checks locally:
 
 ```bash
 cargo metadata --locked --format-version=1 > /dev/null
@@ -39,11 +39,14 @@ cargo machete
 actionlint
 shellcheck eval/*.sh scripts/*.sh
 ruff check --select E4,E7,E9,F benchmarks eval scripts packages/python-cli
+git ls-files 'packages/npm-cli/*.js' 'packages/npm-cli/**/*.js' | xargs -n1 node --check
 ```
 
-The supported distributions are GitHub binaries, npm, PyPI and Docker. Workspace crates are private and versioned together from release tags. Release automation and its fixtures use Python 3.11; the installed Python wrapper supports Python 3.9.
+CodeQL runs only in CI.
 
-## Project Layout
+Vera ships as GitHub release binaries, the npm and PyPI wrappers, and Docker images. The workspace crates are not published; they are versioned together from the release tag. Release automation and its test fixtures use Python 3.11, while the published Python wrapper supports Python 3.9 and later.
+
+## Project layout
 
 | Crate | What it does |
 |-------|-------------|
@@ -53,7 +56,7 @@ The supported distributions are GitHub binaries, npm, PyPI and Docker. Workspace
 | `vera-serve` | HTTP inference server |
 | `eval` | Benchmark harness and evaluation tasks |
 
-The core engine lives in `vera-core`. Most changes happen here:
+Most changes happen in `vera-core`:
 
 - `parsing/`: tree-sitter grammars, AST chunking, symbol extraction
 - `embedding/`: embedding providers (API, Potion Code, and local ONNX)
@@ -61,20 +64,21 @@ The core engine lives in `vera-core`. Most changes happen here:
 - `storage/`: SQLite metadata, Tantivy BM25 index, sqlite-vec vectors, and the flat SIMD vector sidecar
 - `indexing/`: index build and incremental update pipeline
 
-For how the pipeline fits together, see [docs/how-it-works.md](docs/how-it-works.md).
+For how the pipeline fits together, see [docs/how-it-works.md](docs/how-it-works.md). The module map is in [docs/architecture.md](docs/architecture.md).
 
-## Adding a Language
+## Add a language
 
-See [docs/architecture.md](docs/architecture.md#adding-a-new-language) for the step-by-step checklist. The full language list is at [docs/supported-languages.md](docs/supported-languages.md).
+Follow the checklist in [docs/architecture.md](docs/architecture.md#adding-a-new-language). The current language list is in [docs/supported-languages.md](docs/supported-languages.md).
 
 ## Conventions
 
-- **Error handling:** `anyhow::Result` in CLI code, `thiserror` for typed errors in `vera-core`
-- **Async:** `tokio` runtime for I/O-bound work
-- **Tests:** `#[cfg(test)]` modules at the bottom of source files, `tempfile` for filesystem tests
-- **Commits:** `type(scope): description`: e.g. `feat(lang): add HTML support`, `fix(retrieval): handle empty query`
+- Error handling: `anyhow::Result` in CLI code, `thiserror` for typed errors in `vera-core`.
+- Async: the `tokio` runtime for I/O-bound work; keep CPU-bound work synchronous.
+- Tests: `#[cfg(test)]` modules at the bottom of source files, with `tempfile` for filesystem tests.
+- Commits: `type(scope): description`, for example `feat(lang): add HTML support` or `fix(retrieval): handle empty query`.
+- Ranking changes must improve the full 1,251-task suite by at least 0.5% to ship; see [docs/benchmarks.md](docs/benchmarks.md#what-the-numbers-do-and-do-not-show).
 
-## Running Benchmarks
+## Run the benchmark
 
 ```bash
 bash eval/setup-semble-corpus.sh                    # clone the pinned Semble corpus
@@ -86,34 +90,34 @@ cargo run --locked --release --bin vera-eval -- run \
   --json-only
 ```
 
-Benchmark details: [docs/benchmarks.md](docs/benchmarks.md).
+Methodology and current results are in [docs/benchmarks.md](docs/benchmarks.md).
 
-## Branch Policy
+## Branches
 
-Pull requests target `master` directly.
+Open pull requests against `master`.
 
-## Releases and Recovery
+## Releases and recovery
 
-Run the release helper from clean `master` after its exact commit passes CI:
+Run the release helper from a clean `master` checkout once that exact commit has passed CI:
 
 ```bash
 bash scripts/release.sh 2.0.0
 ```
 
-The helper checks local and remote `master`, existing tags, and CI before tagging. Versions come from the tag; do not commit manifest version bumps.
+Before tagging, the helper checks local and remote `master`, existing tags, and CI status. Versions come from the tag, so do not commit version bumps to the manifests.
 
-npm and PyPI have separate publication jobs. Retry a failed job from its workflow run; already published package versions are preserved. Docker recovery verifies the requested archive against its release manifest. Versioned images are preserved, and mutable variant tags follow only the newest published stable release.
+npm and PyPI publish in separate jobs. If one fails, rerun that job from its workflow run; package versions that were already published stay as they are. Docker recovery checks the requested archive against its release manifest. Versioned images are never overwritten, and the moving variant tags (such as `cpu`) only ever point at the newest stable release.
 
-To use GitHub-hosted runners for an existing tag:
+To rerun the release for an existing tag on GitHub-hosted runners:
 
 ```bash
 gh workflow run release.yml --ref master \
   -f tag=v1.4.2 -f use_github_runners=true
 ```
 
-A full retry rejects rebuilt assets that differ from the publication. Retry only the failed package job or use `docker.yml` when the binary assets are already complete.
+A full rerun refuses rebuilt assets that differ from what was already published. If the binary assets are complete, rerun only the failed package job, or use `docker.yml` for the images.
 
-Rehearse all six binary targets and package builds without publication, using an exact source commit and an existing tag for version stamping:
+To rehearse all six binary targets and the package builds without publishing anything, pass a source commit and an existing tag for the version number:
 
 ```bash
 gh workflow run release.yml --ref master \

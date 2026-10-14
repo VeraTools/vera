@@ -1,172 +1,118 @@
-# Models and Backends
+# Models and backends
 
-Start with local CPU, or choose API mode when you want remote model calls:
+Vera needs an embedding model to index and search. It can run one locally or call a hosted API.
 
-- **Local Potion Code (default)**: `minishlab/potion-code-16M-v2` runs on CPU. It needs an initial model download, then works offline without an API account or ONNX Runtime.
-- **API mode**: Qwen/OpenRouter is the recommended API preset, with one shared key for `qwen/qwen3-embedding-8b` and `qwen/qwen3-reranker-8b` (paid usage). Other OpenAI-compatible endpoints are supported.
+## Which backend to use
 
-In the 320-task Semble screening subset, the Qwen pair with reranking scored `0.8647` nDCG@10 versus `0.8538` for local defaults, with recall@1 up three percentage points. These are tuning-subset measurements, not a full-suite result or a guarantee for another repository. API mode also adds network latency and provider costs.
+| Your situation | Backend | Setup command |
+|---|---|---|
+| Most users, any machine | Potion Code on CPU (the default) | `vera setup --potion-code` |
+| You have a supported GPU and want a neural local model | Jina ONNX on GPU | `vera setup --onnx-jina-cuda` (or another `--onnx-jina-*` flag) |
+| You want the highest measured quality, or a hosted model | API mode | `vera setup --api` |
 
-Local setup downloads assets into the Vera data directory (see [Installation](installation.md#set-up-a-backend)). Jina ONNX backends install the matching ONNX Runtime library into `lib/` and can need GPU drivers or Python-managed provider packages.
+Potion Code ([`minishlab/potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2)) is a static embedding model. It runs on the CPU of any supported machine, needs no GPU, no ONNX Runtime, and no API account, and works offline after the first download.
 
-## Curated Embedding Options
+API mode works with any OpenAI-compatible endpoint. The recommended preset is Qwen through OpenRouter (`qwen/qwen3-embedding-8b` for embeddings and `qwen/qwen3-reranker-8b` for reranking, one key, paid usage). On the 320-task Semble subset, this pair with reranking scored 0.8647 nDCG@10 against 0.8538 for the local default, and Recall@1 rose by three percentage points. That was measured on the subset only; see [current results](benchmarks.md#current-results). API mode adds network latency and provider costs, and sends code to the provider (see [API mode](#api-mode)).
 
-| Option | Command | Notes |
-| --- | --- | --- |
-| Potion Code | `vera setup --potion-code` | Default local embedding model: [`minishlab/potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2). Runs locally on CPU on any supported machine. |
-| Jina v5 nano retrieval | `vera setup --onnx-jina-cuda` or another `--onnx-jina-*` flag | Opt-in GPU local backend. The retrieval variant is asymmetric, so Vera prefixes queries with `Query:` and indexed passages with `Document:`. |
-| CodeRankEmbed | `vera setup --onnx-jina-cuda --code-rank-embed` | Optional ONNX embedding preset for code-specific or embedding-only experiments. Current screening results are below. |
+Local backends download their assets into Vera's data directory (see [Installation](installation.md)). Jina ONNX backends also download the matching ONNX Runtime library into `lib/`, and some GPU providers need drivers or Python packages; see [Troubleshooting](troubleshooting.md#onnx-runtime-or-gpu-backend-fails).
 
-When local reranking is enabled, the Jina ONNX family provides this built-in cross-encoder:
+## Local embedding models
 
-| Model | Role |
-| --- | --- |
-| [`jinaai/jina-reranker-v2-base-multilingual`](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual) | Local cross-encoder reranker |
+| Model | Setup command | Notes |
+|---|---|---|
+| Potion Code | `vera setup --potion-code` | Default. CPU only, static embeddings. |
+| Jina embeddings v5 nano retrieval | `vera setup --onnx-jina-cuda` or another `--onnx-jina-*` flag | Opt-in, intended for GPUs. Vera prefixes queries with `Query:` and indexed text with `Document:`, as the model expects. |
+| CodeRankEmbed | `vera setup --onnx-jina-cuda --code-rank-embed` | Optional preset on the Jina ONNX backend. |
 
-With reranking disabled, the default Potion Code path uses vector/BM25 fusion plus Vera's deterministic ranking heuristics.
+The `--onnx-jina-*` flags select the execution provider: `cpu`, `cuda` (NVIDIA), `rocm` (AMD, Linux), `directml` (Windows), `coreml` (Apple Silicon), and `openvino` (Intel, Linux).
 
-## Embedding Screening
+### Embedding screening
 
-These screening results (2026-08-21/22, pre-dating the ranking-signal improvements of v1.3.0; the v1.4.0 local defaults score 0.8538 on the same subset, see [benchmarks.md](benchmarks.md)) use Vera's hybrid retrieval with reranking disabled. The first set has 320 Semble tasks; the independent set has 180 tasks from separate repositories.
+Measured 2026-08-21 and 2026-08-22 with reranking off, on an older Vera version than the current one, so absolute scores are lower than today's. The 320-task set is a Semble subset; the independent set has 180 tasks from 10 repositories outside Semble.
 
-| Model | 320-task nDCG@10 | Independent nDCG@10 | 320-task p50 | Independent p50 | 320-task index | Independent index |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `potion-code-16M-v2` | 0.7930 | 0.7019 | 13.5 ms | 10.1 ms | 56 s | 26 s |
-| `jina-embeddings-v5` | 0.7956 | 0.7149 | 44.9 ms | 13.3 ms | 147 s | 61 s |
-| `CodeRankEmbed` | 0.7949 | 0.7069 | 21.3 ms | 14.8 ms | 375 s | 153 s |
+| Model | nDCG@10 (320 / independent) | Index time (320 / independent) |
+|---|---:|---:|
+| `potion-code-16M-v2` | 0.7930 / 0.7019 | 56 s / 26 s |
+| `jina-embeddings-v5` nano | 0.7956 / 0.7149 | 147 s / 61 s |
+| `CodeRankEmbed` | 0.7949 / 0.7069 | 375 s / 153 s |
 
-Within local mode, Potion Code remains the recommended local backend because it runs on all supported machines and has the lowest screening index time among these embedding alternatives. The full benchmark tables and methodology are in [benchmarks.md](benchmarks.md).
+The three models land within 0.013 nDCG@10 of each other. Potion Code indexes fastest and runs on every machine, which is why it is the default. Details are in the [benchmark history](benchmarks-history.md).
+
+### Indexing speed
+
+Reference points, each on a different corpus:
+
+| Backend | Hardware | Corpus | Index time |
+|---|---|---|---|
+| Potion Code | AMD Ryzen 7 9800X3D, CPU | Flask, 227 files, 1,873 chunks | 0.3 s |
+| Potion Code | AMD Ryzen 7 9800X3D, CPU | Vera repository, 438 files, 7,895 chunks | 0.9 s |
+| Potion Code | AMD Ryzen 7 9800X3D, CPU | Semble suite, 63 repositories | 89 s |
+| Jina ONNX, CUDA | NVIDIA RTX 4080 | commons-lang, 11,429 chunks | about 16 s |
+| Jina ONNX, CPU | AMD Ryzen 5 7600X3D, 6 cores | Vera repository at the time, 239 files, about 3,100 chunks | about 6 min |
+
+The two small Potion Code rows were measured with v2.1.3. Jina ONNX on CPU works but is slow; on a machine without a GPU, use Potion Code. After the first index, `vera update .` re-embeds only changed files on every backend.
+
+On Apple Silicon, the CoreML backend treats half of system RAM as available GPU memory. Like the other GPU backends, it embeds at most 16 inputs per batch.
 
 ## Reranking
 
-Reranking is opt-in through `retrieval.reranking_enabled` and is off by default. The no-reranker heuristic stack is the baseline for normal searches.
-
-In the 2026-08-23 dual-set screening, every tested cross-encoder scored below that baseline. Scores are `320-task subset / independent set` nDCG@10:
-
-| Reranking option | nDCG@10 |
-| --- | ---: |
-| No reranker | 0.8540 / 0.7644 |
-| `jina-reranker-v2-base-multilingual` | 0.8473 / 0.7557 |
-| `mxbai-rerank-xsmall-v1` | 0.8497 / 0.7564 |
-| `gte-reranker-modernbert-base` | 0.8472 / 0.7525 |
-
-The Qwen API pair was screened separately from these local cross-encoders. Selecting a reranker during API setup enables reranking; local setup keeps it disabled. Among the tested local models, `mxbai-rerank-xsmall-v1` was closest to the no-reranker baseline. Configure a local model with:
+A reranker rescores the top candidates after retrieval. It is off by default for local backends, and API setup turns it on when you configure an API reranker. To turn it on yourself:
 
 ```bash
 vera config set retrieval.reranking_enabled true
+```
 
+With reranking on, Vera uses the API reranker if one is configured. Otherwise local backends download and run [`jinaai/jina-reranker-v2-base-multilingual`](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual) through ONNX Runtime (on CPU for Potion Code).
+
+In local mode you can leave it off. In the 2026-08-23 screening, no tested local cross-encoder beat the default ranking without a reranker (nDCG@10, 320-task subset / independent set):
+
+| Reranker | nDCG@10 |
+|---|---:|
+| None (default) | 0.8540 / 0.7644 |
+| `mxbai-rerank-xsmall-v1` | 0.8497 / 0.7564 |
+| `jina-reranker-v2-base-multilingual` | 0.8473 / 0.7557 |
+| `gte-reranker-modernbert-base` | 0.8472 / 0.7525 |
+
+The Qwen API reranker was measured separately and is part of the 0.8647 result above.
+
+If you want a local reranker anyway, `mxbai-rerank-xsmall-v1` came closest to the baseline. Select it with these environment variables:
+
+```bash
 export LOCAL_RERANKER_REPO=mixedbread-ai/mxbai-rerank-xsmall-v1
 export LOCAL_RERANKER_REVISION=b5c6e9da73abc3711f593f705371cdbe9e0fe422
 export LOCAL_RERANKER_ONNX_FILE=onnx/model_quantized.onnx
 export LOCAL_RERANKER_TOKENIZER_FILE=tokenizer.json
 ```
 
-## CodeRankEmbed Comparison
+Any ONNX cross-encoder on Hugging Face works the same way. If you leave `LOCAL_RERANKER_REVISION` unset, Vera uses the `main` branch. A pinned revision is stored under `models/<repo>/revisions/<revision>/`, so different revisions do not overwrite each other.
 
-See the [canonical CodeRankEmbed comparison](benchmarks-history.md#optional-coderankembed-preset) for the 6-task results and context.
+## API mode
 
-## Custom Local Embedding Models
-
-You can point Vera at a different ONNX embedding model without changing the local reranker. These flags apply to the Jina ONNX backend family, not Potion Code.
-
-### Hugging Face Repo Or URL
-
-```bash
-vera setup --onnx-jina-cuda \
-  --embedding-repo Zenabius/CodeRankEmbed-onnx \
-  --embedding-pooling cls \
-  --embedding-no-onnx-data \
-  --embedding-query-prefix "Represent this query for searching relevant code:"
-```
-
-`--embedding-repo` also accepts a full Hugging Face URL such as `https://huggingface.co/Zenabius/CodeRankEmbed-onnx`.
-
-### Local Directory
-
-```bash
-vera setup --onnx-jina-cuda \
-  --embedding-dir /path/to/model-dir \
-  --embedding-onnx-file onnx/model_quantized.onnx \
-  --embedding-tokenizer-file tokenizer.json \
-  --embedding-dim 768
-```
-
-Use this when you already downloaded or exported the model yourself.
-
-### Custom Local Reranker
-
-The local cross-encoder can be replaced with an ONNX-compatible model from Hugging Face. The variables above select the recommended `mxbai-rerank-xsmall-v1` export. Leave `LOCAL_RERANKER_REVISION` unset to use the `main` ref and the legacy cache path. A non-empty revision stores assets under `models/<repo>/revisions/<revision>/`, so different model revisions do not overwrite one another.
-
-## Flags
-
-| Flag | Meaning |
-| --- | --- |
-| `--code-rank-embed` | Select the built-in CodeRankEmbed preset |
-| `--embedding-repo <repo-or-url>` | Download a custom embedding model from Hugging Face |
-| `--embedding-dir <dir>` | Use a local directory instead of downloading from Hugging Face |
-| `--embedding-onnx-file <path>` | Relative path to the ONNX file inside the repo or directory |
-| `--embedding-onnx-data-file <path>` | Relative path to an ONNX external data file |
-| `--embedding-no-onnx-data` | Use models that do not ship an external data file |
-| `--embedding-tokenizer-file <path>` | Relative path to the tokenizer file |
-| `--embedding-dim <n>` | Embedding dimension stored in the index |
-| `--embedding-pooling <mode>` | Pooling method for token-level outputs: `mean`, `cls`, or `last-token` |
-| `--embedding-max-length <n>` | Tokenizer truncation length |
-| `--embedding-query-prefix <text>` | Optional prefix prepended to local embedding queries |
-| `--embedding-document-prefix <text>` | Optional prefix prepended to indexed passages |
-
-## Required Files
-
-For a custom ONNX embedding model, Vera needs:
-
-- an ONNX model file
-- a tokenizer file
-- optionally an ONNX external data file
-
-The defaults are:
-
-| Asset | Default path |
-| --- | --- |
-| ONNX model | `onnx/model_quantized.onnx` |
-| ONNX external data | `onnx/model_quantized.onnx_data` |
-| Tokenizer | `tokenizer.json` |
-
-If your model uses different names, pass the matching `--embedding-*` flags.
-
-## Inference Speed
-
-The default Potion Code model runs on all supported machines. Use Jina ONNX with CUDA, ROCm, CoreML, DirectML, or OpenVINO when you want an opt-in alternative. After the first index, `vera update .` only re-embeds changed files, so updates are fast on any backend.
-
-Reference points, each measured on a different corpus:
-
-| Backend | Hardware | Corpus | Index time |
-|---------|----------|--------|------------|
-| Potion Code (default) | AMD Ryzen 7 9800X3D, CPU | Semble suite, 63 repositories | 89 s |
-| Jina ONNX, CUDA | RTX 4080 | commons-lang (11,429 chunks) | ~16 s |
-| Jina ONNX, CPU | Ryzen 5 7600X3D (6c/12t) | Vera's own codebase (239 files, ~3,100 chunks) | ~6 min |
-
-Jina ONNX on CPU is a compatibility path; use Potion Code on CPU-only machines.
-
-## API Mode
-
-`vera setup --api` and `vera backend --api` share the same endpoint, model, key, and optional reranker prompts. The API selector starts with Qwen/OpenRouter; the other presets and custom endpoints follow.
-
-| Provider | Setup choice | Provider information |
-|---|---|---|
-| Qwen/OpenRouter | Recommended API preset; one key for embeddings and reranking (paid usage) | [OpenRouter](https://openrouter.ai/) |
-| OpenAI | Embeddings, optional separate reranker | [OpenAI platform](https://platform.openai.com/) |
-| Jina | Embeddings and reranking | [Jina AI](https://jina.ai/) |
-| Voyage | Code embeddings and reranking | [Voyage AI](https://www.voyageai.com/) |
-| Custom | OpenAI-compatible embedding endpoint, optional generic or Voyage reranker | Your provider's documentation |
-
-Check current pricing, quotas, and model availability with the provider.
+Run the interactive setup:
 
 ```bash
 vera setup --api
 ```
 
-The reranker step also configures the wire protocol (auto, generic, or voyage), endpoint path override, and optional task instruction; for the Qwen preset setup auto-applies the generic protocol without prompting to preserve the single-key flow. Switching to Qwen clears incompatible endpoint and task overrides from the previous provider. Other presets start from their own protocol defaults; the custom choice can reuse existing settings. Custom proxies can select `generic` or `voyage` via `retrieval.reranker_protocol` without hostname spoofing.
+`vera backend --api` does the same without the agent and indexing steps. The menu offers these presets:
 
-For non-interactive setup, export the API values first and add `--yes`:
+| Preset | Embedding model | Reranker | Provider |
+|---|---|---|---|
+| Qwen (recommended) | `qwen/qwen3-embedding-8b` | `qwen/qwen3-reranker-8b` | [OpenRouter](https://openrouter.ai/) |
+| OpenAI | `text-embedding-3-small` | none built in | [OpenAI](https://platform.openai.com/) |
+| Jina AI | `jina-embeddings-v3` | `jina-reranker-v2-base-multilingual` | [Jina AI](https://jina.ai/) |
+| Voyage AI | `voyage-code-3` | `rerank-2` | [Voyage AI](https://www.voyageai.com/) |
+| Custom | any OpenAI-compatible endpoint | optional | your provider |
+
+Check pricing, quotas, and model availability with the provider.
+
+For a reranker, setup also asks for the wire protocol (`auto`, `generic`, or `voyage`), an optional endpoint path, and an optional task instruction. The Qwen preset sets the `generic` protocol for you and skips these questions. Switching to Qwen clears endpoint and task overrides left over from another provider.
+
+When you configure a reranker, setup turns reranking on; setup without a reranker turns it off. Switching to a local backend later drops the saved API reranker. If one was saved, reranking turns off with it, unless your shell sets all three `RERANKER_MODEL_*` variables; then reranking stays on and uses that reranker. If you turned reranking on for a local backend and no API reranker was saved, it stays on.
+
+### Non-interactive setup
+
+Export the endpoint values, then run setup with `--yes`. The three reranker variables must be all set or all unset.
 
 ```bash
 export EMBEDDING_MODEL_BASE_URL=https://your-embedding-api/v1
@@ -180,13 +126,13 @@ export RERANKER_MODEL_API_KEY=your-api-key
 
 vera setup --api --yes
 
-# Reranker protocol and endpoint overrides (also configurable without a TTY)
+# Optional reranker protocol settings
 vera config set retrieval.reranker_protocol generic
 vera config set retrieval.reranker_endpoint_path "/rerank"
 vera config set retrieval.reranker_task_instruction "Given a query, retrieve relevant code"
 ```
 
-For Qwen via OpenRouter non-interactively:
+For Qwen through OpenRouter:
 
 ```bash
 export EMBEDDING_MODEL_BASE_URL=https://openrouter.ai/api/v1
@@ -195,32 +141,68 @@ export EMBEDDING_MODEL_API_KEY=your-openrouter-key
 export RERANKER_MODEL_BASE_URL=https://openrouter.ai/api/v1
 export RERANKER_MODEL_ID=qwen/qwen3-reranker-8b
 export RERANKER_MODEL_API_KEY=your-openrouter-key
+
 vera setup --api --yes
 vera config set retrieval.reranker_protocol generic
 ```
 
-API mode sends query and chunk text to the configured model endpoints. Index storage and retrieval run locally; the optional update check is described in [Installation](installation.md#updating).
+To run your own OpenAI-compatible endpoints locally, see [llama.cpp setup](llama-cpp-setup.md).
 
-## Model Aliases
+### What leaves your machine
 
-When switching between endpoints or local model names that provide identical embeddings, configure aliases so Vera does not require a full re-index.
+API mode sends queries and chunk text to the configured endpoints. The index, BM25 search, and code-aware ranking stay local. If an API reranker is configured, it receives the query and the text of the top candidates. The daily update check is described in [Installation](installation.md).
 
-Set `embedding.model_aliases` in config or export `VERA_EMBEDDING_MODEL_ALIASES`:
+### Query and document prefixes
+
+Some models expect a prefix on queries or documents. In API mode, Vera picks a prefix from the model ID for known models (Qwen3 embeddings, for example). Override it with `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_DOCUMENT_PREFIX`, or the `embedding.query_prefix` and `embedding.document_prefix` config keys; see [Configuration](configuration.md).
+
+## Custom local embedding models
+
+The Jina ONNX backend can load another ONNX embedding model. These flags do not affect Potion Code or API mode.
+
+From a Hugging Face repository (a full `https://huggingface.co/...` URL also works):
+
+```bash
+vera setup --onnx-jina-cuda \
+  --embedding-repo Zenabius/CodeRankEmbed-onnx \
+  --embedding-pooling cls \
+  --embedding-no-onnx-data \
+  --embedding-query-prefix "Represent this query for searching relevant code:"
+```
+
+From a directory you downloaded or exported yourself:
+
+```bash
+vera setup --onnx-jina-cuda \
+  --embedding-dir /path/to/model-dir \
+  --embedding-onnx-file onnx/model_quantized.onnx \
+  --embedding-tokenizer-file tokenizer.json \
+  --embedding-dim 768
+```
+
+| Flag | Meaning |
+|---|---|
+| `--code-rank-embed` | Use the built-in CodeRankEmbed preset |
+| `--embedding-repo <repo-or-url>` | Download the model from Hugging Face |
+| `--embedding-dir <dir>` | Load the model from a local directory |
+| `--embedding-onnx-file <path>` | ONNX file inside the repository or directory (default `onnx/model_quantized.onnx`) |
+| `--embedding-onnx-data-file <path>` | ONNX external data file (default `onnx/model_quantized.onnx_data`) |
+| `--embedding-no-onnx-data` | The model has no external data file |
+| `--embedding-tokenizer-file <path>` | Tokenizer file (default `tokenizer.json`) |
+| `--embedding-dim <n>` | Embedding dimension the model returns |
+| `--embedding-pooling <mode>` | `mean`, `cls`, or `last-token` |
+| `--embedding-max-length <n>` | Tokenizer truncation length |
+| `--embedding-query-prefix <text>` | Prefix added to queries |
+| `--embedding-document-prefix <text>` | Prefix added to indexed text |
+
+## Changing models
+
+The index records which embedding model built it, including every `--embedding-*` setting, so changing the model, pooling, or a prefix requires a rebuild with `vera index .`.
+
+If two model names produce identical embeddings (the same model behind two endpoints, for example), declare them as aliases to skip the rebuild. Set `embedding.model_aliases` or export `VERA_EMBEDDING_MODEL_ALIASES`: groups separated by semicolons, names within a group separated by commas, at least two names per group.
 
 ```bash
 export VERA_EMBEDDING_MODEL_ALIASES="jina-embeddings-v3,jina-v3;text-embedding-3-small,openai-small"
 ```
 
-The syntax uses semicolon-separated groups of comma-separated equivalent model names. Each group must contain at least two names.
-
-## Apple Silicon Memory and Batching
-
-On macOS Apple Silicon, CoreML auto-detects unified memory by reading `sysctl hw.memsize`. Vera treats half of system RAM as the available GPU pool, and like other GPU backends uses batches of at most 16.
-
-## Notes
-
-- Custom ONNX options only affect opt-in Jina ONNX local embeddings. API mode and the default Potion Code model are unchanged.
-- Query and document prefixes apply to both API mode and local ONNX embeddings. API mode reads `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_DOCUMENT_PREFIX`, with model-ID auto-detection when they are unset. Local ONNX uses the corresponding `--embedding-query-prefix` and `--embedding-document-prefix` setup flags.
-- The stored embedding model identity covers every `--embedding-*` setting, not just the model name, so changing pooling or either prefix also requires a re-index.
-- If you switch local embedding models without configured aliases, re-index the repo so the stored vectors match the active model.
-- If your network blocks CLI downloads, use [manual-install.md](manual-install.md).
+If your network blocks downloads from the command line, see [Manual install](manual-install.md).

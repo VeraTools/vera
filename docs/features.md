@@ -1,335 +1,219 @@
 # Features
 
-Vera (Vector Enhanced Reranking Agent) is a code search tool that combines BM25 keyword matching, vector similarity, deterministic ranking, and optional cross-encoder reranking. This page covers everything it can do.
+A tour of what Vera can do, grouped by task. For writing good queries, see the [query guide](query-guide.md). For every setting, see [configuration](configuration.md).
 
-## Search Pipeline
+## Search
 
-### Hybrid Retrieval (BM25 + Vector)
+### Search by behavior or by name
 
-Every query runs two retrieval paths in parallel:
-
-- **BM25 keyword search** via Tantivy. Handles exact identifiers, config keys, and literal strings.
-- **Vector similarity search** against the memory-mapped `.vera/vectors.f32` sidecar using SIMD L2 distance (`VERA_VECTOR_SCAN=vec0` selects sqlite-vec instead). Catches conceptual matches even when the exact words don't appear in the code.
-
-Results from both paths merge through Reciprocal Rank Fusion (RRF), so a result that scores well in both lists rises to the top. Full details: [how-it-works.md](how-it-works.md).
-
-When a query carries path glob, exact path, or language filters, the flat vector scan skips ineligible chunks before hydration: only eligible chunks compete for the top-K and only the filtered top-K is hydrated. This is on by default and results are byte-identical to the unfiltered path. Control it with `retrieval.vector_filter_during_scan` in config (default `true`) or `VERA_VECTOR_FILTER_DURING_SCAN` in the environment; the env var wins over the config file. The sqlite-vec backend (`VERA_VECTOR_SCAN=vec0`) ignores this knob. Decision record: [adr/008-filter-during-scan-default.md](adr/008-filter-during-scan-default.md).
-
-### Cross-Encoder Reranking
-
-After fusion, Vera can send the top candidates to a cross-encoder that reads query and candidate together as a single pair. Reranking is controlled by `retrieval.reranking_enabled` and is off by default; the deterministic heuristic stack ranks results when it is disabled.
-
-Vera supports local cross-encoders (Jina) and remote reranking endpoints (Qwen/OpenRouter, Jina, Cohere, or Voyage AI `rerank-2` with `RERANKER_MODEL_BASE_URL=https://api.voyageai.com/v1`). The reranker wire protocol is configured via `retrieval.reranker_protocol` (`generic` with `top_n`/`results` or `voyage` with `top_k`/`data`); Vera auto-detects the variant from the reranker hostname and `retrieval.reranker_protocol` overrides it explicitly.
-
-The 2026-08-23 dual-set screening found no cross-encoder improvement over the no-reranker baseline. See [models.md](models.md#reranking) for the scores and optional reranking guidance.
-
-Large candidate sets are automatically batched (default 20 per request, configurable via `VERA_MAX_RERANK_BATCH`). Individual documents exceeding the reranker's context window are truncated at the last newline boundary before the character limit (default 4800, configurable via `VERA_MAX_RERANK_DOC_CHARS`). Both settings work automatically with no required configuration.
-
-### Multi-Query Search
-
-`vera search` accepts multiple quoted queries at once. Run 2-3 varied queries to capture different aspects of what you're looking for (e.g., "OAuth token refresh", "JWT expiry handling", "auth middleware"). Results merge with reciprocal rank fusion, which cuts round-trips and improves recall when one phrasing misses relevant code.
-
-### Intent-Based Reranking
-
-`vera search --intent "goal"` lets you describe your higher-level goal separately from the search query. Vera folds that intent into the retrieval query so ranking can target what you actually need, not just the short keyword you typed. This is useful when the query is ambiguous or too short to convey enough context.
-
-### Deep Search
-
-`vera search "query" --deep` runs a BM25 pre-filter to collect real symbol names and file paths from the index, feeds those as context hints to an LLM completion endpoint, and decomposes the query into targeted sub-queries that each search for a different code location or concept. Sub-queries run in parallel, and results merge via weighted Reciprocal Rank Fusion (the original query counts double). This finds code across multiple relevant locations rather than just rephrasing the same intent.
-
-Requires a completion endpoint: set `VERA_COMPLETION_BASE_URL` and `VERA_COMPLETION_MODEL_ID` (any OpenAI-compatible chat endpoint works, including local llama.cpp). When no completion endpoint is configured, `--deep` falls back to iterative symbol-following: it extracts symbol names from top results and searches for those symbols automatically.
-
-### Compact Mode
-
-`vera search "query" --compact` strips function and class bodies from results, returning only signatures (name, parameters, return type). This fits more results into fewer tokens, making it useful for broad exploration before drilling into specific implementations. Works with `vera grep` too. Falls back to the first 3 lines for languages or chunks where body stripping isn't applicable.
-
-### Git-Aware Search Scopes
-
-When a task is limited to modified files or a PR diff, scope the search before broadening the query:
-
-- `--changed`: modified, staged, and untracked files in the current working tree
-- `--since <rev>`: files changed since a specific revision
-- `--base <rev>`: files changed since `merge-base(HEAD, <rev>)`
-
-These flags work with `vera search`, `vera grep`, and `vera overview`. Git state is read from the repository containing the indexed directory, and the result is limited to files inside that directory, so indexing a package inside a monorepo scopes to that package rather than to the whole repository.
-
-### Query-Aware Ranking
-
-A deterministic ranking stage between fusion and reranking handles cases that dense retrieval alone is bad at: exact filename queries, path-heavy config lookups, noisy test/docs matches, and broad natural-language queries that need structural results. It also pulls in related implementation blocks or same-file context when the initial hit is too narrow.
-
-### Corpus-Aware Search Scopes
-
-Filter results by corpus category with `--scope`:
-
-| Scope | What it includes |
-|-------|-----------------|
-| `source` | Application source code (default bias) |
-| `docs` | Markdown, READMEs, ADRs, guides |
-| `runtime` | Extracted runtime trees, bundled app code |
-| `all` | Everything, no filtering |
-
-Vera favors source files by default. Docs, runtime extracts, and generated/minified files are still indexed but deprioritized unless you explicitly request them. Add `--include-generated` to include dist/minified/generated artifacts.
-
-### Search Filters
-
-Narrow results by language (`--lang rust`), file path glob (`--path "src/**/*.rs"`), symbol type (`--type function`), corpus scope (`--scope source`), and result count (`--limit 5`). Repeat `--path` for multiple patterns. Path patterns use OR semantics; other filters combine with AND semantics.
-
-## Parsing and Indexing
-
-### Tree-Sitter Structural Parsing
-
-65 languages supported, 61 with tree-sitter grammars compiled into the binary. Functions, classes, structs, traits, interfaces, methods, and `impl` blocks are extracted as discrete chunks. Results map to actual symbol boundaries, not arbitrary line ranges. The remaining 4 formats (TOML, YAML, JSON, and Markdown) use text-based chunking.
-
-Parser support and text fallbacks: [supported-languages.md](supported-languages.md).
-
-### Adaptive Chunking
-
-Large symbols (>200 lines) are split at logical boundaries: closing braces, semicolons, blank lines. This preserves readability instead of cutting at arbitrary line counts. Languages without a tree-sitter grammar fall back to sliding-window chunking. Module-level gaps between symbols are kept as chunks when they carry useful retrieval context.
-
-A post-processing pass splits chunks at line boundaries using `indexing.max_chunk_bytes` (default 24KB, env `VERA_MAX_CHUNK_BYTES`). This retrieval chunk budget is separate from the model input window: local encoders tokenize and truncate to their configured maximum length. An API provider can reject a chunk within the byte budget when its token limit is smaller; reduce the budget for that model.
-
-### Incremental Updates
-
-`vera update .` compares content hashes against the stored index and only re-parses, re-chunks, and re-embeds changed files. For small changes this takes seconds, not minutes.
-
-Pass `--max-files <N>` to bound the number of added or modified files processed in a single run. Any remaining files are reported as deferred in the update summary so you can process them in subsequent runs.
-
-### File Watching
-
-`vera watch .` monitors the project for file changes and triggers incremental index updates automatically (debounced at 2s). Keeps the index fresh during long coding sessions without manual intervention. Progress logs print to stderr so you can see when updates start, complete, or skip.
-
-### Flexible Exclusions
-
-Vera respects `.gitignore` by default. For more control, `.veraignore` (gitignore syntax) gives full control over what gets indexed. Use `#include .gitignore` at the top to layer extra exclusions on top of gitignore rules. One-off `--exclude` flags, `--no-ignore`, and `--no-default-excludes` are also available.
-
-### Path Explainability
-
-`vera explain-path path/to/file` explains the decisive reason a file is or is not indexed. It reports default excludes, `.veraignore`, `.ignore`, `.gitignore`, size limits, binary detection, missing files, and more. Use this instead of guessing when a file is unexpectedly missing from search results.
-
-### Progress Reporting
-
-Indexing and updating show an interactive progress display with file discovery, classification, parsing, and embedding generation phases. The embedding line includes the rate, an ETA, and any retries or timeouts. Pass `--no-progress` to turn progress off.
-
-When stderr is not a terminal (CI, agents, `--json` runs), slow embedding runs print a plain line to stderr at most every 10 seconds, plus a final line:
-
-```text
-embedding 512/1772 chunks, 41.2 chunks/s, ETA 31s, 1 retry, 0 timeouts
+```bash
+vera search "retry failed uploads with exponential backoff"
+vera search "parse_config"
 ```
 
-Runs that finish within 10 seconds print nothing. Stdout carries only the summary, so `--json` output stays one JSON object. Besides the file and chunk counts, the `vera index --json` and `vera update --json` summaries include `embeddings_reused`, `embedding_requests`, `embedding_retries`, `embedding_timeouts`, `embedding_failed_batches`, and `phase_secs` (busy seconds per stage; stages overlap, so they do not add up to `elapsed_secs`). Request counters are 0 for local backends.
+Each query runs two searches at once: keyword search (BM25), which is good at exact identifiers, paths, and config keys, and embedding search, which finds code that matches the meaning of the query even when the words differ. Vera merges the two result lists, then applies code-aware ranking. [How Vera works](how-it-works.md) explains each step.
 
-### Resumable API Indexing
+Ranking prefers source files over docs and tests, leaves generated code out unless you pass `--include-generated`, and prefers the definition of a symbol over places that only mention it. Results are returned five at a time by default; change that with `--limit` or `retrieval.default_limit`.
 
-If an API-backed `vera index` fails partway, the embeddings it already received are kept in `<repo>/.vera.resume/`. The next `vera index` reuses the ones whose chunk text, model, and document prefix still match, and reports them as `embeddings_reused`. The live `.vera/` index is not touched until a build finishes, and a successful full build deletes `.vera.resume/`.
+### Filters
 
-### Verbose Indexing
+| Filter | Example | Effect |
+|---|---|---|
+| `--lang` | `--lang rust` | One language |
+| `--path` | `--path "src/**/*.ts"` | Files matching a glob, relative to the repository root. Repeat it to match any of several patterns. |
+| `--type` | `--type function` | One symbol type (`function` and `method` are interchangeable) |
+| `--scope` | `--scope docs` | Only `source` (code, tests, and config), `docs`, `runtime` (extracted or bundled app code), or `all`. Without it, every indexed file except generated ones can match, and source ranks first. Generated files need `--include-generated` with any scope. |
+| `--include-generated` | | Include minified and other generated files, which results leave out by default |
+| `--limit` | `--limit 10` | Number of results |
 
-`vera index . --verbose` shows detailed skipped-file output for categories Vera discovers after walking the tree, such as oversized files. For exact exclusion debugging, use `vera explain-path path/to/file`.
+Filters combine with AND. Multiple `--path` patterns combine with OR.
 
-### Index Health
+### Several phrasings at once
 
-`vera stats` shows persisted file-level index health. `vera stats --json` returns the same data in machine-readable form:
+```bash
+vera search "OAuth token refresh" "JWT expiry handling" "auth middleware"
+```
 
-- files whose tree-sitter parse tree contained error nodes
-- files that fell back to Tier 0 line chunking
-- files that failed to parse and therefore produced no indexed chunks
+Vera runs each query and merges the results into one ranked list. This is cheaper than three separate calls and catches code that one phrasing would miss.
 
-This makes parser regressions and partial indexing visible instead of silent.
+### Intent
 
-## Code Intelligence
+```bash
+vera search "config" --intent "find where database connection strings are loaded"
+```
 
-### Call Graph and Reference Finding
+`--intent` adds your goal to a short or ambiguous query so ranking can aim at what you need.
 
-`vera references foo` returns indexed caller matches as search-style snippets. `vera references foo --callees` lists calls recorded inside a definition. Add `--changed`, `--since`, or `--base` to scope the results to a diff. Reference data comes from tree-sitter AST extraction, not whole-program type resolution.
+### Deep search
 
-Call sites are stored under the symbol's name, so definitions sharing a name share an answer. Indexing also records the receiver each call was written through, so `vera references get --receiver app` returns only `app.get(...)` calls and leaves dictionary lookups out. The output names the available receivers whenever more than one exists. See [query-guide.md](query-guide.md) for when this matters.
+```bash
+vera search "how a request becomes a response" --deep
+```
 
-### Agent-Oriented Structural Search
+`--deep` is for questions whose answer is spread across several places. With a chat completion endpoint configured (`VERA_COMPLETION_BASE_URL` and `VERA_COMPLETION_MODEL_ID`, any OpenAI-compatible server including a local one), Vera first collects real symbol and file names from the index, asks the model to break the question into targeted sub-queries, runs them in parallel, and merges the results with the original query weighted highest. Without a completion endpoint, `--deep` follows the symbols named in the top results and searches for those instead.
 
-`vera structural <intent> [query]` covers the common structural tasks agents hit repeatedly without forcing raw tree-sitter syntax.
+### Compact results
 
-- `definitions <symbol>` finds symbol definitions by name
-- `env [NAME]` finds environment variable reads, optionally narrowed to one variable
-- `routes` finds common HTTP route registrations
-- `sql` finds common SQL execution sites
-- `impls <symbol>` finds explicit implementations, conformances, and inheritance declarations
+```bash
+vera search "request validation" --compact
+```
 
-`routes` and `sql` take no query term and reject one rather than ignoring it. Narrow those two with `--path`, `--lang`, `--type`, or `--scope`.
+`--compact` returns signatures (name, parameters, return type) without bodies, so more results fit in fewer tokens. It is useful for a broad first look before reading specific functions. It also works with `grep`, `references`, and `structural`.
 
-`impls` only returns explicit declarations. It does not guess implicit interface satisfaction in languages where that would require semantic analysis.
+### Search what changed
 
-Use this as the default structural workflow. Use `vera references` for exact caller/callee questions.
+```bash
+vera search "token validation" --changed       # modified, staged, and untracked files
+vera search "token validation" --since HEAD~5  # files changed since a revision
+vera search "token validation" --base main     # files changed on this branch
+```
 
-### Dead Code Detection
+The same flags work with `grep`, `structural`, `references`, and `overview`. In a monorepo, the scope is limited to files inside the indexed directory.
 
-`vera dead-code` reports functions and methods with no indexed caller matches, excluding common entry points such as `main`, `new`, and `default`. Treat these as cleanup candidates: name-based reference extraction can miss dynamic dispatch, reflection, generated calls, and callers outside the index, or match unrelated symbols with the same name. Verify reachability before deleting code.
+### Optional reranking
 
-### Project Overview
+A reranker (cross-encoder) rereads the query together with each top candidate and reorders them. It is off by default, and `vera setup --api` turns it on when you configure an API reranker. In our screening, no tested local reranker improved on Vera's built-in ranking, while the Qwen API reranker paired with Qwen embeddings scored highest overall. Turn reranking on with `vera config set retrieval.reranking_enabled true`; see [models](models.md#reranking) for options.
 
-`vera overview` generates an architecture summary: language breakdown, directory structure, entry points, symbol type distribution, complexity hotspots, and detected project conventions (frameworks, patterns, config files). Designed for agent onboarding so an AI agent can understand a codebase before diving in.
+## Navigate code
 
-### Regex Search
+### Structural queries
 
-`vera grep "pattern"` runs regex search over indexed files with configurable context lines, case sensitivity, and the same corpus filters as `vera search` (`--lang`, `--path`, `--type`, `--scope`). Repeat `--path` to match any of several patterns. When every `--path` pattern matches zero-indexed files, Vera prints a stderr hint suggesting the wildcard directory alternative (for example, `crates/vera-core/src/**` instead of `crates/*/src`). It complements semantic search for exact string matching, import statements, TODOs, and known identifiers.
+```bash
+vera structural definitions parse_config   # where a symbol is defined
+vera structural env DATABASE_URL           # where an environment variable is read (omit the name for all)
+vera structural routes                     # HTTP route registrations
+vera structural sql                        # SQL execution sites
+vera structural impls Loader               # types that implement, extend, or conform to Loader
+```
 
-## Model Backend
+These answer common questions directly from the index, without writing tree-sitter queries. `impls` reports explicit declarations (`implements`, `extends`, `impl Trait for Type`, and similar); it does not infer implicit interface satisfaction. `routes` and `sql` take no query term; narrow them with `--path`, `--lang`, or `--scope`.
 
-### Local-First, Model-Agnostic
+### Callers and callees
 
-Indexing, storage, and search always stay on your machine. The backend choice only affects where embeddings and reranking run:
+```bash
+vera references parse_config             # who calls it
+vera references parse_config --callees   # what it calls
+vera references get --receiver app       # only calls written as app.get(...)
+```
 
-- **Potion Code**: `vera setup --potion-code` selects the default `minishlab/potion-code-16M-v2` static embedding model. It runs locally on CPU on any supported machine.
-- **Jina ONNX GPU**: `vera setup --onnx-jina-cuda` or another `--onnx-jina-*` flag selects an opt-in ONNX embedding backend. The local pipeline runs without external calls.
-- **API mode (Qwen preset, recommended)**: `qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b` via `https://openrouter.ai/api/v1` with a single shared key and the generic rerank protocol (auto-detected). Or point at any OpenAI-compatible endpoint (remote APIs or local servers like llama.cpp). Only model calls leave your machine. Query prefixes for asymmetric embedding models (Qwen3, CodeRankEmbed, E5, BGE) are auto-detected from the model ID. Override with `EMBEDDING_QUERY_PREFIX` for unsupported models. See [llama-cpp-setup.md](llama-cpp-setup.md) for a step-by-step guide.
+Call sites are extracted from the syntax tree at index time and matched by name, not resolved by a type checker. When several definitions share a name, the output lists the receivers the calls went through, and `--receiver` keeps just one.
 
-### Curated Local Models
+### Dead code candidates
 
-Vera includes a default local embedding model and opt-in Jina and CodeRankEmbed alternatives. See [Models and Backends](models.md) for model roles, screening results, and setup details.
+```bash
+vera dead-code
+```
 
-The default local embedding model is `minishlab/potion-code-16M-v2`:
+Lists functions and methods with no indexed callers, skipping common entry points such as `main`, `new`, and `default`. Treat the list as candidates: dynamic dispatch, reflection, generated code, and callers outside the index are invisible to name matching, so confirm before deleting.
 
-| Model | Role |
-|-------|------|
-| [minishlab/potion-code-16M-v2](https://huggingface.co/minishlab/potion-code-16M-v2) | Default local code embedding model |
+### Project overview
 
-The Jina ONNX backends use these local models:
+```bash
+vera overview
+vera overview --base main
+```
 
-| Model | Role |
-|-------|------|
-| [jina-embeddings-v5-text-nano-retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval) | Embedding model |
-| [jina-reranker-v2-base-multilingual](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual) | Cross-encoder reranker |
+Summarizes the project: languages, directory layout, entry points, symbol counts, complexity hotspots, and detected frameworks and conventions. It is a quick orientation for a person or an agent new to the codebase.
 
-An optional [CodeRankEmbed](https://huggingface.co/Zenabius/CodeRankEmbed-onnx) preset is available for embedding-heavy or no-rerank experiments. Details: [models.md](models.md).
+### Regex search
 
-### GPU Acceleration
+```bash
+vera grep "TODO|FIXME" --path "src/**"
+vera grep "queryClient" -i --context 3
+```
 
-Auto-detected during setup. Supported backends:
+Regex search over indexed files, with the same filters and git scopes as `vera search`. It uses Rust regex syntax: `|` is alternation and `\|` matches a literal pipe. Use `rg` instead for files outside the index, counting matches, or find-and-replace work.
 
-| Flag | Hardware |
-|------|----------|
-| `--potion-code` | Default local inference, runs locally on CPU |
-| `--onnx-jina-cuda` | NVIDIA (CUDA 12+) |
-| `--onnx-jina-rocm` | AMD (Linux, ROCm) |
-| `--onnx-jina-directml` | Any DirectX 12 GPU (Windows) |
-| `--onnx-jina-coreml` | Apple Silicon (macOS) |
-| `--onnx-jina-openvino` | Intel GPU/iGPU (Linux) |
+## Indexing
 
-Vera downloads the matching ONNX Runtime build automatically. For OpenVINO and ROCm, it installs via pip into a managed venv.
+### Symbol-aware chunks
 
-### Adaptive GPU Batching
+Vera parses files with tree-sitter and indexes functions, classes, methods, structs, traits, interfaces, and `impl` blocks as separate chunks, each labeled with its path, line range, and symbol name. Symbols longer than 200 lines are split at natural boundaries and keep their name with a part number. Config files are indexed whole, Markdown and reStructuredText by section, and files in unrecognized formats by line windows. See [supported languages](supported-languages.md).
 
-Local ONNX indexing shapes micro-batches from actual token lengths rather than using a fixed batch size. Long inputs shrink roughly with the square of padded sequence length. Vera learns safe batch windows per length bucket from real successes and allocation failures, persists them across runs, and warm-starts on the next session. On constrained GPUs, pass `--low-vram` to force conservative settings.
+Any chunk larger than `indexing.max_chunk_bytes` (24 KB by default) is split at line boundaries. That budget is separate from the embedding model's input window: local models truncate longer input to their maximum length, and an API provider with a smaller token limit can reject a chunk that fits the budget. If that happens, lower `indexing.max_chunk_bytes` and run `vera index .` again.
 
-### Custom Local Embeddings
+### Updates and watch mode
 
-Swap the opt-in Jina ONNX embedding model without changing the rest of that pipeline. Point at a Hugging Face repo, a direct URL, or a local directory with custom pooling, query prefix, and dimension settings. Local rerankers support Hugging Face repository, revision, ONNX file, and tokenizer overrides through `LOCAL_RERANKER_*` environment variables; see [Configuration](configuration.md) for the complete reference.
+```bash
+vera update .                    # re-index only changed files
+vera update . --max-files 250    # cap the work in one run
+vera watch .                     # update automatically as files change
+```
 
-## Output and Integration
+`vera update` compares content hashes and re-parses and re-embeds only the files that changed. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
 
-### Token-Efficient Output
+Search warns when the index is behind the working tree and tells you how many files changed.
 
-Markdown codeblocks return the matching chunks rather than their entire files. `--compact` further reduces output to signatures; `retrieval.max_output_chars` sets a character budget. Savings depend on the query and how the agent follows the results. The [agent benchmark](benchmarks-history.md#agent-level-benchmark) records measured context use and its sample limits.
+### Choosing what gets indexed
 
-### Response Truncation
+Vera skips anything in `.gitignore`, plus common build and dependency directories (`node_modules`, `target`, `dist`, `.venv`, and others). For more control, add a `.veraignore` file in gitignore syntax; put `#include .gitignore` on its first line to keep the gitignore rules and add your own on top. One-off options: `--exclude <glob>`, `--no-ignore`, and `--no-default-excludes`.
 
-Output is progressively truncated to fit a total character budget (`retrieval.max_output_chars`, default 0 unlimited, env `VERA_MAX_OUTPUT_CHARS`). When set to 0, output is not truncated. When non-zero, lower-ranked results are truncated first, at a line boundary, with a `[...truncated]` marker. Short results pass through unchanged.
+If a file you expect is missing, ask Vera why:
 
-### Multiple Output Formats
+```bash
+vera explain-path src/generated/schema.ts
+```
+
+It reports the deciding rule: a default exclude, an ignore file, the size limit, binary detection, and so on.
+
+### Index health
+
+`vera stats` shows file, chunk, and language counts, the index size, and parse health: files where tree-sitter found syntax errors, files that fell back to line chunking, and files that failed to parse. Problems show up here instead of quietly lowering search quality. Add `--json` for scripts.
+
+### Indexing with an API backend
+
+API indexing sends requests in parallel, retries timeouts and rate limits with backoff, and honors `Retry-After`. If a run fails partway, the embeddings already received are saved in `.vera.resume/`, and the next `vera index` reuses them instead of paying for them again. The existing index stays usable until a new build finishes.
+
+Indexing shows a progress display in a terminal. In CI or agent runs, it prints a short progress line to stderr every 10 seconds on slow runs, and `--json` prints a summary with file, chunk, request, retry, and timing counts.
+
+## Output
 
 | Flag | Output |
-|------|--------|
-| *(default)* | Markdown codeblocks with file path, line range, and symbol metadata |
-| `--json` | Compact single-line JSON |
-| `--json --rerank-status` | Search-only object with `results`, `reranked`, `reranker` (`api`, `local`, or null), and `rerank_fallback_reason` (string or null). Without `--rerank-status`, search JSON stays a bare results array. |
-| `--raw` | Verbose human-readable output for `search`, `grep`, and `references`. Works before or after the subcommand. |
-| `--timing` | Timing info to stderr (`search`: per-stage, `grep`: total). Works before or after the subcommand. |
+|---|---|
+| (default) | Markdown code blocks labeled with path, line range, and symbol |
+| `--compact` | Signatures only |
+| `--json` | Compact JSON |
+| `--raw` | Verbose, human-readable output with every field |
+| `--timing` | Timings on stderr: per stage for `search`, total time for `grep` and `structural` |
 
-## MCP Server
+`--json`, `--raw`, and `--timing` can go before or after the subcommand. `vera search --json --rerank-status` also reports whether results were reranked and, if not, why.
 
-`vera mcp` exposes a small set of high-value tools over JSON-RPC (stdio), compatible with any MCP client:
+Search output has no length limit by default. Set `retrieval.max_output_chars` (or `VERA_MAX_OUTPUT_CHARS`) to cap the total characters; lower-ranked results are trimmed first, at a line boundary.
 
-| Tool | What it does |
-|------|-------------|
-| `search_code` | Hybrid search with multi-query, intent, all filters, and git-scoped changed-file search. Auto-indexes and starts watcher on first use. |
-| `get_stats` | File count, chunk count, index size, language breakdown, and index health |
-| `get_overview` | Architecture overview with conventions detection and optional git-scoped filtering |
-| `regex_search` | Regex search with context lines, scope controls, and git-scoped filtering |
-| `structural_search` | Agent-oriented structural intents for definitions, env reads, routes, SQL, and explicit implementation lookups |
-| `find_references` | Indexed caller or callee matches, with optional git-scoped filtering |
-| `explain_path` | Explain why a file is or is not indexed |
+## Agent integration
 
-Tool descriptions include explicit WHEN TO USE / WHEN NOT TO USE guidance so AI agents route queries to the right tool automatically.
+- **Skill files.** `vera agent install` installs a Vera skill for more than 30 agent clients, globally or per project. It tells the agent which Vera command fits which question and when to use `grep` instead. See [installation](installation.md#set-up-agent-skills).
+- **Project instructions.** The installer can add a short Vera section to `AGENTS.md`, `CLAUDE.md`, and similar files, kept current between `<!-- vera:begin -->` and `<!-- vera:end -->` markers.
+- **Keeping skills current.** `vera agent sync` refreshes outdated skill copies and project sections. Upgrades do this on their own.
+- **MCP server.** `vera mcp` exposes search, regex, structural, references, overview, explain-path, and stats tools to MCP clients, indexing on first use and keeping the index current. See [MCP](mcp.md).
 
-Docker images available for CPU, CUDA, ROCm, and OpenVINO. Details: [docker.md](docker.md).
+## Models and backends
 
-## Agent Integration
+- **Default.** Potion Code runs on CPU and needs only a one-time 32 MB download.
+- **Local GPU.** Jina ONNX backends for CUDA, ROCm, CoreML, DirectML, and OpenVINO. Batch sizes adapt to sequence length and available memory, and `--low-vram` forces conservative settings on small GPUs.
+- **API.** Any OpenAI-compatible embedding endpoint, with optional reranking through generic or Voyage-style rerank APIs.
+- **Switching.** `vera backend` changes the backend without rerunning the full setup.
 
-### Skill Files for Agent Clients
+Details and measurements: [models and backends](models.md).
 
-`vera agent install` installs skill files that teach AI agents how to write effective queries, when to use semantic search vs regex, and how to interpret results. Supports Junie, Claude Code, Cursor, Windsurf, Copilot, Cline, Roo Code, and 30+ agent clients. Skills install globally or per-project. Interactive installation preselects existing clients and adds or updates selected skills. An empty selection makes no changes; unselected installations stay in place. Use `vera agent remove` to remove skills.
+### HTTP inference server
 
-### Agent Config Snippets
+```bash
+vera serve --port 3000
+```
 
-During setup, Vera offers to add a usage snippet to your project's agent config file (`AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, `.windsurfrules`) so agents discover Vera automatically.
+`vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
 
-### Syncing Stale Skills
+## Maintenance
 
-`vera agent sync` refreshes stale skill installs and updates Vera-owned project snippets marked with `<!-- vera:begin -->` / `<!-- vera:end -->`.
+| Command | What it does |
+|---|---|
+| `vera doctor` | Checks configuration, model files, the index, and whether a newer release exists. `--probe` also loads the backend to test it. Exits 1 on failure. |
+| `vera repair` | Re-downloads missing or damaged model files and runtimes. |
+| `vera upgrade` | Shows the update plan; `--apply` runs it. |
+| `vera config` | Shows settings; `vera config get` and `vera config set` read and change them. |
+| `vera uninstall` | Removes Vera's binary, models, config, and agent skills. Project indexes stay. |
 
+## Platforms
 
-## CLI Tooling
-
-### Interactive Setup Wizard
-
-`vera setup` walks through backend configuration, optional agent skill installation, and optional project indexing. Potion Code CPU is the default; API mode is the second choice, with Qwen/OpenRouter recommended among API providers. Indexing defaults to Yes for local backends and No for API mode. Use explicit backend flags for a shorter configuration flow, or add `--yes` for non-interactive setup.
-
-### Backend Management
-
-`vera backend` manages the model backend separately from the full setup wizard. Switch GPU backends, pick the default Potion Code model, swap opt-in ONNX embedding models, or reconfigure API endpoints without re-running setup.
-
-### HTTP Inference Server
-
-`vera serve` starts a local HTTP daemon exposing OpenAI-compatible and Cohere-compatible inference endpoints for standard Vera clients and external tools:
-
-- `POST /v1/embeddings`: OpenAI-compatible embedding format
-- `POST /v1/rerank`: Cohere/Jina-compatible reranker format
-- `GET /v1/health`: liveness probe and active model metadata
-
-Key flags:
-- `--port <PORT>`: TCP port to listen on (default: 3000)
-- `--host <HOST>`: bind address (default: 127.0.0.1)
-- `--api-key <KEY>`: require Bearer token authentication (or set `VERA_SERVE_KEY`)
-- `--idle-timeout <SECS>` controls model eviction after inactivity; the default is 300 seconds and negative values keep models loaded.
-- Backend flags: `--potion-code`, `--onnx-jina-cuda`, `--onnx-jina-rocm`, `--onnx-jina-coreml`, `--onnx-jina-openvino`, `--onnx-jina-directml`, or `--api`
-
-The embedding model is loaded before the server accepts connections and kept, so the first request does not pay for a load. It is then subject to the same idle eviction as any other resident model, so under the default it is unloaded after 300 seconds with no requests and reloaded on the next one.
-
-The reranker is validated at startup too, but that probe is discarded rather than kept: a server that only answers `/v1/embeddings` would otherwise hold it for nothing. The first `/v1/rerank` request loads it again, for serving.
-
-### Diagnostics
-
-`vera doctor` reports the saved and active backend, installed version, checks GitHub for newer releases, and detects missing, corrupt, or truncated ONNX model caches. If model assets are damaged, it suggests running `vera repair --<backend>`; runtime embedding load errors provide the same repair hint. `--probe` adds a deeper read-only local backend check. `--json` outputs machine-readable diagnostics. It exits 1 when any check fails, matching the `overall_ok` field in the JSON report; warnings leave the exit code at 0. `vera repair` re-fetches missing or corrupt local assets.
-
-### Self-Updating
-
-`vera upgrade` inspects the current update plan and shows the exact command it would run. `--apply` executes it. Vera checks for new releases once per day and prints a hint when a newer version is available.
-
-### Configuration and Stats
-
-`vera config` shows the current configuration. `vera stats` shows index statistics plus persisted health signals such as tree-sitter errors, Tier 0 fallback, and parse failures.
-
-To allow switching between equivalent embedding model names without triggering a re-index, configure `embedding.model_aliases` in config or export `VERA_EMBEDDING_MODEL_ALIASES` (semicolon-separated groups of comma-separated aliases, such as `canonical,alias;other,other-alias`).
-
-### Uninstalling
-
-`vera uninstall` removes Vera's data directory (models, ONNX Runtime libs, config), agent skill files, and the PATH shim. A data directory containing files Vera did not create is left in place and reported. Per-project indexes (`.vera/` in each project) are left in place.
-
-### Cross-Platform
-
-Native binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64). GNU Linux builds require glibc 2.28 or newer; macOS and Windows use system libraries. Install via npm (`bunx @vera-ai/cli install`), pip (`uvx vera-ai install`), prebuilt binary, Docker, or build from source.
-
-A fully static musl-linked binary (`x86_64-unknown-linux-musl`) is available for environments without standard shared libraries (NixOS, Alpine, minimal containers). The default Potion Code CPU backend needs no additional inference runtime. Optional ONNX backends still load ONNX Runtime and provider dependencies. The npm and pip wrappers auto-detect musl-based systems and select the correct binary. To override target selection manually, set `VERA_TARGET` (e.g., `VERA_TARGET=x86_64-unknown-linux-musl bunx @vera-ai/cli install`). The chosen target is stored in the Vera data directory (see [Installation](installation.md#install-the-binary)) so upgrades preserve it.
-
-## Benchmarks
-
-See the [current Semble comparison](benchmarks.md#current-results) for the aggregate results.
+Native binaries for Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and Windows (x86_64), plus a static musl build for Linux systems without glibc. Install through npm, Bun, uv, pip, a prebuilt archive, Docker, or from source. See [installation](installation.md).

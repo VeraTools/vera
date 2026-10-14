@@ -1,117 +1,132 @@
-# Supported Languages
+# Supported languages
 
-Vera supports 65 languages and file formats. Each file is detected by extension (or filename for extensionless files like `Dockerfile` and `Makefile`).
+Vera recognizes 65 languages and file formats. It picks the language from the file extension, or from the full filename for files like `Dockerfile`, `Makefile`, `CMakeLists.txt`, and `nginx.conf`. Matching is case-insensitive.
 
-Most languages with a tree-sitter grammar get symbol-level chunking: functions, classes, structs, and methods are extracted as discrete search results. reStructuredText is also parsed with tree-sitter, but chunked by section headings instead of code symbols. Languages without a grammar fall back to sliding-window text chunking.
+Files with any other extension are still indexed, as plain text.
 
-## Systems & Low-Level
+## How files are chunked
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| Rust | `.rs` | ✅ |
-| C | `.c`, `.h` | ✅ |
-| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh` | ✅ |
-| Objective-C | `.m`, `.mm` | ✅ |
-| Zig | `.zig` | ✅ |
-| D | `.d`, `.di` | ✅ |
-| Fortran | `.f`, `.f90`, `.f95` | ✅ |
+The language decides how a file is split into search results:
 
-## JVM & .NET
+| Chunking | What you get |
+|---|---|
+| Symbols | Vera parses the file with tree-sitter and returns functions, classes, structs, methods, and similar definitions as separate results. Long symbols are split. |
+| Whole file | The file is one result, named after the file. Files larger than `indexing.max_chunk_bytes` are split at line boundaries. |
+| Sections | One result per heading. |
+| Line windows | Overlapping 50-line windows. Also used for files whose language Vera does not recognize. |
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| Java | `.java` | ✅ |
-| Kotlin | `.kt`, `.kts` | ✅ |
-| Scala | `.scala`, `.sc` | ✅ |
-| Groovy | `.groovy` | ✅ |
-| C# | `.cs` | ✅ |
-| F# | `.fs`, `.fsi`, `.fsx` | ✅ |
-| Clojure | `.clj`, `.cljs`, `.cljc` | ✅ |
+Use the value in the `--lang` column to filter results, for example `vera search "retry logic" --lang cpp`.
 
-## Web & Frontend
+## Systems and compiled languages
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| TypeScript | `.ts`, `.tsx` | ✅ |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | ✅ |
-| HTML | `.html`, `.htm` | ✅ |
-| CSS | `.css` | ✅ |
-| SCSS | `.scss` | ✅ |
-| Vue | `.vue` | ✅ |
-| Svelte | `.svelte` | ✅ |
-| Astro | `.astro` | ✅ |
-| Elm | `.elm` | ✅ |
-| GraphQL | `.graphql`, `.gql` | ✅ |
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| C | `.c`, `.h` | `c` | Symbols |
+| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh` | `cpp` | Symbols |
+| Rust | `.rs` | `rust` | Symbols |
+| Go | `.go` | `go` | Symbols |
+| Swift | `.swift` | `swift` | Symbols |
+| Objective-C | `.m`, `.mm` | `objectivec` | Symbols |
+| Zig | `.zig` | `zig` | Symbols |
+| D | `.d`, `.di` | `d` | Symbols |
+| Fortran | `.f`, `.f90`, `.f95` | `fortran` | Symbols |
 
-## Scripting
+## JVM and .NET
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| Python | `.py`, `.pyi` | ✅ |
-| Ruby | `.rb` | ✅ |
-| PHP | `.php` | ✅ |
-| Lua | `.lua` | ✅ |
-| Luau | `.luau` | ✅ |
-| Perl | `.pl`, `.pm` | ✅ |
-| R | `.r` | ✅ |
-| Julia | `.jl` | ✅ |
-| Matlab | `.mlx` | ✅ |
-| Dart | `.dart` | ✅ |
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| Java | `.java` | `java` | Symbols |
+| Kotlin | `.kt`, `.kts` | `kotlin` | Symbols |
+| Scala | `.scala`, `.sc` | `scala` | Symbols |
+| Groovy | `.groovy` | `groovy` | Symbols |
+| Clojure | `.clj`, `.cljs`, `.cljc` | `clojure` | Symbols |
+| C# | `.cs` | `csharp` | Symbols |
+| F# | `.fs`, `.fsi`, `.fsx` | `fsharp` | Symbols |
 
-## Functional
+## Scripting and application languages
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| Go | `.go` | ✅ |
-| Swift | `.swift` | ✅ |
-| Haskell | `.hs` | Tier 0 |
-| Elixir | `.ex`, `.exs` | ✅ |
-| Erlang | `.erl`, `.hrl` | ✅ |
-| OCaml | `.ml`, `.mli` | ✅ |
-| Common Lisp | `.lisp`, `.cl`, `.lsp` | ✅ |
-| Scheme | `.scm`, `.ss` | ✅ |
-| Racket | `.rkt` | ✅ |
-| Nix | `.nix` | ✅ |
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| Python | `.py`, `.pyi` | `python` | Symbols |
+| Ruby | `.rb` | `ruby` | Symbols |
+| PHP | `.php` | `php` | Symbols |
+| Perl | `.pl`, `.pm` | `perl` | Symbols |
+| Lua | `.lua` | `lua` | Symbols |
+| Luau | `.luau` | `luau` | Symbols |
+| R | `.r` | `r` | Symbols |
+| Julia | `.jl` | `julia` | Symbols |
+| MATLAB | `.mlx` | `matlab` | Symbols |
+| Dart | `.dart` | `dart` | Symbols |
+
+`.m` files are treated as Objective-C, not MATLAB.
+
+## Functional languages
+
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| Haskell | `.hs` | `haskell` | Line windows |
+| OCaml | `.ml`, `.mli` | `ocaml` | Symbols |
+| Elixir | `.ex`, `.exs` | `elixir` | Symbols |
+| Erlang | `.erl`, `.hrl` | `erlang` | Symbols |
+| Common Lisp | `.lisp`, `.cl`, `.lsp` | `commonlisp` | Symbols |
+| Scheme | `.scm`, `.ss` | `scheme` | Symbols |
+| Racket | `.rkt` | `racket` | Symbols |
+| Nix | `.nix` | `nix` | Symbols |
+
+Haskell files are indexed as line windows, so they do not produce symbols or entries for `vera references`.
+
+## Web and frontend
+
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| TypeScript | `.ts`, `.tsx` | `typescript` | Symbols |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | `javascript` | Symbols |
+| HTML | `.html`, `.htm` | `html` | Symbols (elements) |
+| CSS | `.css` | `css` | Symbols (rules) |
+| SCSS | `.scss` | `scss` | Symbols |
+| Vue | `.vue` | `vue` | Symbols |
+| Svelte | `.svelte` | `svelte` | Symbols |
+| Astro | `.astro` | `astro` | Symbols |
+| Elm | `.elm` | `elm` | Symbols |
+| GraphQL | `.graphql`, `.gql` | `graphql` | Symbols |
 
 ## Shell
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| Bash | `.sh`, `.bash` | ✅ |
-| Zsh | `.zsh` | ✅ |
-| Fish | `.fish` | ✅ |
-| PowerShell | `.ps1`, `.psm1` | ✅ |
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| Bash | `.sh`, `.bash` | `bash` | Symbols |
+| Zsh | `.zsh` | `zsh` | Symbols |
+| Fish | `.fish` | `fish` | Symbols |
+| PowerShell | `.ps1`, `.psm1` | `powershell` | Symbols |
 
-## GPU Shaders
+## Shaders
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| GLSL | `.glsl`, `.vert`, `.frag`, `.geom`, `.comp`, `.tesc`, `.tese` | ✅ |
-| HLSL | `.hlsl`, `.hlsli`, `.fx` | ✅ |
+| Language | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| GLSL | `.glsl`, `.vert`, `.frag`, `.geom`, `.comp`, `.tesc`, `.tese` | `glsl` | Symbols |
+| HLSL | `.hlsl`, `.hlsli`, `.fx` | `hlsl` | Symbols |
 
-## Infrastructure & Config
+## Schema, infrastructure, and build files
 
-| Language | Extensions | Symbol extraction |
-|----------|-----------|:-:|
-| SQL | `.sql` | ✅ |
-| HCL / Terraform | `.tf`, `.hcl` | ✅ |
-| Protobuf | `.proto` | ✅ |
-| Dockerfile | `Dockerfile` | ✅ |
-| CMake | `.cmake`, `CMakeLists.txt` | ✅ |
-| Makefile | `Makefile`, `GNUmakefile` | ✅ |
-| Nginx | `.nginx`, `nginx.conf` | ✅ |
-| Prisma | `.prisma` | ✅ |
-| XML | `.xml`, `.xsl`, `.xsd`, `.svg` | ✅ |
-| INI | `.ini`, `.cfg`, `.conf` | ✅ |
+| Language | Extensions or filenames | `--lang` | Chunking |
+|---|---|---|---|
+| SQL | `.sql` | `sql` | Symbols |
+| HCL and Terraform | `.tf`, `.hcl` | `hcl` | Symbols |
+| Protocol Buffers | `.proto` | `protobuf` | Symbols |
+| Prisma | `.prisma` | `prisma` | Symbols |
+| XML | `.xml`, `.xsl`, `.xsd`, `.svg` | `xml` | Symbols (elements) |
+| Dockerfile | `Dockerfile` | `dockerfile` | Whole file |
+| CMake | `.cmake`, `CMakeLists.txt` | `cmake` | Whole file |
+| Makefile | `Makefile`, `GNUmakefile` | `makefile` | Whole file |
+| Nginx | `.nginx`, `nginx.conf` | `nginx` | Whole file |
+| INI | `.ini`, `.cfg`, `.conf` | `ini` | Whole file |
 
-## Data & Markup
+## Data and documentation
 
-| Format | Extensions | Symbol extraction |
-|--------|-----------|:-:|
-| TOML | `.toml` | - |
-| YAML | `.yaml`, `.yml` | - |
-| JSON | `.json` | - |
-| Markdown | `.md`, `.markdown` | - |
-| reStructuredText | `.rst` | Section-level (tree-sitter) |
-
-Files with unrecognized extensions are indexed using text chunking.
+| Format | Extensions | `--lang` | Chunking |
+|---|---|---|---|
+| TOML | `.toml` | `toml` | Whole file |
+| YAML | `.yaml`, `.yml` | `yaml` | Whole file |
+| JSON | `.json` | `json` | Whole file |
+| Markdown | `.md`, `.markdown` | `markdown` | Sections |
+| reStructuredText | `.rst`, `.rst.inc` | `rst` | Sections |

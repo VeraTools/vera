@@ -1,205 +1,217 @@
 # Troubleshooting
 
-## No index found
-
-Either the repository hasn't been indexed yet, or you're running the command outside any indexed directory.
+Start with `vera doctor`. It checks the saved and active backend, model files, ONNX Runtime, and config, and suggests a fix for most problems it finds. `vera doctor --probe` adds a deeper read-only test of the local backend.
 
 ```bash
-vera index .
+vera doctor
+vera doctor --probe
+vera doctor --probe --json
 ```
 
-Run it from the repository root (the directory where `.vera/` should live). Search, grep, structural, references, overview, stats, and update commands resolve the nearest `.vera/` up the directory tree, so they also work from subdirectories.
+Each of these commands exits with status 1 when a check fails, so `vera doctor && vera index .` stops on a broken setup. Warnings, such as a missing config file or an unindexed directory, leave the exit status at 0.
 
-## Results are stale
+If your problem is not listed here, ask in [GitHub Issues](https://github.com/VeraTools/Vera/issues) or on [Discord](https://discord.gg/rXNQXCTWDt).
 
-Code changed after the last index. Update it:
+## Install and setup
 
-```bash
-vera update .
-```
+### `vera` is not found after installing on Windows
 
-The update runs from any subdirectory and refreshes the repository root's index. An identical stale warning is printed at most once every 10 minutes per index; set `VERA_STALE_WARNING_ALWAYS=1` to see it on every run.
-
-## Results are irrelevant
-
-Try narrowing your search:
-
-- `--lang rust`: filter by language
-- `--path "src/**/*.ts"`: filter by file path; repeat it to match any of several patterns
-- `--type function`: filter by symbol type
-- `--limit 5`: return fewer results
-- Rewrite the query to be more specific about the behavior you're looking for
-
-See the [query guide](query-guide.md) for more tips on writing effective queries.
-
-## Exact-match searches
-
-Use `vera grep` for exact string or regex matching across indexed files, and `rg` when you need counting, filename search, or files outside the index. Examples and syntax notes: [query guide](query-guide.md#when-to-use-vera-grep-vs-rg).
-
-## A file is missing
-
-`vera search` and `vera grep` only read indexed files. If the index is behind the working tree, Vera warns on stderr and shows how many files were added, modified, or deleted since the last refresh.
-
-Refresh the index with:
-
-```bash
-vera update .
-```
-
-If you are editing continuously, keep the index current with:
-
-```bash
-vera watch .
-```
-
-## `.vera/` is committed to git
-
-Add the project index to `.gitignore`:
-
-```bash
-printf '.vera/\n.vera.resume/\n' >> .gitignore
-git rm -r --cached .vera
-```
-
-The index is machine-local and can be large.
-
-## Does code leave the machine?
-
-Local embedding and reranking modes send nothing off-machine. API mode sends chunk text and queries to the configured endpoint. The update check contacts GitHub once a day and can be disabled with `VERA_NO_UPDATE_CHECK=1`. See [Privacy](../README.md#privacy).
-
-## MCP server does not appear
-
-Verify that `vera` is on the MCP client's `PATH`. If the client uses a restricted environment, set `command` to the absolute path of the Vera binary. Run `vera mcp` directly and inspect the client's MCP logs. See [MCP](mcp.md).
-
-## Indexing is slow on a large monorepo
-
-Use `.veraignore` for generated trees and vendor directories, and index the relevant project directory rather than the monorepo root. `vera update . --max-files 250` bounds one update run; use the value appropriate for the repository.
-
-## Windows PATH after installation
-
-The installer writes a shim to the user binary directory. Open a new shell after installation and confirm:
+The installer writes a shim to your user binary directory. Open a new shell and check:
 
 ```powershell
 Get-Command vera
 vera --version
 ```
 
-If the command is not found, add the installer-reported user bin directory to the user `PATH`, then open a new shell.
+If it is still not found, add the user bin directory that the installer printed to your user `PATH`, then open a new shell.
 
-## API errors
+### Downloads are blocked on your network
 
-Re-run setup and enter the endpoint URL, model ID, and API key when prompted:
+If Vera cannot download models or ONNX Runtime, for example on a network that only allows browser downloads, follow [Manual install](manual-install.md).
 
-```bash
-vera setup --api
-```
+### Building from source fails to link on macOS
 
-For non-interactive setup, check that all three environment variables are set before running `vera setup --api --yes`:
-
-- `EMBEDDING_MODEL_BASE_URL`
-- `EMBEDDING_MODEL_ID`
-- `EMBEDDING_MODEL_API_KEY`
-
-If the active embedding model name differs from the one stored in the index, re-index the repo. For verified equivalent model names, configure `embedding.model_aliases` with `vera config set`, or set `VERA_EMBEDDING_MODEL_ALIASES` as semicolon-separated groups of comma-separated aliases, such as `canonical,alias`.
-
-If you're using a reranker in non-interactive setup, its three variables (`RERANKER_MODEL_BASE_URL`, `RERANKER_MODEL_ID`, `RERANKER_MODEL_API_KEY`) must either all be set or all be absent. Partial configuration will fail.
-
-On a 429 the reranker retries briefly, then returns unreranked results. For batch workloads, set a positive `VERA_RERANK_RATE_LIMIT_WAIT_SECS` (for example `65`) to wait for a provider-reported quota reset, capped at that many seconds per retry. Unset or `0` keeps the short generic backoff; it does not enable unlimited waiting. See [Configuration](configuration.md#retrievalranking).
-
-If the provider returns a batch-size error such as `at most 100 requests can be in one batch`, lower the embedding batch size:
-
-```bash
-vera config set embedding.batch_size 100
-```
-
-Vera clamps known provider limits automatically. Gemini embedding endpoints are capped at 100 inputs per request.
-
-Embedding requests retry connection errors, 408, 429, and 5xx responses with jittered backoff, honoring `Retry-After` up to 60 seconds. A batch that times out or keeps failing goes to the back of the queue and is resent up to twice. Other 4xx responses and authentication errors fail at once. When indexing fails, stdout stays empty and stderr ends with a line of request, retry, and timeout counts followed by the error. Run `vera index` again: an API build resumes from the embeddings it already received.
-
-Error messages never include the endpoint URL or bearer tokens. They name the underlying cause instead, such as `tcp connect error: Connection refused`.
-
-If the provider returns `429` or `quota exceeded`, that is a provider-side limit. `embedding.max_concurrent_requests` only reduces how many requests Vera sends in parallel; it does not raise your API quota. Lower concurrency if you are hitting short burst limits, or wait for quota reset / enable billing if the project is out of quota.
-
-## Index is incomplete
-
-```text
-the index at ... is incomplete because an update stopped before it finished writing
-```
-
-A `vera update` was interrupted while writing. Search and `vera stats` refuse the index instead of reading partial data. Run `vera update` to repair it, or `vera index` to rebuild.
-
-## Keyword-only results
-
-A warning ending in `using BM25-only search` or `falling back to BM25-only results` on stderr, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run for that query and its results come from keyword matching alone. The text gives the cause:
-
-- The embedding endpoint failed, for example an expired key or a provider outage. See [API errors](#api-errors).
-- The index was built with a different embedding model or document prefix than the active configuration, or with more dimensions than the active model produces. Re-index with `vera index .`.
-- The index has no stored vectors, for example because `.vera/vectors.db` was deleted. Run `vera update .`, which re-embeds every file whose vectors are missing.
-
-## Reranker unavailable
-
-`Warning: reranker unavailable (...)` on stderr means search returned unreranked results. The text in parentheses gives the cause. If reranking is enabled but no reranker is configured, configure an endpoint or turn reranking off:
-
-```bash
-vera config set retrieval.reranking_enabled false
-```
-
-`vera search --json --rerank-status` reports `reranked`, `reranker`, and `rerank_fallback_reason` alongside the results.
-
-## ONNX Runtime errors
-
-Run the diagnostic command first:
-
-```bash
-vera doctor
-vera doctor --probe
-vera doctor --probe --json
-vera upgrade
-```
-
-Common causes:
-
-- ONNX assets have not been downloaded. Run the matching `vera setup --onnx-jina-*` command. To switch to the default local CPU model, run `vera setup --potion-code`; Potion Code does not use ONNX Runtime.
-- If assets are missing, corrupt, or truncated in the ONNX model cache, run `vera repair --<backend>` (such as `vera repair --onnx-jina-cuda` or `vera repair --potion-code`). `vera doctor` and embedding load errors detect damaged model files and print the matching repair command hint
-- Local ONNX Runtime auto-download failed. Check network, or set `ORT_DYLIB_PATH` to a manually installed library
-- If your network only allows browser downloads, use [manual-install.md](manual-install.md)
-- GPU backend not working. Make sure the required drivers are installed (CUDA 12+ for `--onnx-jina-cuda`, ROCm for `--onnx-jina-rocm`, DirectX 12 for `--onnx-jina-directml`). CoreML (`--onnx-jina-coreml`) requires macOS on Apple Silicon. OpenVINO (`--onnx-jina-openvino`) and ROCm (`--onnx-jina-rocm`) are installed automatically via pip; if the automatic install fails, install manually (`pip install onnxruntime-openvino` or `pip install onnxruntime-rocm`), then set `ORT_DYLIB_PATH` to the `libonnxruntime.so` inside the package. If GPU init still fails, use the default `--potion-code` backend or fix the provider-specific dependencies.
-- If CoreML reranking is enabled, it runs on CPU on Apple Silicon. CoreML accelerates the embedding model but **not** the reranker: no prebuilt reranker ONNX export is CoreML-compatible (the quantized Jina model has ops the CoreML EP cannot execute, and the fp16 export uses a float16 input dtype the CoreML EP rejects). Vera ships the quantized reranker for CoreML, which is the fastest CPU path, and selects the CPU execution provider for the reranker session explicitly. Do not assume ONNX Runtime falls back on its own: with the CoreML EP registered it still assigns a fused subgraph to CoreML, which builds successfully and then fails at inference with "Unable to compute the prediction using a neural network model (error code: -1)". `vera doctor --probe` flags this with a `probe-reranker-coreml-cpu` warning. Reranking is opt-in through `retrieval.reranking_enabled`; disable it with `vera config set retrieval.reranking_enabled false`.
-- On CUDA backends, Vera uses the detected toolkit/runtime libraries (`CUDA_PATH`, CUDA's `version.json` or `version.txt`, `nvcc --version`, and on Linux also `LD_LIBRARY_PATH` or `ldconfig`) to choose the CUDA 12 vs CUDA 13 ONNX Runtime build instead of the driver's maximum supported version. If you switch CUDA toolkits, rerun `vera repair --onnx-jina-cuda` to refresh the downloaded runtime.
-- On Windows DirectML, the ONNX Runtime is downloaded from NuGet (not GitHub releases). If the download fails, check your network or set `ORT_DYLIB_PATH` to a manually obtained `onnxruntime.dll` from the [Microsoft.ML.OnnxRuntime.DirectML NuGet package](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML).
-- On Windows, setup probes D3D12 adapter support before selecting DirectML; if no D3D12 device capability is found it falls back to CPU (Potion Code).
-- `vera doctor` flags missing, corrupt, or truncated model caches or runtime, shows the saved and active backend, prints the installed Vera version, suggests `vera repair --<backend>`, and checks for newer releases. `vera doctor --probe` adds a deeper read-only local backend probe and does not download or repair missing assets. Both exit 1 when a check fails, so `vera doctor && vera index .` stops on a broken setup; a broken or unparseable `config.json` is reported as a hard failure, while warnings such as a missing config file or an unindexed working directory leave the exit code at 0. `vera repair` is the write path if you need Vera to re-fetch local assets. `vera upgrade` shows the binary update plan and can apply it when the install method is known.
-- If a non-CPU ONNX session fails after dependency checks pass, Vera retries runtime embedding and reranker setup on CPU and logs a warning. Fix the GPU provider issue or switch to `--potion-code` if CPU fallback is too slow.
-
-If API mode hits an `exceed_context_size_error` during indexing, update to the latest Vera build. Current releases split and shrink pathological embedding inputs instead of aborting the whole batch on one oversized chunk.
-
-If Vera fails fast with a message like `CUDA backend selected, but required libraries are missing`, the ONNX Runtime CUDA provider was downloaded but your system linker cannot find the CUDA or cuDNN shared libraries it depends on. Install the required userspace libraries, refresh the linker cache if needed, then rerun `vera doctor --probe`.
-
-## GPU out of memory
-
-Vera auto-detects VRAM and adjusts batch size, but very low-VRAM GPUs (4 GB or less) may still run out of memory. Use the `--low-vram` flag:
-
-```bash
-vera index . --low-vram
-```
-
-This forces batch size 1 and caps the ONNX Runtime memory arena to 1 GB. You can also manually tune batch size with `vera config set embedding.batch_size 1`.
-
-Vera does not send every local GPU batch to ONNX at the configured `embedding.batch_size`. It tokenizes first, shrinks long-sequence micro-batches, and learns safer limits per sequence-length bucket from real runs. Those learned windows are stored in `adaptive-batch-scaler.json` inside Vera's data directory and reused on later runs for the same backend, device, and model. CoreML uses sequence-length batching without model-size cold-start dampening because Apple Silicon uses unified memory. If a pathological batch still trips an allocation error, Vera retries it at a smaller size instead of aborting the whole index.
-
-If you still see repeated retries or very slow indexing, lower `embedding.batch_size` manually or use `--low-vram`.
-
-## Uninstall shim
-
-Uninstall recognizes the PATH shim by matching the exact file the installer wrote (template match), not by parsing shell syntax, and it checks that the shim targets the binary recorded in `install.json` or a path inside the Vera data directory. It also resolves non-default `CARGO_HOME` locations when classifying cargo-installed binaries, so a custom cargo home is handled the same as the default.
-
-## Building from source
-
-On macOS 14+, the Xcode SDK compiles C dependencies (tree-sitter grammars, ring) for the running OS version, but Cargo's default minimum for `aarch64-apple-darwin` is macOS 11.0. The 11.0 ABI lacks newer symbols, so linking fails.
-
-Set the deployment target to your running macOS version before building:
+On macOS 14 and later, C dependencies are compiled for your running macOS version while Cargo targets macOS 11.0 by default, so linking fails. Set the deployment target first:
 
 ```bash
 export MACOSX_DEPLOYMENT_TARGET="$(sw_vers -productVersion)"
 cargo build --release
 ```
+
+## Indexing
+
+### No index found
+
+The repository has not been indexed, or you are outside any indexed directory. From the repository root:
+
+```bash
+vera index .
+```
+
+Search, grep, structural, references, overview, stats, and update look for the nearest `.vera/` in parent directories, so they also work from subdirectories.
+
+### Index is incomplete
+
+```text
+the index at ... is incomplete because an update stopped before it finished writing
+```
+
+A `vera update` was interrupted. Vera refuses to read the partial index. Run `vera update .` to repair it or `vera index .` to rebuild.
+
+### `.vera/` shows up in git
+
+The index is machine-local and can be large. Ignore it, along with the resume directory a failed API index leaves behind:
+
+```bash
+printf '.vera/\n.vera.resume/\n' >> .gitignore
+git rm -r --cached .vera
+```
+
+### Indexing a large monorepo is slow
+
+- Add generated trees and vendored code to `.veraignore`.
+- Index the project directory you work in rather than the monorepo root.
+- Cap a single update run with `vera update . --max-files 250` (pick a value that suits the repository).
+
+## Search results
+
+### Results are stale
+
+Code changed after the last index:
+
+```bash
+vera update .
+```
+
+This works from any subdirectory. To keep the index current while you edit, run `vera watch .`.
+
+Vera prints the stale-index warning at most once every 10 minutes per index. Set `VERA_STALE_WARNING_ALWAYS=1` to see it on every run.
+
+### A file is missing from results
+
+`vera search` and `vera grep` read only indexed files. When the index is behind your working tree, Vera warns on stderr with counts of added, modified, and deleted files. Run `vera update .`.
+
+If the file still does not appear, `vera explain-path <file>` tells you why it is excluded (ignore rules, binary detection, size limit, or a default exclusion).
+
+### Results are irrelevant
+
+- Describe the behavior you want rather than a single noun.
+- Filter with `--lang rust`, `--path "src/**/*.ts"` (repeat for several patterns), or `--type function`.
+- For exact strings or regex, use `vera grep`; for counting or files outside the index, use `rg`.
+
+The [query guide](query-guide.md) has more examples.
+
+### Keyword-only results
+
+A stderr warning ending in `using BM25-only search` or `falling back to BM25-only results`, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run and results come from keyword matching alone. The message gives the cause:
+
+- The embedding endpoint failed, for example an expired key or a provider outage. See [API mode](#api-mode).
+- The index was built with a different embedding model or document prefix than the active one, or with more dimensions than the active model returns. Rebuild with `vera index .`.
+- The index has no stored vectors, for example because `.vera/vectors.db` was deleted. Run `vera update .` to re-embed the missing files.
+
+### Reranker unavailable
+
+`Warning: reranker unavailable (...)` on stderr means results were returned without reranking. The text in parentheses gives the cause. If reranking is on but no reranker is configured, configure one ([Models](models.md#reranking)) or turn reranking off:
+
+```bash
+vera config set retrieval.reranking_enabled false
+```
+
+To check reranking for a query, run `vera search "<query>" --json --rerank-status`. The output includes `reranked`, `reranker`, and `rerank_fallback_reason`.
+
+## API mode
+
+### Reranking does not run after API setup
+
+Before v2.1.4, `vera setup --api` saved the reranker endpoint, including for the Qwen preset, but left reranking off. `vera doctor` warns about this. Run setup again, or turn reranking on directly:
+
+```bash
+vera config set retrieval.reranking_enabled true
+```
+
+### Setup or requests fail
+
+Re-run setup and enter the endpoint URL, model ID, and key:
+
+```bash
+vera setup --api
+```
+
+For `vera setup --api --yes`, all three of `EMBEDDING_MODEL_BASE_URL`, `EMBEDDING_MODEL_ID`, and `EMBEDDING_MODEL_API_KEY` must be set. The reranker variables (`RERANKER_MODEL_BASE_URL`, `RERANKER_MODEL_ID`, `RERANKER_MODEL_API_KEY`) must be all set or all unset.
+
+Error messages never contain the endpoint URL or keys. They name the underlying cause, such as `tcp connect error: Connection refused`.
+
+### Indexing stopped partway
+
+Vera retries connection errors, 408, 429, and 5xx responses with backoff, honoring `Retry-After` up to 60 seconds. A 400 response containing `Unable to process`, which some providers send when overloaded, is retried the same way. Other 4xx responses, including authentication errors, fail immediately. When indexing fails, stderr ends with request, retry, and timeout counts followed by the error.
+
+Run `vera index .` again. An API build resumes from the embeddings it already received.
+
+### Rate limits and quota errors
+
+A `429` or `quota exceeded` response is a provider limit. Lowering `embedding.max_concurrent_requests` helps with short burst limits but does not raise your quota; for an exhausted quota, wait for the reset or add billing.
+
+For the reranker, a 429 causes a short retry and then unreranked results. For batch jobs, set `VERA_RERANK_RATE_LIMIT_WAIT_SECS` to a positive number of seconds (for example `65`) to wait for the provider's reported reset, capped at that value per retry. See [Configuration](configuration.md#retrievalranking).
+
+### Batch size errors
+
+If the provider rejects a batch (for example `at most 100 requests can be in one batch`), lower the batch size:
+
+```bash
+vera config set embedding.batch_size 100
+```
+
+Vera already caps known provider limits, such as 100 inputs per request for Gemini embeddings.
+
+### The index uses a different embedding model
+
+If the active model name differs from the one stored in the index, rebuild with `vera index .`. If the two names are the same model, declare them as aliases instead; see [Changing models](models.md#changing-models).
+
+## Local GPU and ONNX backends
+
+These apply to the opt-in `--onnx-jina-*` backends. The default Potion Code backend does not use ONNX Runtime or a GPU.
+
+### ONNX Runtime or GPU backend fails
+
+Run `vera doctor --probe` first. Common causes:
+
+- **Model files missing or damaged.** Run `vera repair --<backend>`, for example `vera repair --onnx-jina-cuda`. `vera doctor` prints the matching command.
+- **ONNX Runtime download failed.** Check the network, or set `ORT_DYLIB_PATH` to an ONNX Runtime library you installed yourself.
+- **GPU drivers missing.** CUDA needs CUDA 12 or later, ROCm needs ROCm drivers, DirectML needs DirectX 12, CoreML needs macOS on Apple Silicon.
+- **ROCm or OpenVINO runtime install failed.** Vera installs these through pip. If that fails, install `onnxruntime-rocm` or `onnxruntime-openvino` with pip yourself and set `ORT_DYLIB_PATH` to the `libonnxruntime.so` inside the package.
+- **Windows DirectML download failed.** This runtime comes from NuGet. Set `ORT_DYLIB_PATH` to `onnxruntime.dll` from the [Microsoft.ML.OnnxRuntime.DirectML package](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML). On Windows machines without a D3D12-capable GPU, setup picks Potion Code instead.
+
+If a GPU session fails after these checks pass, Vera retries on CPU and logs a warning. If that is too slow, fix the GPU provider or switch to `vera setup --potion-code`.
+
+### CUDA libraries are missing
+
+`CUDA backend selected, but required libraries are missing` means ONNX Runtime downloaded, but the system linker cannot find the CUDA or cuDNN libraries it needs. Install them, refresh the linker cache if needed, and run `vera doctor --probe` again.
+
+Vera picks the CUDA 12 or CUDA 13 runtime from your installed toolkit, not the driver. If you switch toolkits, run `vera repair --onnx-jina-cuda`.
+
+### GPU out of memory
+
+Vera sizes batches from available VRAM and retries a failed batch at a smaller size, but GPUs with 4 GB or less can still run out. Use:
+
+```bash
+vera index . --low-vram
+```
+
+This uses a batch size of 1 and caps the ONNX Runtime memory arena at 1 GB. To make it permanent, run `vera config set embedding.low_vram true`.
+
+### Reranking is slow on Apple Silicon
+
+With CoreML, the reranker runs on CPU because no reranker ONNX export works with CoreML; only embeddings use the GPU. `vera doctor --probe` reports this as `probe-reranker-coreml-cpu`. If reranking is too slow, turn it off with `vera config set retrieval.reranking_enabled false`.
+
+## MCP
+
+### The server does not appear in the client
+
+- Make sure `vera` is on the client's `PATH`. If the client runs with a restricted environment, set `command` to the absolute path of the binary.
+- Run `vera mcp` in a terminal to confirm it starts, then check the client's MCP logs.
+
+See [MCP](mcp.md) for client configuration.
+
+## Privacy
+
+With a local backend, and no API reranker or completion endpoint configured, no code leaves your machine. API mode sends queries and chunk text to the configured embedding endpoint. An API reranker receives queries and candidate chunks, and `--deep` with a completion endpoint sends the query to it. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.

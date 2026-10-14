@@ -1,33 +1,36 @@
-# Vera Documentation
+# Vera documentation
 
-Reference pages for installing, configuring, integrating, and understanding Vera.
+New to Vera? Start with the [README](../README.md) for what it is and a three-command quick start.
 
 ## Get started
 
-- [Installation](installation.md): install Vera and choose a backend.
-- [Query guide](query-guide.md): write effective semantic, regex, and structural queries.
-- [What's New](whats-new.md): user-visible release notes.
-- [V2 migration](migration-v2.md): retired experiment controls, index compatibility, and setup changes.
+- [Installation](installation.md): install methods, choosing a backend, agent skills, updates, and uninstalling.
+- [Query guide](query-guide.md): how to phrase queries and which command answers which question.
+- [Features](features.md): a tour of every command, grouped by task.
 
-## Integrate
+## Connect it to your tools
 
-- [MCP](mcp.md): connect Vera to MCP clients and AI coding tools.
-- [Docker](docker.md): run Vera and the MCP server in containers.
-- [llama.cpp setup](llama-cpp-setup.md): use a local OpenAI-compatible inference server.
-- [Manual install](manual-install.md): install without the package wrappers.
+- [MCP](mcp.md): set up the MCP server in Claude Code, Codex, Cursor, VS Code, and other clients.
+- [Docker](docker.md): run Vera and its MCP server in a container, on CPU or GPU.
+- [llama.cpp](llama-cpp-setup.md): use your own local embedding, reranking, and completion servers.
 
 ## Reference
 
-- [Features](features.md): CLI capabilities and workflows.
-- [Configuration](configuration.md): `vera config` keys and environment variables.
-- [Models and backends](models.md): local, API, embedding, and reranking options.
-- [Supported languages](supported-languages.md): language and parser support.
-- [Troubleshooting](troubleshooting.md): diagnose setup, indexing, and runtime issues.
+- [Models and backends](models.md): CPU, GPU, and API options, with measurements.
+- [Configuration](configuration.md): every `vera config` key and environment variable.
+- [Supported languages](supported-languages.md): languages, file types, and how each is chunked.
+- [Troubleshooting](troubleshooting.md): fixes for common setup, indexing, and search problems.
+- [Manual install](manual-install.md): install models and runtimes by hand on restricted networks.
 
-## Internals
+## How it is built and measured
 
-- [How Vera works](how-it-works.md): the search pipeline and retrieval stages.
-- [Architecture](architecture.md): workspace crates and implementation structure.
-- [Benchmarks](benchmarks.md): current results and methodology.
-- [Benchmark history](benchmarks-history.md): historical snapshots and ablations.
-- [ADR decision summary](adr/000-decision-summary.md): architecture decision records.
+- [How Vera works](how-it-works.md): the search pipeline from parsing to ranking.
+- [Benchmarks](benchmarks.md): current results, the agent benchmark, and methodology.
+- [Benchmark history](benchmarks-history.md): earlier results, model screenings, and rejected experiments.
+- [Architecture](architecture.md): crate and module layout, for contributors.
+- [Architecture decisions](adr/000-decision-summary.md): why each major component was chosen.
+
+## Releases
+
+- [What's new](whats-new.md): release notes.
+- [Migrating to v2](migration-v2.md): what changed for 1.x users.

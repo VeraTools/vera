@@ -1,27 +1,34 @@
-# Agent Usage
+# Agent usage
 
-Vera is a semantic code search CLI. For the full skill definition, see [`skills/vera/SKILL.md`](skills/vera/SKILL.md).
+Vera is a code search CLI for the current repository. It returns ranked functions, classes, and other symbols with file paths and line ranges. The full agent instructions are in [`skills/vera/SKILL.md`](skills/vera/SKILL.md); `vera agent install` installs them for your agent.
 
-## Quick Start
+## Set up
 
 ```bash
-bunx @vera-ai/cli install      # install binary (or: npx -y @vera-ai/cli install)
-vera index .                    # index the repo (add .vera/ to .gitignore)
-vera search "query"              # search. returns ranked markdown codeblocks
-vera update .                   # after code changes
+bunx @vera-ai/cli install           # install the binary (or: npx -y @vera-ai/cli install, uvx vera-ai install)
+vera setup --potion-code --index .  # default local model, then index the repo (add .vera/ to .gitignore)
+vera update .                       # after editing files; works from any subdirectory
 ```
 
-## When to Use
+## Pick the command
 
-- **Vera search**: semantic search, symbol lookup, cross-file discovery, ranked context
-- **Vera search --deep**: RAG-fusion query expansion via LLM completion endpoint, or iterative symbol-following when no endpoint is configured
-- **Vera grep**: regex pattern search scoped to indexed files (respects .gitignore/.veraignore)
-- **rg**: exact text, regex, bulk find-and-replace across all files
+| Question | Command |
+|---|---|
+| Unfamiliar repository | `vera overview` |
+| How or where something works | `vera search "env file loading decision"` |
+| The question names a function, class, or config key | `vera structural definitions make_config` |
+| Who calls a symbol, or what it calls | `vera references make_config` / `vera references make_config --callees` |
+| Exact text or regex in indexed files | `vera grep "before_request"` |
+| Every route, env read, or implementation | `vera structural routes` / `vera structural env` / `vera structural impls <symbol>` |
+| Only files you changed | add `--changed` (uncommitted and untracked files), `--base <rev>` (changes since the merge base with a branch), or `--since <rev>` (changes since a revision) |
+| Mechanical edits across many files, or code in dependencies outside the index | `rg` |
+
+Describe behavior in search queries ("JWT expiry handling", not "auth"). `--path` is relative to the repository root. Use `--deep` only after a normal search misses.
 
 ## Output
 
-Default output is markdown codeblocks with file path, line range, and optional symbol info in the info string. This is the most token-efficient format for reading results as context. Use `--json` for compact single-line JSON (programmatic consumption or piping to other tools), or `--raw` for verbose human-readable output with all fields. Use `--timing` to print pipeline step durations to stderr.
+Results are Markdown code blocks, each labeled `path:start-end symbol_type:symbol_name`, followed by the code. Results are in ranked order. `--compact` keeps signatures and drops bodies. `--json` gives compact JSON, `--raw` gives verbose output with every field, and `--timing` prints stage timings to stderr.
 
-## References
+## More
 
-Query tips, troubleshooting, MCP setup, and install details are in [`skills/vera/SKILL.md`](skills/vera/SKILL.md) and its `references/` subdirectory.
+Query patterns, troubleshooting, install details, and MCP setup are in [`skills/vera/references/`](skills/vera/references/).

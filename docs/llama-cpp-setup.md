@@ -1,15 +1,15 @@
-# Local Inference Setup (API Mode + llama.cpp)
+# Local inference with llama.cpp
 
-Vera's `api` backend mode works with any OpenAI-compatible embedding and reranking endpoints. This guide covers running those endpoints locally with [llama.cpp](https://github.com/ggerganov/llama.cpp).
+Vera's API mode talks to any OpenAI-compatible embedding and reranking endpoint, so you can serve models yourself with [llama.cpp](https://github.com/ggerganov/llama.cpp) and keep everything on your machine. The model files below are examples; use any GGUF embedding or reranker model you prefer.
 
-## Prerequisites
+You need:
 
-- llama.cpp built with `llama-server` (or a compatible server binary)
-- Embedding model GGUF file (e.g. `coderankembed-q8_0.gguf`)
-- Reranker model GGUF file (e.g. `bge-reranker-base-q8_0.gguf`)
-- Optional: a completion model for `vera search --deep` RAG-fusion query expansion
+- llama.cpp built with `llama-server`
+- an embedding model in GGUF format, for example `coderankembed-q8_0.gguf`
+- optionally, a reranker model such as `bge-reranker-base-q8_0.gguf`
+- optionally, a chat model for `vera search --deep`
 
-## 1. Start the Embedding Server
+## 1. Start the embedding server
 
 ```bash
 llama-server \
@@ -19,7 +19,7 @@ llama-server \
   -c 8192
 ```
 
-Verify it works:
+Check that it responds:
 
 ```bash
 curl -s http://localhost:8059/v1/embeddings \
@@ -27,7 +27,7 @@ curl -s http://localhost:8059/v1/embeddings \
   -d '{"input": "test", "model": "coderankembed-q8_0.gguf"}' | head -c 200
 ```
 
-## 2. Start the Reranker Server (Optional)
+## 2. Start a reranker server (optional)
 
 ```bash
 llama-server \
@@ -37,17 +37,17 @@ llama-server \
   -c 512
 ```
 
-Verify:
+Check it:
 
 ```bash
-curl -s http://localhost:8060/v1/reranking \
+curl -s http://localhost:8060/v1/rerank \
   -H "Content-Type: application/json" \
   -d '{"query": "test", "documents": ["hello", "world"], "model": "bge-reranker-base-q8_0.gguf"}' | head -c 200
 ```
 
-## 3. Start a Completion Server (Optional, for `--deep` Search)
+## 3. Start a completion server (optional)
 
-Any OpenAI-compatible chat completion endpoint works. This enables RAG-fusion query expansion for `vera search --deep`.
+With a chat completion endpoint configured, `vera search --deep` expands your query into several phrasings and merges the results. Without one, `--deep` follows symbols from the first results instead.
 
 ```bash
 llama-server \
@@ -56,97 +56,76 @@ llama-server \
   -c 4096
 ```
 
-## 4. Configure Vera
+## 4. Point Vera at the servers
 
-### Option A: Environment Variables
-
-Run commands directly from this shell, or persist the config with `vera setup --api --yes` after exporting the variables.
+Export the endpoints. Local servers do not check keys, but Vera requires a value for the embedding and reranker keys. The completion key is optional.
 
 ```bash
-# Embedding (required)
 export EMBEDDING_MODEL_BASE_URL="http://localhost:8059/v1"
 export EMBEDDING_MODEL_ID="coderankembed-q8_0.gguf"
 export EMBEDDING_MODEL_API_KEY="not-needed"
 
-# Reranker (optional)
+# Optional reranker
 export RERANKER_MODEL_BASE_URL="http://localhost:8060/v1"
 export RERANKER_MODEL_ID="bge-reranker-base-q8_0.gguf"
 export RERANKER_MODEL_API_KEY="not-needed"
 
-# Completion for --deep search (optional)
+# Optional completion model for --deep
 export VERA_COMPLETION_BASE_URL="http://localhost:8061/v1"
 export VERA_COMPLETION_MODEL_ID="your-completion-model.gguf"
 export VERA_COMPLETION_API_KEY="not-needed"
-export VERA_COMPLETION_MAX_TOKENS="16384"
-export VERA_COMPLETION_TIMEOUT_SECS="120"
 
-# Skip update checks in offline environments
+# Optional: skip the daily update check when offline
 export VERA_NO_UPDATE_CHECK="1"
+```
 
-# Optional: persist the embedding and reranker endpoints in Vera config
+Save the embedding and reranker endpoints to Vera's config. With the reranker variables set, setup also turns reranking on:
+
+```bash
 vera setup --api --yes
 ```
 
-### Option B: Interactive Setup
+The completion variables are read from the environment and are not saved by setup, so keep them in your shell profile.
 
-```bash
-vera setup
-# Choose API mode, then Custom and enter the URLs and model IDs above.
-```
+To enter the same values interactively instead, run `vera setup`, choose API mode, then Custom.
 
-## 5. Index and Search
+## 5. Index and search
 
 ```bash
 vera index .
 vera search "authentication logic"
-vera search "config loading" --deep   # uses completion endpoint for query expansion
+vera search "config loading" --deep
 ```
 
-## 6. Tuning for Local Models
+## 6. Tune for smaller models
 
-Local models often have smaller context windows than cloud APIs. Adjust these settings if you see truncation or quality issues:
+Local models often have shorter context windows than hosted ones. If you see truncation or context errors:
 
 ```bash
-# Reduce chunk size for smaller embedding models
+# Smaller chunks for embedding models with short context
 vera config set indexing.max_chunk_bytes 1800
 
-# Limit reranker batch size and document length
+# Fewer and shorter documents per reranker request
 export VERA_MAX_RERANK_BATCH=8
 export VERA_MAX_RERANK_DOC_CHARS=1200
 
-# Increase completion budget for reasoning models
+# More room for reasoning models used with --deep
 export VERA_COMPLETION_MAX_TOKENS=16384
 export VERA_COMPLETION_TIMEOUT_SECS=120
 ```
 
-## 7. MCP Server Setup
+After changing `indexing.max_chunk_bytes`, run `vera index .` so every file is chunked with the new limit.
 
-To use Vera as an MCP tool server with local inference:
+## 7. Use it from an MCP client
 
-```bash
-vera mcp
-```
-
-For MCP client configuration (e.g. in `opencode.json` or similar):
-
-```json
-{
-  "mcpServers": {
-    "vera": {
-      "command": "vera",
-      "args": ["mcp"],
-      "cwd": "/absolute/path/to/repo"
-    }
-  }
-}
-```
-
-Make sure the environment variables from step 4 are available to the MCP process (e.g. via shell profile or wrapper script).
+Configure the client as described in [MCP](mcp.md). The `vera mcp` process must see any environment variables you rely on, such as the completion settings, so set them in your shell profile or in a wrapper script the client launches.
 
 ## Troubleshooting
 
-- **Embedding errors**: verify the server is running and the model ID matches the GGUF filename
-- **Reranker context errors**: lower `VERA_MAX_RERANK_DOC_CHARS` or `VERA_MAX_RERANK_BATCH`
-- **`--deep` behaves like normal search**: completion env vars are not set; Vera falls back to iterative symbol-following search
-- **`--deep` fails with query expansion errors**: ensure the completion model returns JSON; increase `VERA_COMPLETION_MAX_TOKENS` for reasoning models
-- **Slow indexing**: reduce `indexing.max_chunk_bytes` or add exclusions to `.veraignore`
+| Symptom | Fix |
+|---|---|
+| Embedding requests fail | Check that the server is running and that `EMBEDDING_MODEL_ID` matches the model name the server reports. |
+| Reranker context errors | Lower `VERA_MAX_RERANK_DOC_CHARS` or `VERA_MAX_RERANK_BATCH`. |
+| `--deep` behaves like normal search | The completion variables are not set in this environment. |
+| `--deep` fails during query expansion | Make sure the completion model returns JSON; raise `VERA_COMPLETION_MAX_TOKENS` for reasoning models. |
+| Indexing is slow | Lower `indexing.max_chunk_bytes`, or exclude generated and vendored code in `.veraignore`. |
