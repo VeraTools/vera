@@ -4,6 +4,7 @@
 //! resolve the reranker for the query, compute fetch limits, execute search,
 //! apply filters.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -99,6 +100,9 @@ pub struct SearchContext {
     provider_error: Option<String>,
     backend: InferenceBackend,
     stores: Mutex<Vec<(PathBuf, Arc<SearchStores>)>>,
+    index_providers: tokio::sync::Mutex<
+        HashMap<String, std::result::Result<Arc<CachedEmbeddingProvider<DynamicProvider>>, String>>,
+    >,
     /// Cross-encoder session, built on first query that actually reranks.
     ///
     /// Failed construction is cached too, so every affected search can report
@@ -136,6 +140,7 @@ impl SearchContext {
             provider_error,
             backend,
             stores: Mutex::new(Vec::new()),
+            index_providers: tokio::sync::Mutex::new(HashMap::new()),
             reranker: OnceCell::new(),
             #[cfg(test)]
             reranker_builds: std::sync::atomic::AtomicUsize::new(0),
@@ -151,6 +156,7 @@ impl SearchContext {
             // BM25-only path before any reranker is resolved.
             backend: InferenceBackend::Api,
             stores: Mutex::new(Vec::new()),
+            index_providers: tokio::sync::Mutex::new(HashMap::new()),
             reranker: OnceCell::new(),
             #[cfg(test)]
             reranker_builds: std::sync::atomic::AtomicUsize::new(0),
@@ -239,6 +245,31 @@ impl SearchContext {
         self.model_name.as_deref()
     }
 
+    async fn provider_for_index(
+        &self,
+        config: &VeraConfig,
+        model_name: &str,
+    ) -> std::result::Result<Arc<CachedEmbeddingProvider<DynamicProvider>>, String> {
+        let mut providers = self.index_providers.lock().await;
+        if let Some(provider) = providers.get(model_name) {
+            return provider.clone();
+        }
+
+        let provider =
+            crate::embedding::create_dynamic_provider_for_index(config, self.backend, model_name)
+                .await
+                .map(|(provider, resolved_model)| {
+                    Arc::new(CachedEmbeddingProvider::with_namespace(
+                        provider,
+                        512,
+                        resolved_model,
+                    ))
+                })
+                .map_err(|error| error.to_string());
+        providers.insert(model_name.to_owned(), provider.clone());
+        provider
+    }
+
     fn search_stores(&self, index_dir: &Path) -> Result<Arc<SearchStores>> {
         // Check on cache hits too: an interrupted update can leave the same inode.
         crate::indexing::freshness::ensure_index_complete(index_dir)?;
@@ -319,16 +350,6 @@ impl SearchContext {
             Ok((results, timings))
         };
 
-        let Some(provider) = self.provider.as_ref() else {
-            return bm25_only(
-                self.provider_error
-                    .as_ref()
-                    .map(|error| format!("embedding provider unavailable: {error}")),
-            );
-        };
-
-        let mut stored_dim = config.embedding.max_stored_dim;
-
         // Profiling: docs/adr/009-filter-scan-profiling.md — three `get_index_meta` reads per
         // query cost ~0.45 ms warm p50, served from stamp-guarded cache.
         // Propagate cache errors to BM25-only rather than silently skipping
@@ -339,8 +360,64 @@ impl SearchContext {
                 return bm25_only(Some(format!("failed to read index metadata: {err}")));
             }
         };
-        if let Some((Some(s_model), Some(s_dim), s_prefix)) = index_meta {
-            if let Some(model_name) = self.model_name.as_deref()
+
+        let mut index_provider = None;
+        let (provider, model_name) = match index_meta
+            .as_ref()
+            .and_then(|(model_name, _, _)| model_name.as_deref())
+        {
+            Some(index_model)
+                if self.model_name.as_deref().is_none_or(|active_model| {
+                    !crate::config::model_names_match_with_aliases(
+                        index_model,
+                        active_model,
+                        &config.embedding.model_aliases,
+                    )
+                }) =>
+            {
+                match self.provider_for_index(config, index_model).await {
+                    Ok(provider) => {
+                        index_provider = Some(provider);
+                        (
+                            index_provider
+                                .as_deref()
+                                .expect("provider was just inserted"),
+                            Some(index_model),
+                        )
+                    }
+                    Err(error) => {
+                        return bm25_only(Some(format!(
+                            "could not create the embedding provider for indexed model '{index_model}': {error}"
+                        )));
+                    }
+                }
+            }
+            _ => {
+                let Some(provider) = self.provider.as_ref() else {
+                    return bm25_only(
+                        self.provider_error
+                            .as_ref()
+                            .map(|error| format!("embedding provider unavailable: {error}")),
+                    );
+                };
+                (provider, self.model_name.as_deref())
+            }
+        };
+
+        tracing::debug!(
+            index = %index_dir.display(),
+            model = model_name.unwrap_or("<unknown>"),
+            provider = if index_provider.is_some() {
+                "index model via configured API endpoint or matching local model"
+            } else {
+                "active configured provider"
+            },
+            "selected embedding provider for index search"
+        );
+
+        let mut stored_dim = config.embedding.max_stored_dim;
+        if let Some((Some(s_model), Some(s_dim), s_prefix)) = index_meta.as_ref() {
+            if let Some(model_name) = model_name
                 && !crate::config::model_names_match_with_aliases(
                     &s_model,
                     model_name,
@@ -860,72 +937,30 @@ mod tests {
     }
 
     #[test]
-    fn model_metadata_mismatch_falls_back_to_bm25() {
+    fn model_metadata_mismatch_selects_indexed_model_provider() {
         run_env_test(
-            "retrieval::search_service::tests::model_metadata_mismatch_falls_back_to_bm25_probe",
+            "retrieval::search_service::tests::model_metadata_mismatch_selects_indexed_model_provider_probe",
             &[
                 ("EMBEDDING_MODEL_BASE_URL", Some("http://127.0.0.1:0")),
                 ("EMBEDDING_MODEL_ID", Some("active-api-model")),
                 ("EMBEDDING_MODEL_API_KEY", Some("dummy-key")),
+                ("EMBEDDING_QUERY_PREFIX", Some("Query: ")),
             ],
         );
     }
 
     #[test]
-    #[ignore = "driven by model_metadata_mismatch_falls_back_to_bm25"]
-    fn model_metadata_mismatch_falls_back_to_bm25_probe() {
-        crate::init_tls();
-        let dir = tempdir().unwrap();
-        let index_dir = dir.path();
-
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
-        store
-            .insert_chunks(&[Chunk {
-                id: "auth:0".to_string(),
-                file_path: "src/auth.rs".to_string(),
-                line_start: 1,
-                line_end: 4,
-                content: "pub fn authenticate_user() -> bool { true }".to_string(),
-                language: Language::Rust,
-                symbol_type: Some(SymbolType::Function),
-                symbol_name: Some("authenticate_user".to_string()),
-                part_index: None,
-            }])
-            .unwrap();
-        store.set_index_meta("model_name", "indexed-model").unwrap();
-        store.set_index_meta("embedding_dim", "64").unwrap();
-
-        let bm25 = Bm25Index::open(&index_dir.join("bm25")).unwrap();
-        bm25.insert_batch(&[Bm25Document {
-            chunk_id: "auth:0",
-            file_path: "src/auth.rs",
-            content: "pub fn authenticate_user() -> bool { true }",
-            symbol_name: Some("authenticate_user"),
-            language: "rust",
-        }])
-        .unwrap();
-
-        let mut config = VeraConfig::default();
-        config.embedding.timeout_secs = 1;
-        config.embedding.max_retries = 0;
-        let filters = SearchFilters::default();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let context = rt.block_on(SearchContext::new(
-            &config,
+    #[ignore = "driven by model_metadata_mismatch_selects_indexed_model_provider"]
+    fn model_metadata_mismatch_selects_indexed_model_provider_probe() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let context = runtime.block_on(SearchContext::new(
+            &VeraConfig::default(),
             crate::config::InferenceBackend::Api,
         ));
-
-        let (results, timings) = rt
-            .block_on(context.search(index_dir, "authenticate user", None, &config, &filters, 10))
+        let provider = runtime
+            .block_on(context.provider_for_index(&VeraConfig::default(), "indexed-model"))
             .unwrap();
-
-        assert_eq!(results[0].file_path, "src/auth.rs");
-        assert!(timings.bm25.is_some());
-        assert!(timings.vector.is_none());
-        let reason = timings
-            .semantic_fallback
-            .expect("fallback must be reported");
-        assert!(reason.contains("'indexed-model'"), "{reason}");
+        assert!(provider.expected_dim().is_none());
     }
 
     #[test]

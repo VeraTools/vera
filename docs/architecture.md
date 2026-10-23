@@ -31,6 +31,9 @@ Data flow: file, then grammar lookup, then tree-sitter parse (with diagnostics),
 ### `retrieval/`: search pipeline
 
 1. The query enters `search_service.rs`.
+   For vector search, the context selects an embedding provider from the
+   index's stored model identity. API-backed indexes use the configured API
+   endpoint and credentials with the index's model ID.
 2. BM25 (`bm25.rs`) and vector search (`vector.rs`) run in parallel.
 3. Results are fused with RRF in `hybrid.rs`. k defaults to 60 and is set by `retrieval.rrf_k`. `fuse_rrf_multi_weighted` generalizes fusion to N ranked lists.
 4. If reranking is enabled, a cross-encoder reorders the top candidates (`reranker.rs` for API endpoints, `local_reranker.rs` for local models).

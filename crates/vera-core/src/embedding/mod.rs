@@ -63,7 +63,7 @@ pub use provider::{
 };
 
 pub mod dynamic;
-pub use dynamic::{DynamicProvider, create_dynamic_provider};
+pub use dynamic::{DynamicProvider, create_dynamic_provider, create_dynamic_provider_for_index};
 
 pub mod local_provider;
 

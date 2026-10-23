@@ -143,6 +143,49 @@ pub async fn create_dynamic_provider(
     config: &VeraConfig,
     backend: InferenceBackend,
 ) -> anyhow::Result<(DynamicProvider, String)> {
+    create_dynamic_provider_for_model(config, backend, None).await
+}
+
+/// Create the provider compatible with an index's recorded embedding model.
+///
+/// API indexes reuse the currently configured endpoint and credentials, but
+/// send the indexed model ID. Built-in local model identities select their
+/// corresponding local provider.
+pub async fn create_dynamic_provider_for_index(
+    config: &VeraConfig,
+    backend: InferenceBackend,
+    model_name: &str,
+) -> anyhow::Result<(DynamicProvider, String)> {
+    let potion_model = crate::local_models::potion_code_model_name();
+    if model_name == potion_model.as_str() {
+        return create_dynamic_provider(config, InferenceBackend::PotionCode).await;
+    }
+
+    let local_model = configured_local_model_name();
+    if model_name == local_model {
+        let local_backend = match backend {
+            InferenceBackend::OnnxJina(ep) => InferenceBackend::OnnxJina(ep),
+            _ => InferenceBackend::OnnxJina(crate::config::OnnxExecutionProvider::Cpu),
+        };
+        return create_dynamic_provider(config, local_backend).await;
+    }
+    if model_name.starts_with("hf:")
+        || model_name.starts_with("dir:")
+        || model_name.contains("|pooling=")
+    {
+        anyhow::bail!(
+            "index uses local embedding model '{model_name}', but it does not match the configured local model '{local_model}'; restore the local model configuration used to build the index"
+        );
+    }
+
+    create_dynamic_provider_for_model(config, InferenceBackend::Api, Some(model_name)).await
+}
+
+async fn create_dynamic_provider_for_model(
+    config: &VeraConfig,
+    backend: InferenceBackend,
+    api_model_name: Option<&str>,
+) -> anyhow::Result<(DynamicProvider, String)> {
     match backend {
         InferenceBackend::OnnxJina(ep) => {
             let gpu_mem_limit_mb = config.embedding.gpu_mem_limit_mb;
@@ -161,8 +204,12 @@ pub async fn create_dynamic_provider(
             ))
         }
         InferenceBackend::Api => {
-            let provider_config = EmbeddingProviderConfig::from_env()
-                .map_err(|err| anyhow::anyhow!("embedding API not configured: {err}\nHint: set EMBEDDING_MODEL_BASE_URL, EMBEDDING_MODEL_ID, and EMBEDDING_MODEL_API_KEY environment variables, or use --potion-code for local CPU inference."))?;
+            let provider_config = if let Some(model_name) = api_model_name {
+                EmbeddingProviderConfig::from_env_for_model_async(model_name).await
+            } else {
+                EmbeddingProviderConfig::from_env()
+            }
+            .map_err(|err| anyhow::anyhow!("embedding API not configured: {err}\nHint: set EMBEDDING_MODEL_BASE_URL, EMBEDDING_MODEL_ID, and EMBEDDING_MODEL_API_KEY environment variables, or use --potion-code for local CPU inference."))?;
             let model_name = provider_config.model_id.clone();
             let mut provider_config = provider_config;
             provider_config.query_prefix = saved_prefix(
@@ -217,6 +264,36 @@ mod tests {
             saved_prefix(Some(path.clone()), "PATH", Some("saved: ")),
             Some(path)
         );
+    }
+
+    #[test]
+    fn index_api_provider_uses_recorded_model() {
+        crate::test_env::run_env_test(
+            "embedding::dynamic::tests::index_api_provider_uses_recorded_model_probe",
+            &[
+                ("EMBEDDING_MODEL_BASE_URL", Some("http://127.0.0.1:3000/v1")),
+                ("EMBEDDING_MODEL_ID", Some("active-model")),
+                ("EMBEDDING_MODEL_API_KEY", Some("test-key")),
+                ("EMBEDDING_QUERY_PREFIX", Some("Query: ")),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by index_api_provider_uses_recorded_model"]
+    fn index_api_provider_uses_recorded_model_probe() {
+        crate::init_tls();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (provider, model_name) = runtime
+            .block_on(create_dynamic_provider_for_index(
+                &VeraConfig::default(),
+                InferenceBackend::Api,
+                "indexed-model",
+            ))
+            .unwrap();
+
+        assert_eq!(model_name, "indexed-model");
+        assert_eq!(provider.prepare_query_text("query"), "query");
     }
 
     /// Rewrites both sides, so a dispatch arm that stops forwarding is visible:

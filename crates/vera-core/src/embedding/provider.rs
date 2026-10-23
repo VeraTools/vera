@@ -258,6 +258,35 @@ impl EmbeddingProviderConfig {
         Ok(config)
     }
 
+    /// Create an API provider configuration from the active endpoint and
+    /// credentials while targeting the model recorded by an existing index.
+    pub async fn from_env_for_model_async(model_id: &str) -> Result<Self> {
+        let base_url = std::env::var("EMBEDDING_MODEL_BASE_URL")
+            .context("EMBEDDING_MODEL_BASE_URL not set")?;
+        let api_key =
+            std::env::var("EMBEDDING_MODEL_API_KEY").context("EMBEDDING_MODEL_API_KEY not set")?;
+        let query_prefix_override = std::env::var("EMBEDDING_QUERY_PREFIX")
+            .ok()
+            .filter(|prefix| !prefix.is_empty());
+        let document_prefix = std::env::var("EMBEDDING_DOCUMENT_PREFIX")
+            .ok()
+            .filter(|prefix| !prefix.is_empty())
+            .or_else(|| default_document_prefix_for_model(model_id));
+        let query_prefix = match query_prefix_override {
+            Some(prefix) => Some(prefix),
+            None => {
+                let model_id = model_id.to_owned();
+                tokio::task::spawn_blocking(move || default_query_prefix_for_model(&model_id))
+                    .await
+                    .context("query prefix lookup task failed")?
+            }
+        };
+        let mut config = Self::new(base_url, model_id.to_owned(), api_key);
+        config.query_prefix = query_prefix;
+        config.document_prefix = document_prefix;
+        Ok(config)
+    }
+
     /// Set the request timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
