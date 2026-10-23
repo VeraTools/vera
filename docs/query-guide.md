@@ -89,6 +89,7 @@ Vera ranks source code above docs and tests; use `--scope` to search only one ki
 ```bash
 vera references get                  # all calls to anything named get, with receiver counts
 vera references get --receiver app   # only calls written as app.get(...)
+vera references get --path src --path 'tests/**/*.rs'  # callers matching either path
 ```
 
 Calls with no receiver, such as a plain `get()`, do not match any `--receiver` value.

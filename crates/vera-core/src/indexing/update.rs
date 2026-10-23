@@ -331,10 +331,7 @@ where
 
     let idx_dir = pipeline::index_dir(&repo_root);
     if !idx_dir.exists() {
-        bail!(
-            "no index found at {}. Run `vera index` first.",
-            idx_dir.display()
-        );
+        bail!(super::missing_index_message(&repo_root));
     }
 
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)

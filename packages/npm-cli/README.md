@@ -26,7 +26,7 @@ vera setup --potion-code --index .
 vera search "where expired sessions are cleaned up"
 ```
 
-Run `vera setup` with no flags in a terminal for a guided setup that picks a backend, can install the agent skill, and can index the project. Add `.vera/` to your `.gitignore`.
+Run `vera setup` with no flags in a terminal for a guided setup that picks a backend, can install the agent skill, and can index the project. Vera keeps its index files out of git through the repository's local exclude file (`.git/info/exclude`), so no `.gitignore` change is needed.
 
 ## What you get
 

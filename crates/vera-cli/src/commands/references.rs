@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 
-use crate::helpers::{apply_git_scope, output_results, prepare_indexed_repo};
+use crate::helpers::{
+    SearchFilterArgs, apply_git_scope, output_results, prepare_indexed_repo,
+    rewrite_absolute_path_filters,
+};
 use crate::state;
 
 /// Run the `vera references <symbol>` command.
@@ -14,6 +17,7 @@ pub fn run(
     symbol: &str,
     callees: bool,
     receiver: Option<&str>,
+    path: Vec<String>,
     limit: Option<usize>,
     git_scope: Option<vera_core::git_scope::GitScope>,
     json: bool,
@@ -23,13 +27,23 @@ pub fn run(
     let config = state::load_runtime_config()?;
     let result_limit = limit.unwrap_or(20);
     let (cwd, index_dir) = prepare_indexed_repo(&config.indexing)?;
+    let mut filters = apply_git_scope(
+        &cwd,
+        &SearchFilterArgs {
+            path,
+            scope: Some("source".into()),
+            ..Default::default()
+        }
+        .to_filters(),
+        git_scope.as_ref(),
+    )?;
+    rewrite_absolute_path_filters(&cwd, &mut filters.path_glob);
 
     if callees {
         let mut results = vera_core::stats::find_callees(&cwd, symbol)?;
-        if let Some(scope) = git_scope.as_ref() {
-            let exact_paths = vera_core::git_scope::resolve_scope(&cwd, scope)?;
-            results.retain(|result| exact_paths.contains(&result.file_path));
-        }
+        results.retain(|result| {
+            filters.matches_file(&result.file_path, vera_core::types::Language::Unknown)
+        });
         results.truncate(result_limit);
         if json {
             println!("{}", serde_json::to_string(&results)?);
@@ -45,15 +59,6 @@ pub fn run(
             }
         }
     } else {
-        let filters = apply_git_scope(
-            &cwd,
-            &vera_core::types::SearchFilters {
-                scope: Some(vera_core::types::SearchScope::Source),
-                include_generated: Some(false),
-                ..Default::default()
-            },
-            git_scope.as_ref(),
-        )?;
         let results = vera_core::retrieval::search_callers_through(
             &index_dir,
             symbol,

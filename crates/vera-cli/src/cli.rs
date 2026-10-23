@@ -511,12 +511,13 @@ pub enum Commands {
     ///
     /// Queries the call graph built during indexing to find where a symbol
     /// is called from (callers) or what it calls (callees). Caller lookups
-    /// return code snippets by default and support git-scoped filtering.
+    /// return code snippets by default. Filter callers or callees by path or git scope.
     ///
     /// Examples:
     ///   vera references parse_and_chunk
     ///   vera references parse_and_chunk --callees
     ///   vera references parse_and_chunk --changed
+    ///   vera references parse_and_chunk --path 'src/**/*.rs'
     ///   vera references parse_and_chunk --json
     References {
         /// Symbol name to look up.
@@ -527,6 +528,9 @@ pub enum Commands {
         /// Only calls made through this receiver, as in `app.symbol()`.
         #[arg(long, value_name = "NAME")]
         receiver: Option<String>,
+        /// Filter by file path glob pattern. Repeatable; patterns are combined with OR semantics.
+        #[arg(long)]
+        path: Vec<String>,
         /// Maximum number of results to return (default: 20).
         #[arg(long, short = 'n')]
         limit: Option<usize>,

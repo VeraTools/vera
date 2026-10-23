@@ -162,7 +162,7 @@ fn absolute_path_filter_rewrite_inner(
 /// Rewrite every absolute `--path` entry that resolves under the index root to
 /// its root-relative form, since indexed paths are stored relative to it. The
 /// root is tried as-is and canonicalized so symlinked invocations work.
-fn rewrite_absolute_path_filters(repo_root: &Path, patterns: &mut Vec<String>) {
+pub fn rewrite_absolute_path_filters(repo_root: &Path, patterns: &mut Vec<String>) {
     if patterns.is_empty() {
         return;
     }

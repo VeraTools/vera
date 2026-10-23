@@ -2,6 +2,12 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## Unreleased
+
+- Agent guidance now allows normal search tools when no index exists and explains long first-index runs and resuming interrupted work. Index-required commands share the same no-index guidance.
+- Indexing keeps its artifacts out of git through local excludes, including in linked worktrees and nested project directories, without changing `.gitignore`.
+- `vera references` accepts repeatable `--path` filters for callers and callees, using the same path rules as search.
+
 ## v2.1.4
 
 - `vera setup --api` and `vera backend --api` turn reranking on when you configure a reranker, including with the Qwen preset, and turn it off when you set up without one. Before, setup saved the reranker but left reranking off, so searches were never reranked. If you set up API mode with an earlier version, run setup again or `vera config set retrieval.reranking_enabled true`; `vera doctor` now warns when a reranker is saved but reranking is off.
@@ -54,7 +60,7 @@ Setup changes:
 - API indexing sends two requests of 128 inputs at a time with a 120-second timeout (previously 16 inputs and 60 seconds). Saved configs that held the old defaults are upgraded once; other values you set stay. Against a test endpoint with slow responses, the old defaults failed 10 of 10 runs and the new ones finished all 10.
 - Retries back off exponentially with jitter and honor `Retry-After` up to 60 seconds. Failed or timed-out batches move to the back of the queue and are resent up to twice. Authentication errors and other 4xx errors fail immediately.
 - One slow response no longer keeps the other request slots idle.
-- When an API `vera index` fails, finished embeddings are kept in `<repo>/.vera.resume/` and reused on the next run (reported as `embeddings_reused`). Add `.vera.resume/` to `.gitignore`. An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
+- When an API `vera index` fails, finished embeddings are kept in `<repo>/.vera.resume/` and reused on the next run (reported as `embeddings_reused`). Vera keeps its index files out of git through the repository's local exclude file (`.git/info/exclude`), so no `.gitignore` change is needed. An index left half-written by an interrupted `vera update` is refused until `vera update` repairs it.
 - `vera index --json` and `vera update --json` report request, retry, timeout, and failed-batch counts, plus time spent in each stage. Slow runs print progress to stderr even without a terminal. On failure, stdout stays empty and the error is the last line on stderr.
 - Error messages no longer include endpoint URLs, and tokens and credentials in provider responses are redacted.
 - Potion Code embeds each chunk on its own, so a chunk's vector no longer depends on which other chunks shared its batch, and local indexing is faster. Older indexes keep working; run `vera index` to refresh their vectors.

@@ -8,6 +8,7 @@
 
 pub(crate) mod checkpoint;
 pub mod freshness;
+mod git_exclude;
 pub mod lock;
 pub mod pipeline;
 pub mod progress;
@@ -26,6 +27,21 @@ pub use update::{
     update_repository_with_options_and_progress,
     update_repository_with_options_and_progress_and_cancellation, update_repository_with_progress,
 };
+
+/// Guidance for commands that require an index but could not find one.
+pub fn missing_index_message(root: &std::path::Path) -> String {
+    let mut message = format!(
+        "no index found in {} or any parent directory. Run `vera index .` from the repository root (a first index can take minutes), or search with rg until it exists.",
+        root.display()
+    );
+    if root
+        .ancestors()
+        .any(|root| root.join(".vera.resume/embeddings.db").is_file())
+    {
+        message.push_str("\nA previous indexing run stopped early; `vera index` will resume from its saved embeddings.");
+    }
+    message
+}
 
 /// Truncate embedding vectors to at most `max_dim` dimensions.
 ///
