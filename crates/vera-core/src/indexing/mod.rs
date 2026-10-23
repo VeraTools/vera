@@ -7,6 +7,7 @@
 //! - Incremental update logic (detect changed files, re-index only those)
 
 pub(crate) mod checkpoint;
+pub mod estimate;
 pub mod freshness;
 mod git_exclude;
 pub mod lock;

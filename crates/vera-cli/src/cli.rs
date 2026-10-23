@@ -2,6 +2,16 @@
 
 use clap::{Parser, Subcommand};
 
+fn parse_benchmark_backend(value: &str) -> Result<vera_core::config::InferenceBackend, String> {
+    value.parse().map_err(|_| {
+        format!(
+            "unknown backend '{value}'. Choose one of: api, potion-code, onnx-jina-cpu, \
+             onnx-jina-cuda, onnx-jina-rocm, onnx-jina-directml, onnx-jina-coreml, \
+             onnx-jina-openvino"
+        )
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "vera",
@@ -331,6 +341,73 @@ pub enum Commands {
         /// Show detailed information (e.g. paths of skipped files).
         #[arg(long, short = 'v')]
         verbose: bool,
+        /// Reduce GPU memory usage (batch_size=1, conservative VRAM limit).
+        #[arg(long)]
+        low_vram: bool,
+    },
+
+    /// Estimate indexing work and optionally benchmark embedding and full-text indexing.
+    #[command(
+        arg_required_else_help = true,
+        long_about = "Estimate indexing work from a random, stratified sample of eligible files.\n\n\
+                      Vera discovers the full file population and exact byte total, then parses \
+                      only the sampled files with its real parser and chunker. The total chunk \
+                      count is extrapolated from sampled chunks per byte, stratified by language \
+                      and file size. Selected embedding backends are benchmarked against the \
+                      same random sample of chunks. Embedding and full-text indexing \
+                      benchmarks are independent optional stages; select either or both.\n\n\
+                      Provider benchmarks make real embedding requests. API benchmarks use the \
+                      current endpoint, credentials, and configured model, and may incur cost.\n\n\
+                      Choose one or more values for --benchmark-backend:\n  \
+                      api                 Configured API endpoint (may incur cost)\n  \
+                      potion-code         Local CPU backend\n  \
+                      onnx-jina-cpu       Local ONNX on CPU\n  \
+                      onnx-jina-cuda      Local ONNX on NVIDIA GPU\n  \
+                      onnx-jina-rocm      Local ONNX on AMD GPU\n  \
+                      onnx-jina-directml  Local ONNX through DirectML\n  \
+                      onnx-jina-coreml    Local ONNX through Core ML\n  \
+                      onnx-jina-openvino  Local ONNX through OpenVINO\n\n\
+                      `vera backend` opens the interactive selector and changes the configured \
+                      backend; `vera doctor` reports the currently effective backend.\n\n\
+                      Examples:\n  \
+                      vera estimate . --benchmark-backend potion-code\n  \
+                      vera estimate /path/to/repo --sample-files 512 --benchmark-chunks 256 \
+                      --benchmark-backend api --benchmark-backend onnx-jina-cuda \
+                      --benchmark-full-text\n  \
+                      vera estimate . --benchmark-full-text\n  \
+                      vera estimate . --benchmark-backend api --seed 42 --json"
+    )]
+    Estimate {
+        /// Path to the directory to estimate.
+        path: String,
+        /// Target number of files to parse; each non-empty stratum is sampled at least once.
+        #[arg(long, default_value_t = 512)]
+        sample_files: usize,
+        /// Maximum number of sampled chunks to send to each selected provider.
+        #[arg(long, default_value_t = 512)]
+        benchmark_chunks: usize,
+        /// Random seed; printed in the report for reproducibility.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Backend to benchmark (required; repeat to compare). Values: api, potion-code, onnx-jina-cpu, onnx-jina-cuda, onnx-jina-rocm, onnx-jina-directml, onnx-jina-coreml, onnx-jina-openvino.
+        #[arg(
+            long = "benchmark-backend",
+            value_name = "BACKEND",
+            value_parser = parse_benchmark_backend
+        )]
+        benchmark_backends: Vec<vera_core::config::InferenceBackend>,
+        /// Separately benchmark Tantivy full-text indexing using sampled chunks.
+        #[arg(long)]
+        benchmark_full_text: bool,
+        /// Exclude files matching this glob pattern (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Disable .gitignore and .veraignore parsing.
+        #[arg(long)]
+        no_ignore: bool,
+        /// Disable smart default exclusions.
+        #[arg(long)]
+        no_default_excludes: bool,
         /// Reduce GPU memory usage (batch_size=1, conservative VRAM limit).
         #[arg(long)]
         low_vram: bool,

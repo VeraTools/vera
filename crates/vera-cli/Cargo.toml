@@ -27,6 +27,8 @@ tracing-subscriber = { workspace = true }
 cliclack = "0.5"
 console = "0.16"
 dirs = "6.0.0"
+tempfile = "3"
+humanize-duration = "0.0.7"
 
 [target.'cfg(windows)'.dependencies]
 # Only the run-time symbol lookup for the Direct3D 12 probe in `setup`; the
@@ -34,7 +36,6 @@ dirs = "6.0.0"
 windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
 
 [dev-dependencies]
-tempfile = "3"
 
 [lints]
 workspace = true

@@ -206,6 +206,33 @@ fn main() {
                 low_vram,
             )
         }
+        Commands::Estimate {
+            path,
+            sample_files,
+            benchmark_chunks,
+            seed,
+            benchmark_backends,
+            benchmark_full_text,
+            exclude,
+            no_ignore,
+            no_default_excludes,
+            low_vram,
+        } => {
+            tracing::info!(path = %path, "estimating indexing work");
+            commands::estimate::run(
+                &path,
+                cli.json,
+                sample_files,
+                benchmark_chunks,
+                seed,
+                benchmark_backends,
+                benchmark_full_text,
+                exclude,
+                no_ignore,
+                no_default_excludes,
+                low_vram,
+            )
+        }
         Commands::Search {
             queries,
             intent,
@@ -379,6 +406,81 @@ mod tests {
         assert!(
             matches!(parse(&["vera", "index", "/tmp/repo"]), Commands::Index { path, .. } if path == "/tmp/repo")
         );
+    }
+
+    #[test]
+    fn cli_parses_estimate_with_multiple_explicit_backends() {
+        match parse(&[
+            "vera",
+            "estimate",
+            "/tmp/repo",
+            "--sample-files",
+            "128",
+            "--benchmark-chunks",
+            "64",
+            "--seed",
+            "42",
+            "--benchmark-backend",
+            "api",
+            "--benchmark-backend",
+            "potion-code",
+            "--benchmark-full-text",
+        ]) {
+            Commands::Estimate {
+                path,
+                sample_files,
+                benchmark_chunks,
+                seed,
+                benchmark_backends,
+                benchmark_full_text,
+                ..
+            } => {
+                assert_eq!(path, "/tmp/repo");
+                assert_eq!(sample_files, 128);
+                assert_eq!(benchmark_chunks, 64);
+                assert_eq!(seed, Some(42));
+                assert_eq!(
+                    benchmark_backends,
+                    vec![
+                        vera_core::config::InferenceBackend::Api,
+                        vera_core::config::InferenceBackend::PotionCode,
+                    ]
+                );
+                assert!(benchmark_full_text);
+            }
+            _ => panic!("expected Estimate command"),
+        }
+    }
+
+    #[test]
+    fn estimate_backend_is_validated_with_actionable_runtime_error() {
+        match parse(&["vera", "estimate", "/tmp/repo"]) {
+            Commands::Estimate {
+                benchmark_backends,
+                benchmark_full_text,
+                ..
+            } => {
+                assert!(benchmark_backends.is_empty());
+                assert!(!benchmark_full_text);
+            }
+            _ => panic!("expected Estimate command"),
+        }
+    }
+
+    #[test]
+    fn estimate_backend_parser_lists_supported_values() {
+        let error = Cli::try_parse_from([
+            "vera",
+            "estimate",
+            "/tmp/repo",
+            "--benchmark-backend",
+            "not-a-backend",
+        ])
+        .err()
+        .expect("invalid backend should be rejected")
+        .to_string();
+        assert!(error.contains("potion-code"));
+        assert!(error.contains("onnx-jina-openvino"));
     }
 
     #[test]

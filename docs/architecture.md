@@ -81,7 +81,7 @@ Everything is stored in `.vera/` at the project root.
 
 ## vera-cli
 
-`main.rs` parses arguments with clap. `commands/` contains the CLI subcommand implementations: `agent`, `backend`, `config`, `doctor`, `explain_path`, `grep`, `index`, `mcp`, `overview`, `references` (also used by `dead-code`), `repair`, `search`, `serve`, `setup`, `stats`, `structural`, `uninstall`, `update`, `upgrade`, and `watch`. `helpers.rs` re-exports shared helpers from `helpers/`: `filters.rs` (search filters and git scopes), `index_root.rs` (index discovery and staleness warnings), `output.rs` (result rendering, output budgets, and progress display), and `runtime.rs` (backend flags and interrupt handling).
+`main.rs` parses arguments with clap. `commands/` contains the CLI subcommand implementations: `agent`, `backend`, `config`, `doctor`, `estimate`, `explain_path`, `grep`, `index`, `mcp`, `overview`, `references` (also used by `dead-code`), `repair`, `search`, `serve`, `setup`, `stats`, `structural`, `uninstall`, `update`, `upgrade`, and `watch`. `helpers.rs` re-exports shared helpers from `helpers/`: `filters.rs` (search filters and git scopes), `index_root.rs` (index discovery and staleness warnings), `output.rs` (result rendering, output budgets, and progress display), and `runtime.rs` (backend flags and interrupt handling).
 
 ## vera-mcp
 

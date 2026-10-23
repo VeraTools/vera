@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod config;
 pub mod doctor;
+pub mod estimate;
 pub mod explain_path;
 pub mod grep;
 pub mod index;

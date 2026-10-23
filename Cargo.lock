@@ -1151,6 +1151,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "humanize-duration"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d17650201754d4f79437bc2fa1f157273a7779de1391c818b275d6bb40998b9"
+dependencies = [
+ "time",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4168,6 +4177,7 @@ dependencies = [
  "cliclack",
  "console 0.16.6",
  "dirs",
+ "humanize-duration",
  "reqwest",
  "semver",
  "serde",
@@ -4199,6 +4209,7 @@ dependencies = [
  "model2vec-rs",
  "ndarray 0.17.2",
  "ort",
+ "rand",
  "rayon",
  "regex",
  "reqwest",

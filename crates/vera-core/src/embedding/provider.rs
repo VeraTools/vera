@@ -1373,6 +1373,33 @@ pub async fn embed_chunks_concurrent<P: EmbeddingProvider>(
     .await
 }
 
+/// Embed chunks concurrently and report completed chunk counts to the caller.
+pub async fn embed_chunks_concurrent_with_progress<P, F>(
+    provider: &P,
+    chunks: &[Chunk],
+    batch_size: usize,
+    max_concurrent: usize,
+    max_chunk_bytes: usize,
+    on_progress: F,
+) -> Result<Vec<(String, Vec<f32>)>, EmbeddingError>
+where
+    P: EmbeddingProvider,
+    F: Fn(usize, usize),
+{
+    let cancellation = CancellationToken::new();
+    embed_chunks_concurrent_with_progress_and_cancellation(
+        provider,
+        chunks,
+        batch_size,
+        max_concurrent,
+        max_chunk_bytes,
+        &cancellation,
+        None,
+        on_progress,
+    )
+    .await
+}
+
 /// Embed chunks concurrently while allowing the caller to cancel active batches.
 ///
 /// The token remains owned by the indexing operation. Cancellation drops every

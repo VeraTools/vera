@@ -129,6 +129,45 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+### Estimate indexing work
+
+```bash
+vera estimate . --benchmark-backend potion-code
+vera estimate . --benchmark-backend api --benchmark-backend onnx-jina-cuda \
+  --sample-files 512 --benchmark-chunks 256
+vera estimate . --benchmark-full-text
+vera estimate . --benchmark-full-text --benchmark-backend api
+```
+
+`estimate` applies the normal discovery and ignore rules to find the eligible
+file population and exact byte total. This byte total is indexable source data,
+not raw directory size: ignored/excluded files, binary files, and files over
+the configured size limit are omitted. It then takes a seeded, uniform sample
+without replacement within language and logarithmic file-size strata, parses
+only those files with Vera's real chunker,
+and estimates the total chunk count using a stratified chunks-per-byte ratio.
+The report always includes a normal-approximation 95% interval and the random seed;
+pass `--seed` to reproduce a sample. `--sample-files` controls the target
+number of sampled files, with at least one file sampled from each non-empty
+stratum. If a stratum is too small to estimate its variance, the interval
+borrows pooled residual variance from other strata; if no pooled variance is
+available, it uses a Poisson count-variance floor. The report labels which
+method was used. These are model-based approximate intervals, not guaranteed
+coverage bounds; the fallback assumptions make the uncertainty visible rather
+than suppressing the interval.
+
+Each `--benchmark-backend` independently embeds the same random sample of
+chunks, capped by `--benchmark-chunks`. API benchmarks send real requests and
+may incur cost; they use the current configured endpoint, credentials, and
+model. `--benchmark-full-text` separately benchmarks Tantivy by building a
+temporary full-text index from that chunk subset. Either benchmark can be
+requested alone or both can be requested in one run; neither runs unless
+selected. A complete point estimate is shown when both full-text and embedding
+benchmarks are available. It includes measured discovery, extrapolated
+parsing, full-text indexing, provider initialization, and embedding. It
+excludes vector/metadata storage and final index publication; full-text
+throughput is sensitive to local disk and workload differences.
+
 ### Symbol-aware chunks
 
 Vera parses files with tree-sitter and indexes functions, classes, methods, structs, traits, interfaces, and `impl` blocks as separate chunks, each labeled with its path, line range, and symbol name. Symbols longer than 200 lines are split at natural boundaries and keep their name with a part number. Config files are indexed whole, Markdown and reStructuredText by section, and files in unrecognized formats by line windows. See [supported languages](supported-languages.md).
