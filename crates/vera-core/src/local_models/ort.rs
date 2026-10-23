@@ -97,6 +97,33 @@ mod tests {
         assert!(message.contains("libonnxruntime-cuda.so"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extracts_only_wheel_shared_libraries() {
+        use std::io::Write;
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [
+            ("onnxruntime/capi/libonnxruntime.so.1.22.0", "lib"),
+            ("onnxruntime/capi/__init__.py", "py"),
+            ("other/libskip.so", "skip"),
+        ] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        let wheel = writer.finish().unwrap().into_inner();
+        let dir = tempfile::tempdir().unwrap();
+
+        super::extract_wheel_libs(&wheel, dir.path()).unwrap();
+
+        let lib = dir.path().join("libonnxruntime.so");
+        assert_eq!(std::fs::read_to_string(lib).unwrap(), "lib");
+        assert!(!dir.path().join("__init__.py").exists());
+        assert!(!dir.path().join("libskip.so").exists());
+    }
+
     #[test]
     fn accepts_repeated_initialization_with_same_path() {
         validate_ort_library_path(
@@ -270,7 +297,7 @@ pub(super) fn extract_wheel_libs(data: &[u8], dest_dir: &std::path::Path) -> Res
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let path = entry.name().to_string();
+        let path = entry.name()?.to_string();
         if !path.starts_with("onnxruntime/capi/") {
             continue;
         }
@@ -631,7 +658,7 @@ pub(super) fn extract_nuget_native_dlls(
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let path = entry.name().to_string();
+        let path = entry.name()?.to_string();
         if !path.starts_with(prefix) {
             continue;
         }
