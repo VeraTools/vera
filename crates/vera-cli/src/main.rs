@@ -61,12 +61,8 @@ fn main() {
             err.exit();
         }
     };
-    if cli.index_dir.is_some() && matches!(&cli.command, Commands::Index { save: Some(_), .. }) {
-        eprintln!("Error: --index-dir and `index --save` cannot be used together.");
-        process::exit(2);
-    }
-    if let Some(index_dir) = cli.index_dir.clone() {
-        crate::helpers::set_index_dir_override(index_dir);
+    if let Some(index_dir) = cli.command.index_dir() {
+        crate::helpers::set_index_dir_override(index_dir.to_path_buf());
     }
     if let Err(err) = state::apply_saved_env() {
         // Diagnose/repair commands must still run against a broken saved
@@ -178,9 +174,9 @@ fn main() {
             tracing::info!("uninstall command");
             commands::uninstall::run(cli.json)
         }
-        Commands::Doctor { probe } => {
+        Commands::Doctor { probe, index_dir } => {
             tracing::info!("doctor command");
-            commands::doctor::run(cli.json, probe, cli.index_dir.as_deref())
+            commands::doctor::run(cli.json, probe, index_dir.index_dir.as_deref())
         }
         Commands::Repair { backend, api } => {
             tracing::info!("repair command");
@@ -255,6 +251,7 @@ fn main() {
             rerank_status,
             git_scope,
             compact,
+            index_dir: _,
             backend,
         } => {
             tracing::info!(queries = ?queries, deep, "searching");
@@ -280,6 +277,7 @@ fn main() {
             limit,
             git_scope,
             compact,
+            index_dir: _,
         } => {
             tracing::info!("structural query");
             commands::structural::run(
@@ -302,6 +300,7 @@ fn main() {
             no_default_excludes,
             no_progress,
             max_files,
+            index_dir,
         } => {
             tracing::info!(path = %path, "updating");
             commands::update::run(
@@ -314,11 +313,14 @@ fn main() {
                     no_default_excludes,
                     no_progress,
                     max_files: max_files.map(std::num::NonZeroUsize::get),
-                    index_dir: cli.index_dir.clone(),
+                    index_dir: index_dir.index_dir,
                 },
             )
         }
-        Commands::Overview { git_scope } => {
+        Commands::Overview {
+            git_scope,
+            index_dir: _,
+        } => {
             tracing::info!("showing overview");
             commands::overview::run(cli.json, git_scope.resolve())
         }
@@ -339,6 +341,7 @@ fn main() {
             limit,
             git_scope,
             compact,
+            index_dir: _,
         } => {
             tracing::info!(symbol = %symbol, callees, "references query");
             commands::references::run(
@@ -361,6 +364,7 @@ fn main() {
             context,
             git_scope,
             compact,
+            index_dir: _,
         } => {
             tracing::info!(pattern = %pattern, "grep");
             commands::grep::run(
@@ -376,11 +380,11 @@ fn main() {
                 compact,
             )
         }
-        Commands::DeadCode => {
+        Commands::DeadCode { index_dir: _ } => {
             tracing::info!("dead code analysis");
             commands::references::run_dead_code(cli.json)
         }
-        Commands::Stats => {
+        Commands::Stats { index_dir: _ } => {
             tracing::info!("showing stats");
             commands::stats::run(cli.json)
         }
@@ -388,9 +392,9 @@ fn main() {
             tracing::info!("config command");
             commands::config::run(&args, cli.json)
         }
-        Commands::Watch { path } => {
+        Commands::Watch { path, index_dir } => {
             tracing::info!(path = %path, "watching");
-            commands::watch::run(&path, cli.json, cli.index_dir.as_deref())
+            commands::watch::run(&path, cli.json, index_dir.index_dir.as_deref())
         }
     };
 
@@ -413,6 +417,19 @@ mod tests {
     /// Parse argv and return the subcommand, panicking on parse failure.
     fn parse(argv: &[&str]) -> Commands {
         Cli::parse_from(argv).command
+    }
+
+    #[test]
+    fn index_dir_is_command_local_and_unavailable_to_servers() {
+        let cli = Cli::try_parse_from(["vera", "search", "query", "--index-dir", "/tmp/index"])
+            .expect("search accepts an explicit index directory");
+        assert_eq!(
+            cli.command.index_dir(),
+            Some(std::path::Path::new("/tmp/index"))
+        );
+
+        assert!(Cli::try_parse_from(["vera", "mcp", "--index-dir", "/tmp/index"]).is_err());
+        assert!(Cli::try_parse_from(["vera", "serve", "--index-dir", "/tmp/index"]).is_err());
     }
 
     #[test]
@@ -593,7 +610,7 @@ mod tests {
     fn cli_parses_doctor_command() {
         assert!(matches!(
             parse(&["vera", "doctor"]),
-            Commands::Doctor { probe: false }
+            Commands::Doctor { probe: false, .. }
         ));
     }
 
@@ -601,7 +618,7 @@ mod tests {
     fn cli_parses_doctor_probe_command() {
         assert!(matches!(
             parse(&["vera", "doctor", "--probe"]),
-            Commands::Doctor { probe: true }
+            Commands::Doctor { probe: true, .. }
         ));
     }
 
@@ -1065,13 +1082,13 @@ mod tests {
     #[test]
     fn cli_parses_watch_command() {
         assert!(
-            matches!(parse(&["vera", "watch", "/tmp/repo"]), Commands::Watch { path } if path == "/tmp/repo")
+            matches!(parse(&["vera", "watch", "/tmp/repo"]), Commands::Watch { path, .. } if path == "/tmp/repo")
         );
     }
 
     #[test]
     fn cli_parses_stats_command() {
-        assert!(matches!(parse(&["vera", "stats"]), Commands::Stats));
+        assert!(matches!(parse(&["vera", "stats"]), Commands::Stats { .. }));
     }
 
     /// `--idle-timeout -1` is the spelling the flag's own help text documents.

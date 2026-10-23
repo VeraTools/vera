@@ -1,77 +1,56 @@
 ---
 name: vera
-description: Code search over the current repository. In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads. Run `vera overview` in an unfamiliar repository, `vera search "<what the code does>"` for how or where something works, `vera structural definitions <symbol>` or `vera references <symbol>` when the question names a symbol, and `vera grep "pattern"` for exact text or regex. Fall back to grep after a Vera call has missed, or use your usual search tools when no index exists.
+description: Code search over indexed repositories using the Vera MCP server. Prefer Vera MCP for its reusable, cached indexes; load or select the index for the target repository, then use search_code for behavior, structural_search for definitions and implementations, find_references for callers, and regex_search for exact text.
 ---
 
 # Vera
 
-Ranked code search over an indexed repository. Results are markdown codeblocks: `path:line_start-line_end symbol_type:symbol_name` (split symbols render as `name (part N)` in that position, the bare name plus the part suffix), then the code. The returned order is authoritative. When a response includes `score`, it is a pipeline-specific ranking value, not a probability or a value to compare across queries.
+Vera MCP searches indexed repositories and can keep multiple indexes loaded in one server process. Prefer it over one-off local searches: the existing index can be reused and cached rather than rebuilding search context for each request.
 
-## First search
+## Select the repository index
 
-Use the following in indexed repositories. Without an index, follow [Recovery](#recovery); without a shell, use your usual search tools.
+The typical index directory is `.vera` at the repository root. An index can also be stored elsewhere, such as a shared index directory. Use `list_indexes` to see indexes registered with the MCP server and their repository roots. Use `load_index` with an existing index directory when the needed index is not registered.
 
-1. Unfamiliar repository: `vera overview` (languages, entry points, hotspots) instead of `ls` and README skimming.
-2. Then the question's first lookup goes through the table below. Do not "check with grep first".
+When more than one index is loaded, route searches to the intended repository with `scope_path`, using its absolute repository path. `search_code` also accepts `index_name` as an alternative selector. `scope_path` selects the index scope; it does not itself filter results to a subdirectory. Use `path` to narrow results within that repository.
 
-## Pick the tool
+Use `get_overview` for an unfamiliar indexed repository and `get_stats` to inspect its size and language breakdown. If no loaded index covers the target repository, first check `list_indexes`, then load the appropriate existing index.
+
+## Choose the MCP search tool
 
 | Question shape | Do this |
 |----------------|---------|
-| How or where does something work | `vera search "env file loading decision"` |
-| The question names a function, class, or config key | `vera structural definitions make_config`, then `vera references make_config` for callers |
-| Who calls or what is called by a symbol | `vera references make_config` / `vera references make_config --callees` |
-| Exact text or regex | `vera grep "before_request"` (line numbers always shown; `--limit <N>` caps results) |
-| Enumerate every route, env read, implementation | `vera structural routes` / `vera structural env` / `vera structural impls <symbol>` |
-| Documentation on a topic | `vera search "deploying behind proxy" --scope docs` |
-| Files changed in this branch | add `--changed`, `--since <rev>`, or `--base <rev>` to any of the above |
-| Edit the same pattern in many files mechanically | `rg` |
-| Read a file you already know the path and lines of | Read it directly |
+| How or where something works | `search_code` with a natural-language description of the behavior |
+| Definition or explicit implementation of a named symbol | `structural_search` with `kind: "definitions"` or `"implementations"` |
+| Callers or callees of a symbol | `find_references` |
+| Exact text, identifier, or regex | `regex_search` |
+| Routes, environment reads, or SQL query sites | `structural_search` with `kind: "route_handlers"`, `"env_reads"`, or `"sql_queries"` |
+| Documentation on a topic | `search_code` with `scope: "docs"` |
+| Files changed in this branch | Use the MCP tool's `changed`, `since`, or `base` filter |
 
-`vera references` resolves split-symbol call sites, `vera structural definitions` finds split symbols by bare name and deduplicates to the earliest declaration, and `vera dead-code` deduplicates split parts by (symbol, file).
+`search_code` performs hybrid BM25 (keyword) and vector (semantic) retrieval when the index has embeddings. Some indexes are full-text-only and have no embeddings; searches against these rely on lexical/BM25 retrieval, so try a few concrete terms and synonyms rather than only abstract natural-language descriptions. Use `regex_search` for exact strings or patterns regardless of embedding availability. Check `get_stats` or the index metadata from `list_indexes` when you need to understand an index's characteristics.
 
-Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'`; repeat `--path` to include several patterns, just as with search.
+Results include paths, line numbers, and code snippets. Treat hits as leads and verify relevant behavior in the returned code. Ranked order is authoritative; any `score` is pipeline-specific, not a probability or comparable across queries.
 
 ## Search well
 
-- Search behavior, not nouns: `"JWT expiry handling"`, not `"auth"` or `"utils"`.
-- Pass several angles in one call: `vera search "OAuth token refresh" "JWT expiry" "auth middleware"`.
-- Start broad with `--compact` (signatures only, fewer tokens), then narrow with `--lang`, `--path`, `--type`, `--limit`.
-- `--path` is relative to the repository root: `--path src/flask`, `--path "tests/**/*.py"`. Absolute paths inside the repository are accepted and rewritten; paths outside it match nothing.
-- Add `--intent "<goal>"` when the query is vague but the goal is clear.
-- `--deep` expands the query and merges rankings; use it only after normal search misses.
+- Search behavior, not just nouns: describe the goal or behavior you want to locate.
+- Pass 2-3 varied queries in one `search_code` call when useful.
+- Start with `compact` for signatures only, then narrow with `lang`, `path`, `symbol_type`, or `limit`.
+- `path` is relative to the selected repository root; it accepts a string or an array of patterns.
+- Add `intent` when the goal is clear but the query is ambiguous.
+- For an exact symbol, use structural search or references rather than trying many conceptual phrasings.
 
-## Recover from a miss
+## When a result is missing
 
-- Top hit is a usage site, not the definition: `vera structural definitions <symbol>` with the name from the hit. Do not try more phrasings.
-- Hit shows a call but not the caller chain: `vera references <symbol>`.
-- Two searches returned the same region: stop searching and read that code.
-- The code is in a dependency (site-packages, uv or pip caches, vendored trees outside the index): use `rg` there, then return to Vera for repository code.
-
-## Treat hits as leads
-
-- A hit is a lead, not evidence. Verify behavior against the hit's code; open the file only for lines the hit did not include.
-- Cite `path:line` from code you actually read.
-- A stale-index warning does not invalidate hits. After editing files, run `vera update .` from any directory; it refreshes the repository root's index.
-
-## Recovery
-
-If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. Otherwise, or without shell access, use your usual search tools.
+- If the top hit is a usage site rather than a definition, use `structural_search` for the definition.
+- If a hit shows a call but not its caller chain, use `find_references`.
+- If an expected file is absent, use `explain_path` to learn why it is not indexed.
+- A stale-index warning means changed or new files may not be represented. Do not treat missing results from a stale index as proof that code is absent.
+- If no suitable index exists or MCP cannot access the repository, report the limitation rather than silently treating an incomplete search as exhaustive.
 
 | Symptom | Fix |
 |---------|-----|
-| `no index found` | Follow the indexing and fallback guidance above |
-| `no indexed file matches <path>` | Use a root-relative `--path`; stderr suggests a wildcard directory form when one applies |
-| Stale results after edits | `vera update .` (or `vera watch .`); works from any subdirectory |
-| A file is missing from results | `vera explain-path path/to/file` |
-| Local model or ONNX error | `vera doctor --probe`, then `references/troubleshooting.md` |
-| Missing local assets | `vera repair` |
-| Install, API keys, backends | `references/install.md` |
-| MCP server | `references/mcp.md` |
-
-## References
-
-- [Install and setup](references/install.md): install, setup, API and local config, `.veraignore` rules
-- [Query patterns](references/query-patterns.md): more query examples and rg guidance
-- [Troubleshooting](references/troubleshooting.md): common errors and fixes
-- [MCP](references/mcp.md): optional MCP server usage
+| No loaded index covers the repository | Use `list_indexes` and load the existing index with `load_index` |
+| Results come from the wrong repository | Set the correct `scope_path` or `index_name` |
+| No results for a broad semantic query | Check whether the index has embeddings; for full-text-only indexes, try concrete keywords or `regex_search` |
+| A file is missing from results | Use `explain_path` on the repository-relative or absolute path |

@@ -73,6 +73,32 @@ fn limit_prop(what: &str, default: usize) -> Value {
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
+            name: "load_index".to_string(),
+            description: "Register and validate an existing Vera index for its repository scope. \
+                          The index's repository_root metadata determines which absolute file paths \
+                          it can serve. This does not change a global active index."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Vera index directory (for example, /repo/.vera or a saved index directory)."
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDefinition {
+            name: "list_indexes".to_string(),
+            description: "List indexes registered in this MCP server process, including each repository folder name, repository scope, and index metadata."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
             name: "search_code".to_string(),
             description: "Search the indexed codebase using hybrid BM25+vector \
                           retrieval with cross-encoder reranking. Returns ranked \
@@ -113,6 +139,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "items": {"type": "string"},
                         "description": "Filter by file path glob, as a string or an array of strings. Repeated patterns use OR semantics (e.g., src/**/*.rs)"
                     },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Absolute path within a repository to select the matching loaded index scope. Does not filter the returned results."
+                    },
+                    "index_name": {
+                        "type": "string",
+                        "description": "Select a loaded index by repository folder name (as shown by list_indexes). Mutually exclusive with scope_path."
+                    },
                     "symbol_type": {
                         "type": "string",
                         "description": "Filter by symbol type (function, struct, class, etc.)"
@@ -150,7 +184,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": project_path_prop(),
+                    "path": project_path_prop()
                 }
             }), "overview"),
         },
@@ -179,6 +213,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "context": {
                         "type": "integer",
                         "description": "Context lines before and after each match (default: 2)"
+                    },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Absolute path within a repository to select the matching loaded index scope. Does not filter the matches."
                     },
                     "scope": scope_prop(),
                     "include_generated": include_generated_prop(),
@@ -221,6 +259,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "items": {"type": "string"},
                         "description": "Filter by file path glob, as a string or an array of strings. Repeated patterns use OR semantics (e.g., src/**/*.rs)"
                     },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Absolute path within a repository to select the matching loaded index scope. Does not filter the results."
+                    },
                     "symbol_type": {
                         "type": "string",
                         "description": "Filter by enclosing symbol type (function, class, method, etc.)"
@@ -248,6 +290,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Absolute path within a repository to select the matching loaded index scope."
+                    },
                     "symbol": {
                         "type": "string",
                         "description": "Symbol name to look up."
@@ -301,11 +347,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_definitions_has_seven_tools() {
+    fn tool_definitions_has_nine_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"load_index"));
+        assert!(names.contains(&"list_indexes"));
         assert!(names.contains(&"search_code"));
         assert!(names.contains(&"get_stats"));
         assert!(names.contains(&"get_overview"));
@@ -313,6 +361,32 @@ mod tests {
         assert!(names.contains(&"structural_search"));
         assert!(names.contains(&"find_references"));
         assert!(names.contains(&"explain_path"));
+    }
+
+    #[test]
+    fn scope_routed_tools_accept_scope_path() {
+        let tools = tool_definitions();
+        for name in [
+            "search_code",
+            "regex_search",
+            "structural_search",
+            "find_references",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(
+                tool.input_schema["properties"].get("scope_path").is_some(),
+                "{name} must expose scope_path for index scope routing"
+            );
+        }
+        let search = tools
+            .iter()
+            .find(|tool| tool.name == "search_code")
+            .unwrap();
+        assert!(
+            search.input_schema["properties"]
+                .get("index_name")
+                .is_some()
+        );
     }
 
     #[test]

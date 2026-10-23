@@ -58,9 +58,12 @@ pub struct Cli {
     /// Search prints per-stage timings; grep prints total elapsed time.
     #[arg(long, global = true)]
     pub timing: bool,
+}
 
-    /// Use this explicit index directory for index-reading and maintenance commands.
-    #[arg(long, global = true, value_name = "DIR")]
+#[derive(clap::Args, Default)]
+pub struct IndexDirArgs {
+    /// Use this explicit index directory instead of the default `.vera`.
+    #[arg(long, value_name = "DIR")]
     pub index_dir: Option<std::path::PathBuf>,
 }
 
@@ -73,10 +76,14 @@ pub enum Commands {
                       The server reads JSON-RPC messages from stdin and writes responses \
                       to stdout. Logs go to stderr.\n\n\
                       Exposed tools:\n  \
+                       load_index      — Register an existing index and its repository scope\n  \
+                       list_indexes    — List registered indexes and their metadata\n  \
                        search_code      — Hybrid search (auto-indexes and watches on first use)\n  \
                        get_stats        — Index statistics and health\n  \
                        get_overview     — Project summary for onboarding\n  \
                        regex_search     — Regex search over indexed files\n  \
+                       structural_search — Structural search over indexed files\n  \
+                       find_references — Caller/callee lookup from the index\n  \
                        explain_path     — Explain why a file is or is not indexed\n\n\
                       Examples:\n  \
                       vera mcp                       # Start MCP server on stdio")]
@@ -271,6 +278,8 @@ pub enum Commands {
         /// Run a deeper read-only probe of local backend init.
         #[arg(long, visible_alias = "deep")]
         probe: bool,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Repair the configured Vera backend.
@@ -462,6 +471,8 @@ pub enum Commands {
         /// Show only function/class signatures (omit bodies).
         #[arg(long)]
         compact: bool,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Search the indexed codebase.
@@ -524,6 +535,8 @@ pub enum Commands {
         /// Use default mode for targeted retrieval of full implementations.
         #[arg(long)]
         compact: bool,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
 
         #[command(flatten)]
         backend: crate::helpers::LocalBackendFlags,
@@ -561,6 +574,8 @@ pub enum Commands {
         /// Maximum added or modified files to process in this run.
         #[arg(long, value_name = "N")]
         max_files: Option<std::num::NonZeroUsize>,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Show architecture overview of the indexed project.
@@ -575,6 +590,8 @@ pub enum Commands {
     Overview {
         #[command(flatten)]
         git_scope: crate::helpers::GitScopeFlags,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Explain why a path is or is not indexed.
@@ -633,6 +650,8 @@ pub enum Commands {
         /// Show only caller signatures (omit bodies).
         #[arg(long)]
         compact: bool,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Regex pattern search over indexed files.
@@ -675,6 +694,8 @@ pub enum Commands {
         /// Show only function/class signatures (omit bodies).
         #[arg(long)]
         compact: bool,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Find symbols with no callers (potential dead code).
@@ -685,7 +706,10 @@ pub enum Commands {
     /// Examples:
     ///   vera dead-code
     ///   vera dead-code --json
-    DeadCode,
+    DeadCode {
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
+    },
 
     /// Show index statistics.
     #[command(long_about = "Show index statistics.\n\n\
@@ -695,7 +719,10 @@ pub enum Commands {
                       Examples:\n  \
                       vera stats             # Human-readable stats\n  \
                       vera stats --json      # Machine-readable JSON output")]
-    Stats,
+    Stats {
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
+    },
 
     /// Watch a project directory and auto-update the index on file changes.
     #[command(
@@ -713,6 +740,8 @@ pub enum Commands {
     Watch {
         /// Path to the directory to watch.
         path: String,
+        #[command(flatten)]
+        index_dir: IndexDirArgs,
     },
 
     /// Show or set configuration values.
@@ -736,4 +765,23 @@ pub enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+}
+
+impl Commands {
+    pub fn index_dir(&self) -> Option<&std::path::Path> {
+        let args = match self {
+            Self::Doctor { index_dir, .. }
+            | Self::DeadCode { index_dir }
+            | Self::Structural { index_dir, .. }
+            | Self::Search { index_dir, .. }
+            | Self::Update { index_dir, .. }
+            | Self::Overview { index_dir, .. }
+            | Self::References { index_dir, .. }
+            | Self::Grep { index_dir, .. }
+            | Self::Stats { index_dir }
+            | Self::Watch { index_dir, .. } => index_dir,
+            _ => return None,
+        };
+        args.index_dir.as_deref()
+    }
 }

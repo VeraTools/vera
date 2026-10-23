@@ -23,30 +23,33 @@ static CACHE: Mutex<Vec<CachedStaleness>> = Mutex::new(Vec::new());
 
 struct CachedStaleness {
     repo: PathBuf,
+    index_dir: PathBuf,
     checked_at: Instant,
     notice: Option<String>,
 }
 
-/// Cache key for `repo`: the resolved path, so that `.` and the absolute path
-/// to the same tree share one entry. An unresolvable path keys on itself.
-fn cache_key(repo: &Path) -> PathBuf {
-    std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf())
+/// Resolve a path for the cache key; an unresolvable path keys on itself.
+fn cache_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Cached notice for `key`, or `None` when there is no live entry.
-fn cached_notice(key: &Path) -> Option<Option<String>> {
+/// Cached notice for a repository/index pair, or `None` when there is no live entry.
+fn cached_notice(repo: &Path, index_dir: &Path) -> Option<Option<String>> {
     let guard = CACHE.lock().unwrap_or_else(|err| err.into_inner());
     guard
         .iter()
-        .find(|cached| cached.repo == key && cached.checked_at.elapsed() < STALENESS_TTL)
+        .find(|cached| {
+            cached.repo == repo
+                && cached.index_dir == index_dir
+                && cached.checked_at.elapsed() < STALENESS_TTL
+        })
         .map(|cached| cached.notice.clone())
 }
 
-/// Record `notice` for `key`, replacing any entry for the same repository and
-/// dropping the least recently scanned one once [`CACHE_CAPACITY`] is reached.
-fn store_notice(key: PathBuf, notice: Option<String>) {
+/// Record a notice for a repository/index pair, evicting the oldest scan if full.
+fn store_notice(repo: PathBuf, index_dir: PathBuf, notice: Option<String>) {
     let mut guard = CACHE.lock().unwrap_or_else(|err| err.into_inner());
-    guard.retain(|cached| cached.repo != key);
+    guard.retain(|cached| cached.repo != repo || cached.index_dir != index_dir);
     if guard.len() >= CACHE_CAPACITY
         && let Some(oldest) = guard
             .iter()
@@ -57,7 +60,8 @@ fn store_notice(key: PathBuf, notice: Option<String>) {
         guard.remove(oldest);
     }
     guard.push(CachedStaleness {
-        repo: key,
+        repo,
+        index_dir,
         checked_at: Instant::now(),
         notice,
     });
@@ -67,8 +71,14 @@ fn store_notice(key: PathBuf, notice: Option<String>) {
 ///
 /// A scan failure is not a tool failure: it is logged and treated as fresh.
 pub fn notice_for_repo(repo: &Path) -> Option<String> {
-    let key = cache_key(repo);
-    if let Some(notice) = cached_notice(&key) {
+    notice_for_index(repo, &vera_core::indexing::index_dir(repo))
+}
+
+/// Stale-index notice for an explicit index directory.
+pub fn notice_for_index(repo: &Path, index_dir: &Path) -> Option<String> {
+    let repo_key = cache_key(repo);
+    let index_key = cache_key(index_dir);
+    if let Some(notice) = cached_notice(&repo_key, &index_key) {
         return notice;
     }
 
@@ -76,14 +86,18 @@ pub fn notice_for_repo(repo: &Path) -> Option<String> {
     // the lock across that would serialize unrelated repositories. A duplicate
     // concurrent scan of the same repository is wasteful, never wrong.
     let config = crate::saved_config::load_saved_runtime_config();
-    let notice = match vera_core::indexing::detect_staleness(repo, &config.indexing) {
+    let notice = match vera_core::indexing::freshness::detect_staleness_at_index_dir(
+        repo,
+        index_dir,
+        &config.indexing,
+    ) {
         Ok(freshness) => freshness.stale_warning(),
         Err(err) => {
             tracing::debug!(error = %err, "failed to check index freshness");
             None
         }
     };
-    store_notice(key, notice.clone());
+    store_notice(repo_key, index_key, notice.clone());
     notice
 }
 

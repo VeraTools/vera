@@ -7,7 +7,10 @@ use vera_core::presentation::{CompactResult, truncate_to_budget};
 
 use crate::protocol::ToolCallResult;
 
-use super::runtime::{cached_search_context, ensure_index_and_watcher, search_runtime};
+use super::runtime::{
+    LoadedIndex, cached_search_context, ensure_index_and_watcher, list_loaded_indexes, load_index,
+    search_runtime, select_loaded_index,
+};
 
 /// Default total output budget for MCP responses (chars).
 const MCP_OUTPUT_BUDGET: usize = 20_000;
@@ -89,6 +92,18 @@ fn results_with_notices(
     ToolCallResult::success_with_notice(json, (!notices.is_empty()).then(|| notices.join("\n")))
 }
 
+fn results_with_index_notices(
+    repo: &std::path::Path,
+    index_dir: &std::path::Path,
+    json: String,
+    mut notices: Vec<String>,
+) -> ToolCallResult {
+    if let Some(notice) = crate::staleness::notice_for_index(repo, index_dir) {
+        notices.push(notice);
+    }
+    ToolCallResult::success_with_notice(json, (!notices.is_empty()).then(|| notices.join("\n")))
+}
+
 /// Notices for results from a degraded pipeline. The CLI reports these on
 /// stderr, which an MCP agent never sees, so without them it cannot tell
 /// keyword-only or unreranked results from a full hybrid search. Merged
@@ -128,6 +143,13 @@ fn degraded_search_notices(
 /// error with a descriptive message. This function never panics.
 pub fn handle_tool_call(name: &str, arguments: &Value) -> ToolCallResult {
     match name {
+        "load_index" => handle_load_index(arguments),
+        "list_indexes" => match serde_json::to_string_pretty(&list_loaded_indexes()) {
+            Ok(json) => ToolCallResult::success(json),
+            Err(error) => {
+                ToolCallResult::error(format!("Failed to serialize loaded indexes: {error}"))
+            }
+        },
         "search_code" => handle_search_code(arguments),
         "get_stats" => handle_get_stats(arguments),
         "get_overview" => handle_get_overview(arguments),
@@ -137,6 +159,33 @@ pub fn handle_tool_call(name: &str, arguments: &Value) -> ToolCallResult {
         "explain_path" => handle_explain_path(arguments),
         _ => ToolCallResult::error(format!("Unknown tool: {name}")),
     }
+}
+
+fn handle_load_index(args: &Value) -> ToolCallResult {
+    let path = match args.get("path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => path,
+        _ => return ToolCallResult::error("Missing required parameter: path"),
+    };
+    match load_index(path) {
+        Ok(index) => match serde_json::to_string_pretty(&index) {
+            Ok(json) => ToolCallResult::success(json),
+            Err(error) => {
+                ToolCallResult::error(format!("Failed to serialize loaded index: {error}"))
+            }
+        },
+        Err(error) => error,
+    }
+}
+
+fn requested_index(args: &Value) -> Result<Option<LoadedIndex>, ToolCallResult> {
+    let scope_path = args.get("scope_path").and_then(Value::as_str);
+    let index_name = args.get("index_name").and_then(Value::as_str);
+    if (scope_path.is_some() || index_name.is_some()) && list_loaded_indexes().is_empty() {
+        return Err(ToolCallResult::error(
+            "No indexes are loaded. Call load_index with an index directory before selecting an index.",
+        ));
+    }
+    select_loaded_index(scope_path.map(std::path::Path::new), index_name)
 }
 
 fn git_scope_from_args(args: &Value) -> Result<Option<vera_core::git_scope::GitScope>, String> {
@@ -317,12 +366,23 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
         Ok(cwd) => cwd,
         Err(err) => return err,
     };
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    let loaded_index = match requested_index(args) {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    let repo_root = loaded_index
+        .as_ref()
+        .map(|index| std::path::PathBuf::from(&index.repository_root))
+        .unwrap_or_else(|| cwd.clone());
+    if let Err(err) = apply_git_scope_filters(args, &repo_root, &mut filters) {
         return err;
     }
-    let index_dir = match ensure_index_and_watcher(&cwd) {
-        Ok(index_dir) => index_dir,
-        Err(err) => return err,
+    let index_dir = match loaded_index.as_ref() {
+        Some(index) => std::path::PathBuf::from(&index.index_dir),
+        None => match ensure_index_and_watcher(&cwd) {
+            Ok(index_dir) => index_dir,
+            Err(err) => return err,
+        },
     };
     let rt = match search_runtime() {
         Ok(rt) => rt,
@@ -386,11 +446,14 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
         .unwrap_or(false);
 
     match compact_results_json(&all_results, MCP_OUTPUT_BUDGET, signatures_only) {
-        Ok(json) => results_with_notices(
-            &cwd,
-            json,
-            degraded_search_notices(&timings, queries.len() > 1),
-        ),
+        Ok(json) => {
+            let notices = degraded_search_notices(&timings, queries.len() > 1);
+            if loaded_index.is_some() {
+                results_with_index_notices(&repo_root, &index_dir, json, notices)
+            } else {
+                results_with_notices(&cwd, json, notices)
+            }
+        }
         Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
     }
 }
@@ -436,11 +499,35 @@ fn resolve_repo_path(args: &Value) -> Result<std::path::PathBuf, ToolCallResult>
 
 /// Handle the `get_stats` tool.
 fn handle_get_stats(args: &Value) -> ToolCallResult {
-    let repo_path = match resolve_repo_path(args) {
+    let mut repo_path = match resolve_repo_path(args) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    match vera_core::stats::collect_stats(&repo_path) {
+    let path = match repo_path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return ToolCallResult::error(format!("Cannot resolve project path: {error}"));
+        }
+    };
+    let loaded_index = match if args.get("path").is_some() {
+        select_loaded_index(Some(&path), None)
+    } else {
+        select_loaded_index(None, None)
+    } {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    if let Some(index) = &loaded_index {
+        repo_path = std::path::PathBuf::from(&index.repository_root);
+    }
+    let stats_result = match &loaded_index {
+        Some(index) => vera_core::stats::collect_stats_from_index_dir(
+            std::path::Path::new(&index.index_dir),
+            &repo_path,
+        ),
+        None => vera_core::stats::collect_stats(&repo_path),
+    };
+    match stats_result {
         Ok(stats) => match serde_json::to_string_pretty(&stats) {
             Ok(json) => ToolCallResult::success(json),
             Err(e) => ToolCallResult::error(format!("Failed to serialize stats: {e}")),
@@ -451,10 +538,27 @@ fn handle_get_stats(args: &Value) -> ToolCallResult {
 
 /// Handle the `get_overview` tool.
 fn handle_get_overview(args: &Value) -> ToolCallResult {
-    let repo_path = match resolve_repo_path(args) {
+    let mut repo_path = match resolve_repo_path(args) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    let path = match repo_path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return ToolCallResult::error(format!("Cannot resolve project path: {error}"));
+        }
+    };
+    let loaded_index = match if args.get("path").is_some() {
+        select_loaded_index(Some(&path), None)
+    } else {
+        select_loaded_index(None, None)
+    } {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    if let Some(index) = &loaded_index {
+        repo_path = std::path::PathBuf::from(&index.repository_root);
+    }
     let exact_paths = match git_scope_from_args(args) {
         Ok(Some(scope)) => match vera_core::git_scope::resolve_scope(&repo_path, &scope) {
             Ok(paths) => Some(paths),
@@ -465,9 +569,25 @@ fn handle_get_overview(args: &Value) -> ToolCallResult {
         Ok(None) => None,
         Err(err) => return ToolCallResult::error(err),
     };
-    match vera_core::stats::collect_overview_filtered(&repo_path, exact_paths.as_ref()) {
+    let overview_result = match &loaded_index {
+        Some(index) => vera_core::stats::collect_overview_filtered_from_index_dir(
+            std::path::Path::new(&index.index_dir),
+            &repo_path,
+            exact_paths.as_ref(),
+        ),
+        None => vera_core::stats::collect_overview_filtered(&repo_path, exact_paths.as_ref()),
+    };
+    match overview_result {
         Ok(overview) => match serde_json::to_string_pretty(&overview) {
-            Ok(json) => results_with_staleness(&repo_path, json),
+            Ok(json) => match &loaded_index {
+                Some(index) => results_with_index_notices(
+                    &repo_path,
+                    std::path::Path::new(&index.index_dir),
+                    json,
+                    Vec::new(),
+                ),
+                None => results_with_staleness(&repo_path, json),
+            },
             Err(e) => ToolCallResult::error(format!("Failed to serialize overview: {e}")),
         },
         Err(e) => ToolCallResult::error(format!("Failed to collect overview: {e}")),
@@ -504,13 +624,24 @@ fn handle_regex_search(args: &Value) -> ToolCallResult {
         Ok(cwd) => cwd,
         Err(err) => return err,
     };
-    let index_dir = match existing_index_dir(&cwd) {
-        Ok(index_dir) => index_dir,
-        Err(err) => return err,
+    let loaded_index = match requested_index(args) {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    let repo_root = loaded_index
+        .as_ref()
+        .map(|index| std::path::PathBuf::from(&index.repository_root))
+        .unwrap_or_else(|| cwd.clone());
+    let index_dir = match loaded_index.as_ref() {
+        Some(index) => std::path::PathBuf::from(&index.index_dir),
+        None => match existing_index_dir(&cwd) {
+            Ok(index_dir) => index_dir,
+            Err(err) => return err,
+        },
     };
 
     let mut filters = regex_search_filters(args, scope);
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repo_root, &mut filters) {
         return err;
     }
 
@@ -528,7 +659,10 @@ fn handle_regex_search(args: &Value) -> ToolCallResult {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                Ok(json) => results_with_staleness(&cwd, json),
+                Ok(json) => match &loaded_index {
+                    Some(_) => results_with_index_notices(&repo_root, &index_dir, json, Vec::new()),
+                    None => results_with_staleness(&cwd, json),
+                },
                 Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
             }
         }
@@ -562,15 +696,26 @@ fn handle_structural_search(args: &Value) -> ToolCallResult {
         Ok(cwd) => cwd,
         Err(err) => return err,
     };
+    let loaded_index = match requested_index(args) {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    let repo_root = loaded_index
+        .as_ref()
+        .map(|index| std::path::PathBuf::from(&index.repository_root))
+        .unwrap_or_else(|| cwd.clone());
 
     let mut filters = search_code_filters(args, scope);
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repo_root, &mut filters) {
         return err;
     }
 
-    let index_dir = match ensure_index_and_watcher(&cwd) {
-        Ok(index_dir) => index_dir,
-        Err(err) => return err,
+    let index_dir = match loaded_index.as_ref() {
+        Some(index) => std::path::PathBuf::from(&index.index_dir),
+        None => match ensure_index_and_watcher(&cwd) {
+            Ok(index_dir) => index_dir,
+            Err(err) => return err,
+        },
     };
 
     match vera_core::retrieval::search_structural(&index_dir, kind, query, limit, &filters) {
@@ -580,7 +725,10 @@ fn handle_structural_search(args: &Value) -> ToolCallResult {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                Ok(json) => results_with_staleness(&cwd, json),
+                Ok(json) => match &loaded_index {
+                    Some(_) => results_with_index_notices(&repo_root, &index_dir, json, Vec::new()),
+                    None => results_with_staleness(&cwd, json),
+                },
                 Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
             }
         }
@@ -608,25 +756,41 @@ fn handle_find_references(args: &Value) -> ToolCallResult {
         Ok(cwd) => cwd,
         Err(err) => return err,
     };
+    let loaded_index = match requested_index(args) {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    let repo_root = loaded_index
+        .as_ref()
+        .map(|index| std::path::PathBuf::from(&index.repository_root))
+        .unwrap_or_else(|| cwd.clone());
 
-    let exact_paths = match exact_paths_from_args(args, &cwd) {
+    let exact_paths = match exact_paths_from_args(args, &repo_root) {
         Ok(paths) => paths,
         Err(err) => return err,
     };
-    let index_dir = match ensure_index_and_watcher(&cwd) {
-        Ok(index_dir) => index_dir,
-        Err(err) => return err,
+    let index_dir = match loaded_index.as_ref() {
+        Some(index) => std::path::PathBuf::from(&index.index_dir),
+        None => match ensure_index_and_watcher(&cwd) {
+            Ok(index_dir) => index_dir,
+            Err(err) => return err,
+        },
     };
 
     if callees {
-        match vera_core::stats::find_callees(&cwd, symbol) {
+        match vera_core::stats::find_callees_from_index_dir(&index_dir, symbol) {
             Ok(mut results) => {
                 if let Some(paths) = exact_paths.as_ref() {
                     results.retain(|result| paths.contains(&result.file_path));
                 }
                 results.truncate(limit);
                 match serde_json::to_string(&results) {
-                    Ok(json) => results_with_staleness(&cwd, json),
+                    Ok(json) => match &loaded_index {
+                        Some(_) => {
+                            results_with_index_notices(&repo_root, &index_dir, json, Vec::new())
+                        }
+                        None => results_with_staleness(&cwd, json),
+                    },
                     Err(err) => {
                         ToolCallResult::error(format!("Failed to serialize references: {err}"))
                     }
@@ -648,7 +812,12 @@ fn handle_find_references(args: &Value) -> ToolCallResult {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                    Ok(json) => results_with_staleness(&cwd, json),
+                    Ok(json) => match &loaded_index {
+                        Some(_) => {
+                            results_with_index_notices(&repo_root, &index_dir, json, Vec::new())
+                        }
+                        None => results_with_staleness(&cwd, json),
+                    },
                     Err(err) => {
                         ToolCallResult::error(format!("Failed to serialize references: {err}"))
                     }
@@ -669,6 +838,39 @@ fn handle_explain_path(args: &Value) -> ToolCallResult {
         Ok(cwd) => cwd,
         Err(err) => return err,
     };
+    let requested_path = std::path::Path::new(path);
+    let scope_path = if requested_path.is_absolute() {
+        if requested_path.exists() {
+            Some(requested_path)
+        } else {
+            requested_path.parent()
+        }
+    } else {
+        None
+    };
+    let loaded_index = match select_loaded_index(scope_path, None) {
+        Ok(index) => index,
+        Err(error) => return error,
+    };
+    let repo_root = loaded_index
+        .as_ref()
+        .map(|index| std::path::PathBuf::from(&index.repository_root))
+        .unwrap_or_else(|| cwd.clone());
+    let explanation_path = if requested_path.is_absolute() {
+        match requested_path.strip_prefix(&repo_root) {
+            Ok(relative) => relative,
+            Err(_) if loaded_index.is_some() => {
+                return ToolCallResult::error(format!(
+                    "Path is outside repository scope {}: {}",
+                    repo_root.display(),
+                    requested_path.display()
+                ));
+            }
+            Err(_) => requested_path,
+        }
+    } else {
+        requested_path
+    };
 
     let mut config = crate::saved_config::load_saved_runtime_config();
     config.indexing.no_ignore = args
@@ -687,7 +889,7 @@ fn handle_explain_path(args: &Value) -> ToolCallResult {
         );
     }
 
-    match vera_core::discovery::explain_path(&cwd, std::path::Path::new(path), &config.indexing) {
+    match vera_core::discovery::explain_path(&repo_root, explanation_path, &config.indexing) {
         Ok(explanation) => match serde_json::to_string_pretty(&explanation) {
             Ok(json) => ToolCallResult::success(json),
             Err(e) => ToolCallResult::error(format!("Failed to serialize explanation: {e}")),

@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(tools_resp["id"], 2);
 
         let tools = tools_resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_code"));
@@ -542,7 +542,7 @@ mod tests {
         // tools list still works.
         assert_eq!(responses[4]["id"], 5);
         let tools = responses[4]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
     }
 
     #[test]
