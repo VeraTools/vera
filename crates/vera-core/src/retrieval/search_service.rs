@@ -15,6 +15,7 @@ use tracing::warn;
 
 use crate::config::{InferenceBackend, VeraConfig};
 use crate::embedding::{CachedEmbeddingProvider, DynamicProvider, EmbeddingProvider};
+use crate::indexing::pipeline::INDEX_MODE_FULL_TEXT_ONLY;
 use crate::retrieval::dynamic_reranker::DynamicReranker;
 use crate::retrieval::exact_matches::augment_exact_match_candidates_with_store_and_config;
 pub use crate::retrieval::exact_matches::augment_multi_query_exact_matches;
@@ -360,11 +361,18 @@ impl SearchContext {
                 return bm25_only(Some(format!("failed to read index metadata: {err}")));
             }
         };
+        if index_meta
+            .as_ref()
+            .and_then(|(_, _, _, mode)| mode.as_deref())
+            == Some(INDEX_MODE_FULL_TEXT_ONLY)
+        {
+            return bm25_only(None);
+        }
 
         let mut index_provider = None;
         let (provider, model_name) = match index_meta
             .as_ref()
-            .and_then(|(model_name, _, _)| model_name.as_deref())
+            .and_then(|(model_name, _, _, _)| model_name.as_deref())
         {
             Some(index_model)
                 if self.model_name.as_deref().is_none_or(|active_model| {
@@ -416,7 +424,7 @@ impl SearchContext {
         );
 
         let mut stored_dim = config.embedding.max_stored_dim;
-        if let Some((Some(s_model), Some(s_dim), s_prefix)) = index_meta.as_ref() {
+        if let Some((Some(s_model), Some(s_dim), s_prefix, _)) = index_meta.as_ref() {
             if let Some(model_name) = model_name
                 && !crate::config::model_names_match_with_aliases(
                     &s_model,
@@ -1647,7 +1655,7 @@ mod tests {
             .unwrap();
         let index_dir = crate::indexing::index_dir(&repo);
         let stores = SearchStores::open(&index_dir).unwrap();
-        let (m1, _d1, _p1) = stores.cached_index_meta().unwrap();
+        let (m1, _d1, _p1, _mode1) = stores.cached_index_meta().unwrap();
         assert_eq!(m1.as_deref(), Some("mock-model"));
         // Record stamp before mutation.
         let stamp_before = std::fs::metadata(index_dir.join("metadata.db"))
@@ -1671,7 +1679,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let (m2, _d2, _p2) = stores.cached_index_meta().unwrap();
+        let (m2, _d2, _p2, _mode2) = stores.cached_index_meta().unwrap();
         // After stamp invalidation, the new value must be observed; stale cached value is impossible.
         assert_eq!(
             m2.as_deref(),

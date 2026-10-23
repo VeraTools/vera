@@ -132,6 +132,7 @@ struct CachedIndexMeta {
     model_name: Option<String>,
     embedding_dim: Option<String>,
     document_prefix: Option<String>,
+    index_mode: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -266,8 +267,7 @@ impl SearchStores {
         Ok(files)
     }
 
-    /// Index metadata (model_name, embedding_dim, document_prefix) cached
-    /// against the metadata database stamp.
+    /// Index metadata cached against the metadata database stamp.
     ///
     /// Profiling (`docs/adr/009-filter-scan-profiling.md`): `SearchContext::search` performs
     /// three `get_index_meta` SQLite reads per query (~0.45 ms per query,
@@ -282,7 +282,12 @@ impl SearchStores {
     /// `bm25_metadata` lock.
     pub(crate) fn cached_index_meta(
         &self,
-    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    ) -> Result<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> {
         let stamp = metadata_db_stamp(&self.metadata_path);
         {
             let cached = self
@@ -296,6 +301,7 @@ impl SearchStores {
                     cached.model_name.clone(),
                     cached.embedding_dim.clone(),
                     cached.document_prefix.clone(),
+                    cached.index_mode.clone(),
                 ));
             }
         }
@@ -304,6 +310,7 @@ impl SearchStores {
         let model_name = store.get_index_meta("model_name")?;
         let embedding_dim = store.get_index_meta("embedding_dim")?;
         let document_prefix = store.get_index_meta("document_prefix")?;
+        let index_mode = store.get_index_meta(crate::indexing::pipeline::INDEX_MODE_KEY)?;
         let mut cached = self
             .cached_index_meta
             .lock()
@@ -313,8 +320,9 @@ impl SearchStores {
             model_name: model_name.clone(),
             embedding_dim: embedding_dim.clone(),
             document_prefix: document_prefix.clone(),
+            index_mode: index_mode.clone(),
         });
-        Ok((model_name, embedding_dim, document_prefix))
+        Ok((model_name, embedding_dim, document_prefix, index_mode))
     }
 
     pub(crate) fn is_open_stamp_current(&self) -> bool {

@@ -1655,7 +1655,7 @@ mod resume_tests {
             metadata.get_index_meta(INDEX_MODE_KEY).unwrap().as_deref(),
             Some(INDEX_MODE_FULL_TEXT_ONLY)
         );
-        let (hits, _) = SearchContext::bm25_only()
+        let (hits, timings) = SearchContext::bm25_only()
             .search(
                 &idx_dir,
                 "item_0",
@@ -1667,6 +1667,7 @@ mod resume_tests {
             .await
             .unwrap();
         assert!(!hits.is_empty());
+        assert!(timings.semantic_fallback.is_none());
     }
 
     #[tokio::test]
