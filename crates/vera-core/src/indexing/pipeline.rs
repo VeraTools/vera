@@ -112,6 +112,9 @@ const BM25_SUBDIR: &str = "bm25";
 /// Filename for SQLite metadata + vector databases.
 const METADATA_DB: &str = "metadata.db";
 const VECTOR_DB: &str = "vectors.db";
+pub const INDEX_MODE_KEY: &str = "index_mode";
+pub const INDEX_MODE_FULL_TEXT_ONLY: &str = "full_text_only";
+pub const INDEX_REPOSITORY_ROOT_KEY: &str = "repository_root";
 
 /// Maximum number of parsed chunks held by the full-index pipeline at once.
 ///
@@ -126,6 +129,35 @@ const MAX_PARSE_FILE_GROUP: usize = 64;
 /// Resolve the index directory for a given repository root.
 pub fn index_dir(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(INDEX_DIR_NAME)
+}
+
+pub(crate) fn resolve_output_index_dir(repo_root: &Path, output: Option<&Path>) -> Result<PathBuf> {
+    let Some(output) = output else {
+        return Ok(index_dir(repo_root));
+    };
+    if output.exists() {
+        if !output.is_dir() {
+            bail!("index output path is not a directory: {}", output.display());
+        }
+        return output
+            .canonicalize()
+            .with_context(|| format!("failed to resolve index output: {}", output.display()));
+    }
+    let absolute = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(output)
+    };
+    let parent = absolute
+        .parent()
+        .context("index output path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create index parent: {}", parent.display()))?;
+    Ok(parent.canonicalize()?.join(
+        absolute
+            .file_name()
+            .context("index output path has no final component")?,
+    ))
 }
 
 /// True when `path` lives inside the live index directory or one of the
@@ -172,6 +204,191 @@ pub async fn index_repository<P: EmbeddingProvider>(
         &CancellationToken::new(),
     )
     .await
+}
+
+/// Build an index containing BM25 full-text search and chunk metadata, without
+/// initializing an embedding provider or creating a vector store.
+pub async fn index_repository_full_text_only(
+    repo_path: &Path,
+    config: &VeraConfig,
+    cancellation: &CancellationToken,
+) -> Result<IndexSummary> {
+    index_repository_full_text_only_with_replacement_confirmation(
+        repo_path,
+        config,
+        cancellation,
+        true,
+    )
+    .await
+}
+
+/// Build a full-text-only index, optionally refusing to replace an index that
+/// exists when this operation acquires the repository lock.
+pub async fn index_repository_full_text_only_with_replacement_confirmation(
+    repo_path: &Path,
+    config: &VeraConfig,
+    cancellation: &CancellationToken,
+    replacement_confirmed: bool,
+) -> Result<IndexSummary> {
+    index_repository_full_text_only_with_options(
+        repo_path,
+        config,
+        cancellation,
+        replacement_confirmed,
+        None,
+    )
+    .await
+}
+
+pub async fn index_repository_full_text_only_with_options(
+    repo_path: &Path,
+    config: &VeraConfig,
+    cancellation: &CancellationToken,
+    replacement_confirmed: bool,
+    output_index_dir: Option<&Path>,
+) -> Result<IndexSummary> {
+    let start = Instant::now();
+    let mut phase_secs = PhaseSecs::default();
+    cancellation.check()?;
+    if !repo_path.exists() || !repo_path.is_dir() {
+        bail!("path is not a directory: {}", repo_path.display());
+    }
+    let repo_root = repo_path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
+    let idx_dir = resolve_output_index_dir(&repo_root, output_index_dir)?;
+    let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
+        .context("failed to acquire index lock")?;
+    recover_index_directories(&idx_dir).context("failed to recover index directories")?;
+    if idx_dir.exists() && !replacement_confirmed {
+        bail!(
+            "an index appeared at {} before this build could start; confirm replacement and retry with `vera index --yes`",
+            idx_dir.display()
+        );
+    }
+
+    let discovery_start = Instant::now();
+    let discovery =
+        discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
+            .context("file discovery failed")?;
+    phase_secs.discovery = rounded_secs(discovery_start.elapsed());
+
+    let mut staging = StagingIndex::new(&idx_dir).context("failed to create staging index")?;
+    let metadata_store = MetadataStore::open(&staging.build_dir.join(METADATA_DB))
+        .context("failed to open full-text metadata store")?;
+    metadata_store
+        .set_index_meta(INDEX_MODE_KEY, INDEX_MODE_FULL_TEXT_ONLY)
+        .context("failed to store full-text-only mode")?;
+    metadata_store
+        .set_index_meta(INDEX_REPOSITORY_ROOT_KEY, &repo_root.to_string_lossy())
+        .context("failed to store repository root")?;
+    metadata_store
+        .set_index_meta("model_name", "none")
+        .context("failed to store full-text-only model marker")?;
+    metadata_store
+        .set_index_meta("document_prefix", "")
+        .context("failed to store full-text-only document prefix")?;
+    let bm25_index = Bm25Index::open(&staging.build_dir.join(BM25_SUBDIR))
+        .context("failed to open full-text index")?;
+    let bm25_writer = bm25_index
+        .begin_bulk_build()
+        .context("failed to create full-text index writer")?;
+
+    let total_files = discovery.files.len();
+    let discovery = Arc::new(discovery);
+    let repo_root = Arc::new(repo_root);
+    let cancellation = cancellation.clone();
+    let parse_start = Instant::now();
+    let mut file_index = 0;
+    let mut chunks_created = 0;
+    let mut parse_errors = Vec::new();
+    let mut file_hashes = Vec::new();
+    let mut file_states = Vec::new();
+    let mut store_time = Duration::ZERO;
+    while file_index < total_files {
+        cancellation.check()?;
+        let discovery_for_task = Arc::clone(&discovery);
+        let root_for_task = Arc::clone(&repo_root);
+        let config_for_task = config.clone();
+        let cancellation_for_task = cancellation.clone();
+        let start_file = file_index;
+        let window = tokio::task::spawn_blocking(move || {
+            parse_window(
+                &discovery_for_task,
+                start_file,
+                WINDOW_CHUNK_TARGET,
+                MAX_PARSE_FILE_GROUP,
+                &root_for_task,
+                &config_for_task,
+                &cancellation_for_task,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("full-text parse task panicked: {error}"))??;
+        file_index = window.next_file_index;
+        chunks_created += window.chunks.len();
+        parse_errors.extend(window.parse_errors);
+        file_hashes.extend(window.file_hashes);
+        file_states.extend(window.file_states.iter().cloned());
+
+        let store_start = Instant::now();
+        if !window.chunks.is_empty() {
+            metadata_store
+                .insert_chunks(&window.chunks)
+                .context("failed to store full-text chunk metadata")?;
+            bm25_writer
+                .insert_chunks(&window.chunks)
+                .context("failed to store full-text documents")?;
+        }
+        metadata_store
+            .insert_file_states(&window.file_states)
+            .context("failed to store full-text file states")?;
+        metadata_store
+            .insert_parse_artifacts_batch(&window.refs, &window.type_relations)
+            .context("failed to store full-text parse artifacts")?;
+        store_time += store_start.elapsed();
+    }
+    phase_secs.parse = rounded_secs(parse_start.elapsed());
+
+    let store_start = Instant::now();
+    bm25_writer
+        .finish()
+        .context("failed to commit full-text index")?;
+    publish_index_certification(&metadata_store, &file_hashes, &config.indexing)
+        .context("failed to certify full-text index")?;
+    store_time += store_start.elapsed();
+    phase_secs.store = rounded_secs(store_time);
+
+    let binary_skipped = discovery.binary_skipped;
+    let large_skipped = discovery.large_skipped;
+    let large_skipped_paths = discovery.large_skipped_paths.clone();
+    let error_skipped = discovery.error_skipped;
+    cancellation.check()?;
+    drop(metadata_store);
+    drop(bm25_index);
+    swap_staging_index(&idx_dir, &staging.build_dir, &staging.old_dir)
+        .context("failed to publish full-text index")?;
+    staging.committed = true;
+
+    Ok(IndexSummary {
+        files_parsed: total_files.saturating_sub(parse_errors.len()),
+        chunks_created,
+        embeddings_generated: 0,
+        embeddings_reused: 0,
+        embedding_requests: 0,
+        embedding_retries: 0,
+        embedding_timeouts: 0,
+        embedding_failed_batches: 0,
+        phase_secs,
+        binary_skipped,
+        large_skipped,
+        large_skipped_paths,
+        error_skipped,
+        files_with_tree_sitter_errors: count_tree_sitter_error_files(&file_states),
+        files_using_tier0_fallback: count_tier0_fallback_files(&file_states),
+        parse_errors,
+        elapsed_secs: start.elapsed().as_secs_f64(),
+    })
 }
 
 /// Index a repository while cooperatively observing cancellation.
@@ -229,7 +446,61 @@ where
     P: EmbeddingProvider,
     F: Fn(IndexProgress) + Send + Sync,
 {
-    index_repository_with_progress_and_cancellation_with_window_target(
+    index_repository_with_progress_and_cancellation_with_replacement_confirmation(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        true,
+    )
+    .await
+}
+
+/// Index a repository while refusing to replace an index created after the
+/// caller's replacement check unless replacement has been confirmed.
+pub async fn index_repository_with_progress_and_cancellation_with_replacement_confirmation<P, F>(
+    repo_path: &Path,
+    provider: &P,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    replacement_confirmed: bool,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_options(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        replacement_confirmed,
+        None,
+    )
+    .await
+}
+
+pub async fn index_repository_with_progress_and_cancellation_with_options<P, F>(
+    repo_path: &Path,
+    provider: &P,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    replacement_confirmed: bool,
+    output_index_dir: Option<&Path>,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_confirmation(
         repo_path,
         provider,
         config,
@@ -237,6 +508,8 @@ where
         on_progress,
         cancellation,
         WINDOW_CHUNK_TARGET,
+        replacement_confirmed,
+        output_index_dir,
     )
     .await
 }
@@ -251,6 +524,35 @@ pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_
     on_progress: F,
     cancellation: &CancellationToken,
     window_chunk_target: usize,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_confirmation(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        window_chunk_target,
+        true,
+        None,
+    )
+    .await
+}
+
+async fn index_repository_with_progress_and_cancellation_with_window_target_and_confirmation<P, F>(
+    repo_path: &Path,
+    provider: &P,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    window_chunk_target: usize,
+    replacement_confirmed: bool,
+    output_index_dir: Option<&Path>,
 ) -> Result<IndexSummary>
 where
     P: EmbeddingProvider,
@@ -278,7 +580,7 @@ where
 
     info!(path = %repo_root.display(), "starting indexing");
 
-    let idx_dir = index_dir(&repo_root);
+    let idx_dir = resolve_output_index_dir(&repo_root, output_index_dir)?;
     // Serialize concurrent writers for this repo. The lock is held for the
     // entire build so a concurrent `reuse_index` check sees a held lock and
     // refuses to reuse a half-written live index. `flock` releases
@@ -287,6 +589,12 @@ where
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
         .context("failed to acquire index lock")?;
     recover_index_directories(&idx_dir).context("failed to recover index directories")?;
+    if idx_dir.exists() && !replacement_confirmed {
+        bail!(
+            "an index appeared at {} before this build could start; confirm replacement and retry with `vera index --yes`",
+            idx_dir.display()
+        );
+    }
     let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
 
     // ── 2. Discover files ────────────────────────────────────────
@@ -345,6 +653,7 @@ where
         staging.build_dir.clone(),
         model_name.to_string(),
         provider.document_prefix_identity(),
+        repo_root.to_string_lossy().into_owned(),
     );
 
     // ── 3. Parse, embed, and store bounded windows ───────────────
@@ -684,12 +993,17 @@ struct StoreHandle {
 }
 
 impl StoreHandle {
-    fn spawn(build_dir: PathBuf, model_name: String, document_prefix: String) -> Self {
+    fn spawn(
+        build_dir: PathBuf,
+        model_name: String,
+        document_prefix: String,
+        repo_root: String,
+    ) -> Self {
         // Capacity bounds in-flight windows to one being stored plus one
         // queued, applying backpressure to the embed stage if stores lag.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let worker = tokio::task::spawn_blocking(move || {
-            store_worker(&build_dir, &model_name, &document_prefix, rx)
+            store_worker(&build_dir, &model_name, &document_prefix, &repo_root, rx)
         });
         Self {
             tx,
@@ -756,6 +1070,7 @@ fn store_worker(
     build_dir: &Path,
     model_name: &str,
     document_prefix: &str,
+    repo_root: &str,
     mut rx: tokio::sync::mpsc::Receiver<StoreCommand>,
 ) -> Result<Duration> {
     let setup_start = Instant::now();
@@ -767,6 +1082,9 @@ fn store_worker(
     metadata_store
         .set_index_meta("document_prefix", document_prefix)
         .context("failed to store document_prefix")?;
+    metadata_store
+        .set_index_meta(INDEX_REPOSITORY_ROOT_KEY, repo_root)
+        .context("failed to store repository root")?;
     let bm25_index = Bm25Index::open(&build_dir.join(BM25_SUBDIR))
         .context("failed to open staging BM25 index")?;
     // One writer for the whole build: a writer per window would pay creation,
@@ -1248,6 +1566,71 @@ mod resume_tests {
             )
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn full_text_only_build_creates_searchable_index_without_vectors() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        let summary =
+            index_repository_full_text_only(root.path(), &config(), &CancellationToken::new())
+                .await
+                .unwrap();
+
+        let idx_dir = index_dir(root.path());
+        assert_eq!(summary.files_parsed, 4);
+        assert_eq!(summary.embeddings_generated, 0);
+        assert!(idx_dir.join(BM25_SUBDIR).exists());
+        assert!(!idx_dir.join(VECTOR_DB).exists());
+        let metadata = MetadataStore::open_existing(&idx_dir.join(METADATA_DB)).unwrap();
+        assert_eq!(
+            metadata.get_index_meta(INDEX_MODE_KEY).unwrap().as_deref(),
+            Some(INDEX_MODE_FULL_TEXT_ONLY)
+        );
+        let (hits, _) = SearchContext::bm25_only()
+            .search(
+                &idx_dir,
+                "item_0",
+                None,
+                &config(),
+                &SearchFilters::default(),
+                5,
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_text_only_update_refreshes_bm25_without_embeddings() {
+        let root = tempdir().unwrap();
+        write_corpus(root.path());
+        index_repository_full_text_only(root.path(), &config(), &CancellationToken::new())
+            .await
+            .unwrap();
+        std::fs::write(root.path().join("file_0.rs"), "pub fn revised_item() {}\n").unwrap();
+        let provider = MockProvider::failing(crate::embedding::EmbeddingError::ApiError {
+            status: 500,
+            message: "full-text-only update must not embed".to_string(),
+        });
+        crate::indexing::update_repository(root.path(), &provider, &config(), "unused")
+            .await
+            .unwrap();
+
+        let idx_dir = index_dir(root.path());
+        assert!(!idx_dir.join(VECTOR_DB).exists());
+        let (hits, _) = SearchContext::bm25_only()
+            .search(
+                &idx_dir,
+                "revised_item",
+                None,
+                &config(),
+                &SearchFilters::default(),
+                5,
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
     }
 
     /// Read actual stored bytes, not search distances, to compare builds exactly.

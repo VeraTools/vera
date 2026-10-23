@@ -22,7 +22,12 @@ pub fn run(
     };
     warn_if_index_stale(&repo_root, &config.indexing);
 
-    let overview = stats::collect_overview_filtered(&repo_root, exact_paths.as_ref())?;
+    let index_dir = crate::helpers::index_dir_for_repo(&repo_root);
+    let overview = stats::collect_overview_filtered_from_index_dir(
+        &index_dir,
+        &repo_root,
+        exact_paths.as_ref(),
+    )?;
 
     if json_output {
         let json = serde_json::to_string_pretty(&overview)

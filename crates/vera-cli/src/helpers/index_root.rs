@@ -2,18 +2,37 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub use vera_core::indexing::missing_index_message;
 
+static INDEX_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_index_dir_override(path: PathBuf) {
+    let _ = INDEX_DIR_OVERRIDE.set(path);
+}
+
+pub fn has_index_dir_override() -> bool {
+    INDEX_DIR_OVERRIDE.get().is_some()
+}
+
+pub fn index_dir_for_repo(repo_root: &Path) -> PathBuf {
+    INDEX_DIR_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| vera_core::indexing::index_dir(repo_root))
+}
+
 pub fn warn_if_index_stale(repo_path: &Path, indexing_config: &vera_core::config::IndexingConfig) {
-    match vera_core::indexing::detect_staleness(repo_path, indexing_config) {
+    let index_dir = index_dir_for_repo(repo_path);
+    match vera_core::indexing::freshness::detect_staleness_at_index_dir(
+        repo_path,
+        &index_dir,
+        indexing_config,
+    ) {
         Ok(freshness) => {
             if let Some(warning) = freshness.stale_warning() {
-                print_stale_warning(
-                    &vera_core::indexing::index_dir(repo_path),
-                    &freshness.summary(),
-                    &warning,
-                );
+                print_stale_warning(&index_dir, &freshness.summary(), &warning);
             }
         }
         Err(err) => {
@@ -94,6 +113,11 @@ fn print_stale_warning(index_dir: &Path, summary: &str, warning: &str) {
 /// partially created directories must not match, or read commands would
 /// fabricate an empty metadata store inside them.
 pub fn find_index_root(start: &Path) -> Option<PathBuf> {
+    if let Some(index_dir) = INDEX_DIR_OVERRIDE.get() {
+        return resolve_explicit_index_dir(index_dir)
+            .ok()
+            .map(|(repo_root, _)| repo_root);
+    }
     let mut dir = Some(start);
     while let Some(candidate) = dir {
         if vera_core::indexing::index_dir(candidate)
@@ -110,6 +134,9 @@ pub fn find_index_root(start: &Path) -> Option<PathBuf> {
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
 /// `note: using index at <root>` line once when the root is an ancestor.
 pub fn resolve_index_root(cwd: &Path) -> anyhow::Result<PathBuf> {
+    if let Some(index_dir) = INDEX_DIR_OVERRIDE.get() {
+        return resolve_explicit_index_dir(index_dir).map(|(repo_root, _)| repo_root);
+    }
     let root = find_index_root(cwd).ok_or_else(|| anyhow::anyhow!(missing_index_message(cwd)))?;
     if root != cwd {
         eprintln!("note: using index at {}", root.display());
@@ -123,7 +150,7 @@ pub fn prepare_indexed_repo(
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
     let repo_root = resolve_index_root(&cwd)?;
-    let index_dir = vera_core::indexing::index_dir(&repo_root);
+    let index_dir = index_dir_for_repo(&repo_root);
     // Index format version must match: legacy suffixed rows would be silently wrong.
     {
         let metadata_path = index_dir.join("metadata.db");
@@ -142,6 +169,33 @@ pub fn prepare_indexed_repo(
         }
     }
     warn_if_index_stale(&repo_root, indexing_config);
+    Ok((repo_root, index_dir))
+}
+
+fn resolve_explicit_index_dir(index_dir: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let index_dir = index_dir
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("failed to resolve index directory: {error}"))?;
+    let metadata =
+        vera_core::storage::metadata::MetadataStore::open_existing(&index_dir.join("metadata.db"))
+            .map_err(|error| {
+                anyhow::anyhow!("failed to open index at {}: {error}", index_dir.display())
+            })?;
+    let root = metadata.get_index_meta(vera_core::indexing::pipeline::INDEX_REPOSITORY_ROOT_KEY)?;
+    let repo_root = match root {
+        Some(root) => PathBuf::from(root),
+        None if index_dir.file_name().is_some_and(|name| name == ".vera") => index_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow::anyhow!("index directory has no repository parent"))?,
+        None => anyhow::bail!(
+            "index at {} does not record its repository root",
+            index_dir.display()
+        ),
+    };
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("failed to resolve indexed repository root: {error}"))?;
     Ok((repo_root, index_dir))
 }
 

@@ -1,6 +1,7 @@
 //! `vera doctor` — inspect the current Vera setup for common failures.
 
 use serde::Serialize;
+use std::path::Path;
 
 use crate::state;
 use crate::update_check::{self, VersionCheckSource};
@@ -28,7 +29,11 @@ struct DoctorReport {
     checks: Vec<DoctorCheck>,
 }
 
-pub fn run(json_output: bool, probe: bool) -> anyhow::Result<()> {
+pub fn run(
+    json_output: bool,
+    probe: bool,
+    explicit_index_dir: Option<&Path>,
+) -> anyhow::Result<()> {
     let mut checks = Vec::new();
     let version = update_check::current_version().to_string();
 
@@ -181,7 +186,8 @@ pub fn run(json_output: bool, probe: bool) -> anyhow::Result<()> {
     }
 
     let cwd = std::env::current_dir()?;
-    let index_dir = vera_core::indexing::index_dir(&cwd);
+    let index_dir =
+        explicit_index_dir.map_or_else(|| vera_core::indexing::index_dir(&cwd), Path::to_path_buf);
     checks.push(DoctorCheck {
         name: "current-index",
         status: if index_dir.exists() {

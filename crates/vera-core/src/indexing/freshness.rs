@@ -172,7 +172,18 @@ pub fn detect_staleness(
     let repo_root = repo_path
         .canonicalize()
         .with_context(|| format!("failed to resolve repo path: {}", repo_path.display()))?;
-    let metadata_path = index_dir(&repo_root).join("metadata.db");
+    detect_staleness_at_index_dir(&repo_root, &index_dir(&repo_root), fallback_config)
+}
+
+pub fn detect_staleness_at_index_dir(
+    repo_path: &Path,
+    index_dir: &Path,
+    fallback_config: &IndexingConfig,
+) -> Result<IndexFreshness> {
+    let repo_root = repo_path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve repo path: {}", repo_path.display()))?;
+    let metadata_path = index_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
 

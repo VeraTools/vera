@@ -21,6 +21,7 @@ pub struct CommandOptions {
     pub no_default_excludes: bool,
     pub no_progress: bool,
     pub max_files: Option<usize>,
+    pub index_dir: Option<std::path::PathBuf>,
 }
 
 /// Run the `vera update <path>` command.
@@ -32,6 +33,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         no_default_excludes,
         no_progress,
         max_files,
+        index_dir,
     } = options;
     let repo_path = Path::new(path);
 
@@ -54,7 +56,11 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     // parents instead of the raw CLI path's lexical parents ("." would
     // never walk past the empty path).
     let start = repo_path.canonicalize()?;
-    let repo_path = crate::helpers::resolve_index_root(&start)?;
+    let repo_path = if index_dir.is_some() {
+        start
+    } else {
+        crate::helpers::resolve_index_root(&start)?
+    };
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
@@ -70,7 +76,10 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     ))?;
 
     // Check metadata mismatch without creating a missing database.
-    let metadata_path = repo_path.join(".vera").join("metadata.db");
+    let metadata_path = index_dir
+        .as_deref()
+        .map_or_else(|| repo_path.join(".vera"), std::path::Path::to_path_buf)
+        .join("metadata.db");
     if let Ok(metadata_store) =
         vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)
         && let (Some(s_model), Some(s_dim)) = (
@@ -109,7 +118,10 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     let show_progress = !json_output && !no_progress && std::io::stderr().is_terminal();
     let provider = Arc::new(provider);
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
-    let options = UpdateOptions { max_files };
+    let options = UpdateOptions {
+        max_files,
+        index_dir,
+    };
     let cancellation = vera_core::CancellationToken::new();
     let operation_cancellation = cancellation.clone();
     let summary = if show_progress {

@@ -44,7 +44,8 @@ pub fn run(
 
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
-    if crate::helpers::find_index_root(&cwd).is_none()
+    if !crate::helpers::has_index_dir_override()
+        && crate::helpers::find_index_root(&cwd).is_none()
         && should_offer_auto_index(json_output, crate::helpers::prompts_available())
         && cliclack::confirm("No index found. Index the current directory now?")
             .initial_value(true)
@@ -55,6 +56,7 @@ pub fn run(
             false,
             backend,
             Vec::new(),
+            false,
             false,
             false,
             false,

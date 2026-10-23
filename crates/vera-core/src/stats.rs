@@ -103,8 +103,10 @@ pub struct LanguageStat {
 /// # Errors
 /// Returns an error if the index doesn't exist or can't be read.
 pub fn collect_stats(repo_path: &Path) -> Result<IndexStats> {
-    let idx_dir = index_dir(repo_path);
+    collect_stats_from_index_dir(&index_dir(repo_path), repo_path)
+}
 
+pub fn collect_stats_from_index_dir(idx_dir: &Path, repo_path: &Path) -> Result<IndexStats> {
     if !idx_dir.exists() {
         anyhow::bail!(crate::indexing::missing_index_message(repo_path));
     }
@@ -171,8 +173,14 @@ pub fn collect_overview_filtered(
     repo_path: &Path,
     exact_paths: Option<&HashSet<String>>,
 ) -> Result<ProjectOverview> {
-    let idx_dir = index_dir(repo_path);
+    collect_overview_filtered_from_index_dir(&index_dir(repo_path), repo_path, exact_paths)
+}
 
+pub fn collect_overview_filtered_from_index_dir(
+    idx_dir: &Path,
+    repo_path: &Path,
+    exact_paths: Option<&HashSet<String>>,
+) -> Result<ProjectOverview> {
     if !idx_dir.exists() {
         anyhow::bail!(crate::indexing::missing_index_message(repo_path));
     }
@@ -500,9 +508,25 @@ pub fn find_callees(repo_path: &Path, symbol: &str) -> Result<Vec<CalleeRef>> {
     open_metadata(repo_path)?.find_callees(symbol)
 }
 
+pub fn find_callees_from_index_dir(index_dir: &Path, symbol: &str) -> Result<Vec<CalleeRef>> {
+    open_metadata_at_index_dir(index_dir)?.find_callees(symbol)
+}
+
 /// Find defined symbols with zero callers (potential dead code).
 pub fn find_dead_symbols(repo_path: &Path) -> Result<Vec<DeadSymbol>> {
     open_metadata(repo_path)?.find_dead_symbols()
+}
+
+pub fn find_dead_symbols_from_index_dir(index_dir: &Path) -> Result<Vec<DeadSymbol>> {
+    open_metadata_at_index_dir(index_dir)?.find_dead_symbols()
+}
+
+fn open_metadata_at_index_dir(index_dir: &Path) -> Result<MetadataStore> {
+    if !index_dir.exists() {
+        anyhow::bail!("index directory does not exist: {}", index_dir.display());
+    }
+    MetadataStore::open_existing(&index_dir.join("metadata.db"))
+        .context("failed to open metadata store")
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

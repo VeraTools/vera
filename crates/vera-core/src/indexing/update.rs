@@ -80,10 +80,11 @@ pub struct UpdateSummary {
 }
 
 /// Optional controls for a single incremental update run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpdateOptions {
     /// Maximum added or modified files to process. Deletions are always applied.
     pub max_files: Option<usize>,
+    pub index_dir: Option<std::path::PathBuf>,
 }
 
 /// Progress events emitted during an incremental update.
@@ -329,7 +330,7 @@ where
         .canonicalize()
         .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
 
-    let idx_dir = pipeline::index_dir(&repo_root);
+    let idx_dir = pipeline::resolve_output_index_dir(&repo_root, options.index_dir.as_deref())?;
     if !idx_dir.exists() {
         bail!(super::missing_index_message(&repo_root));
     }
@@ -368,15 +369,21 @@ where
         );
     }
 
+    let full_text_only = metadata_store
+        .get_index_meta(pipeline::INDEX_MODE_KEY)?
+        .as_deref()
+        == Some(pipeline::INDEX_MODE_FULL_TEXT_ONLY);
     let mut stored_dim = config.embedding.max_stored_dim;
 
     // Check for provider mismatch.
-    if let (Some(s_model), Some(s_dim)) = (
-        metadata_store.get_index_meta("model_name").unwrap_or(None),
-        metadata_store
-            .get_index_meta("embedding_dim")
-            .unwrap_or(None),
-    ) {
+    if !full_text_only
+        && let (Some(s_model), Some(s_dim)) = (
+            metadata_store.get_index_meta("model_name").unwrap_or(None),
+            metadata_store
+                .get_index_meta("embedding_dim")
+                .unwrap_or(None),
+        )
+    {
         if !crate::config::model_names_match_with_aliases(
             &s_model,
             model_name,
@@ -416,15 +423,20 @@ where
             }
             stored_dim = dim;
         }
-    } else if let Some(s_dim) = metadata_store
-        .get_index_meta("embedding_dim")
-        .unwrap_or(None)
+    } else if !full_text_only
+        && let Some(s_dim) = metadata_store
+            .get_index_meta("embedding_dim")
+            .unwrap_or(None)
         && let Ok(dim) = s_dim.parse::<usize>()
     {
         stored_dim = dim;
     }
 
-    let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
+    let checkpoint = if full_text_only {
+        None
+    } else {
+        EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name)
+    };
 
     let stored_files: HashSet<String> = metadata_store
         .tracked_files()
@@ -655,7 +667,7 @@ where
         on_progress(UpdateProgress::EmbeddingDone { count: 0 });
     }
 
-    let mut embeddings = if all_chunks.is_empty() {
+    let mut embeddings = if all_chunks.is_empty() || full_text_only {
         if !files_to_index.is_empty() {
             on_progress(UpdateProgress::EmbeddingDone { count: 0 });
         }
@@ -720,9 +732,15 @@ where
         processed_file_counts(prepared_files.iter().map(|file| file.modified));
 
     if !deleted.is_empty() || !prepared_files.is_empty() {
-        let vector_path = idx_dir.join("vectors.db");
-        let vector_store = VectorStore::open(&vector_path, final_stored_dim)
-            .context("failed to open vector store for update")?;
+        let vector_store = if full_text_only {
+            None
+        } else {
+            let vector_path = idx_dir.join("vectors.db");
+            Some(
+                VectorStore::open(&vector_path, final_stored_dim)
+                    .context("failed to open vector store for update")?,
+            )
+        };
         let bm25_dir = idx_dir.join("bm25");
         let bm25_index =
             Bm25Index::open(&bm25_dir).context("failed to open BM25 index for update")?;
@@ -773,7 +791,7 @@ where
             .context("failed to delete BM25 entries for changed files")?;
 
         for file_path in &deleted {
-            remove_file_from_index(&metadata_store, &vector_store, file_path)?;
+            remove_file_from_index(&metadata_store, vector_store.as_ref(), file_path)?;
         }
 
         // A previous attempt may have failed after writing one store but before
@@ -782,7 +800,7 @@ where
         for (file, cleanup_chunks) in prepared_files.iter().zip(cleanup_chunk_data) {
             remove_file_parse_data(&metadata_store, &file.path)?;
             if cleanup_chunks {
-                remove_file_chunk_data(&metadata_store, &vector_store, &file.path)?;
+                remove_file_chunk_data(&metadata_store, vector_store.as_ref(), &file.path)?;
             }
             metadata_store
                 .delete_file_state(&file.path)
@@ -815,9 +833,11 @@ where
                 .iter()
                 .map(|(id, vector)| (id.as_str(), vector.as_slice()))
                 .collect();
-            vector_store
-                .insert_batch(&batch)
-                .context("failed to insert updated vectors")?;
+            if let Some(vector_store) = &vector_store {
+                vector_store
+                    .insert_batch(&batch)
+                    .context("failed to insert updated vectors")?;
+            }
             bm25_index
                 .insert_chunks(&all_chunks)
                 .context("failed to insert updated BM25 documents")?;
@@ -841,6 +861,12 @@ where
     let total_chunks = metadata_store
         .chunk_count()
         .context("failed to count chunks")?;
+    metadata_store
+        .set_index_meta(
+            pipeline::INDEX_REPOSITORY_ROOT_KEY,
+            &repo_root.to_string_lossy(),
+        )
+        .context("failed to update repository root metadata")?;
     super::freshness::record_index_snapshot(&metadata_store, &config.indexing)
         .context("failed to update index freshness metadata")?;
     let embeddings_reused = checkpoint
@@ -1021,14 +1047,16 @@ fn remove_file_parse_data(metadata_store: &MetadataStore, file_path: &str) -> Re
 /// The caller must delete the file's BM25 documents before calling this helper.
 fn remove_file_chunk_data(
     metadata_store: &MetadataStore,
-    vector_store: &VectorStore,
+    vector_store: Option<&VectorStore>,
     file_path: &str,
 ) -> Result<()> {
     // Delete from vector store using file prefix pattern.
-    let prefix = format!("{file_path}:");
-    vector_store
-        .delete_by_file_prefix(&prefix)
-        .with_context(|| format!("failed to delete vectors for {file_path}"))?;
+    if let Some(vector_store) = vector_store {
+        let prefix = format!("{file_path}:");
+        vector_store
+            .delete_by_file_prefix(&prefix)
+            .with_context(|| format!("failed to delete vectors for {file_path}"))?;
+    }
 
     // Delete chunk metadata.
     metadata_store
@@ -1043,7 +1071,7 @@ fn remove_file_chunk_data(
 /// Remove all data for a file from the index stores.
 fn remove_file_from_index(
     metadata_store: &MetadataStore,
-    vector_store: &VectorStore,
+    vector_store: Option<&VectorStore>,
     file_path: &str,
 ) -> Result<()> {
     remove_file_parse_data(metadata_store, file_path)?;
@@ -1191,7 +1219,10 @@ mod checkpoint_tests {
             &CheckpointProvider::new(None),
             &config(),
             "model",
-            &UpdateOptions { max_files: Some(1) },
+            &UpdateOptions {
+                max_files: Some(1),
+                ..Default::default()
+            },
             |_| {},
         )
         .await
@@ -1532,7 +1563,10 @@ mod regression_tests {
             &provider,
             &config,
             "mock-model",
-            &UpdateOptions { max_files: Some(1) },
+            &UpdateOptions {
+                max_files: Some(1),
+                ..Default::default()
+            },
             |_| {},
         )
         .await

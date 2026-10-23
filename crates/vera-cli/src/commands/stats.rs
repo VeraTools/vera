@@ -6,7 +6,8 @@ pub fn run(json_output: bool) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
     let repo_root = crate::helpers::resolve_index_root(&cwd)?;
 
-    let stats = vera_core::stats::collect_stats(&repo_root)?;
+    let index_dir = crate::helpers::index_dir_for_repo(&repo_root);
+    let stats = vera_core::stats::collect_stats_from_index_dir(&index_dir, &repo_root)?;
 
     if json_output {
         let json = serde_json::to_string_pretty(&stats)

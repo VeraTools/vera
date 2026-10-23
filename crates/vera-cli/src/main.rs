@@ -61,6 +61,13 @@ fn main() {
             err.exit();
         }
     };
+    if cli.index_dir.is_some() && matches!(&cli.command, Commands::Index { save: Some(_), .. }) {
+        eprintln!("Error: --index-dir and `index --save` cannot be used together.");
+        process::exit(2);
+    }
+    if let Some(index_dir) = cli.index_dir.clone() {
+        crate::helpers::set_index_dir_override(index_dir);
+    }
     if let Err(err) = state::apply_saved_env() {
         // Diagnose/repair commands must still run against a broken saved
         // config; everything else keeps failing fast with the parse error.
@@ -173,7 +180,7 @@ fn main() {
         }
         Commands::Doctor { probe } => {
             tracing::info!("doctor command");
-            commands::doctor::run(cli.json, probe)
+            commands::doctor::run(cli.json, probe, cli.index_dir.as_deref())
         }
         Commands::Repair { backend, api } => {
             tracing::info!("repair command");
@@ -192,6 +199,9 @@ fn main() {
             no_progress,
             verbose,
             low_vram,
+            full_text_only,
+            save,
+            yes,
         } => {
             tracing::info!(path = %path, "indexing");
             commands::index::run(
@@ -204,6 +214,9 @@ fn main() {
                 no_progress,
                 verbose,
                 low_vram,
+                full_text_only,
+                save,
+                yes,
             )
         }
         Commands::Estimate {
@@ -301,6 +314,7 @@ fn main() {
                     no_default_excludes,
                     no_progress,
                     max_files: max_files.map(std::num::NonZeroUsize::get),
+                    index_dir: cli.index_dir.clone(),
                 },
             )
         }
@@ -376,7 +390,7 @@ fn main() {
         }
         Commands::Watch { path } => {
             tracing::info!(path = %path, "watching");
-            commands::watch::run(&path, cli.json)
+            commands::watch::run(&path, cli.json, cli.index_dir.as_deref())
         }
     };
 

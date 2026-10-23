@@ -58,6 +58,10 @@ pub struct Cli {
     /// Search prints per-stage timings; grep prints total elapsed time.
     #[arg(long, global = true)]
     pub timing: bool,
+
+    /// Use this explicit index directory for index-reading and maintenance commands.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub index_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -314,12 +318,16 @@ pub enum Commands {
                       Discovers source files (respecting .gitignore), parses them with \
                       tree-sitter for 61 languages, creates searchable chunks at symbol \
                       boundaries, generates embeddings using the current Vera mode, and \
-                      stores everything in a local `.vera/` index directory.\n\n\
+                      stores everything in a local `.vera/` index directory. \
+                      Replacing an existing index requires an interactive confirmation or \
+                      `--yes`. Use `--full-text-only` to build a BM25 index without embeddings.\n\n\
                       Use `vera setup` for Vera's built-in local models, or `vera setup \
                       --api` for an OpenAI-compatible endpoint.\n\n\
                       Examples:\n  \
                       vera index .                  # Index current directory\n  \
                       vera index /path/to/repo      # Index a specific repo\n  \
+                      vera index . --full-text-only # Build BM25 without embeddings\n  \
+                      vera index . --yes            # Confirm replacing an existing index\n  \
                       vera index . --json           # Output summary as JSON")]
     Index {
         /// Path to the directory to index.
@@ -344,6 +352,15 @@ pub enum Commands {
         /// Reduce GPU memory usage (batch_size=1, conservative VRAM limit).
         #[arg(long)]
         low_vram: bool,
+        /// Build only the BM25 full-text index; do not initialize an embedding backend.
+        #[arg(long)]
+        full_text_only: bool,
+        /// Save the index in this directory instead of <repository>/.vera.
+        #[arg(long, value_name = "DIR")]
+        save: Option<std::path::PathBuf>,
+        /// Confirm replacement of an existing index without prompting.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Estimate indexing work and optionally benchmark embedding and full-text indexing.

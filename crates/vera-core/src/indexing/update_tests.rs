@@ -543,7 +543,10 @@ async fn update_max_files_defers_and_resumes_in_path_order() {
         fs::write(dir.path().join(name), format!("fn {}() {{}}\n", &name[..4])).unwrap();
     }
 
-    let options = UpdateOptions { max_files: Some(2) };
+    let options = UpdateOptions {
+        max_files: Some(2),
+        ..Default::default()
+    };
     let first = update_repository_with_options_and_progress(
         dir.path(),
         &provider,
@@ -592,7 +595,10 @@ async fn update_max_files_prioritizes_modifications_and_always_deletes() {
     fs::remove_file(dir.path().join("deleted.rs")).unwrap();
     fs::write(dir.path().join("added.rs"), "fn added() {}\n").unwrap();
 
-    let options = UpdateOptions { max_files: Some(1) };
+    let options = UpdateOptions {
+        max_files: Some(1),
+        ..Default::default()
+    };
     let summary = update_repository_with_options_and_progress(
         dir.path(),
         &provider,

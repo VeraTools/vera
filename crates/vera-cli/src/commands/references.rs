@@ -40,7 +40,7 @@ pub fn run(
     rewrite_absolute_path_filters(&cwd, &mut filters.path_glob);
 
     if callees {
-        let mut results = vera_core::stats::find_callees(&cwd, symbol)?;
+        let mut results = vera_core::stats::find_callees_from_index_dir(&index_dir, symbol)?;
         results.retain(|result| {
             filters.matches_file(&result.file_path, vera_core::types::Language::Unknown)
         });
@@ -113,8 +113,8 @@ fn print_receiver_hint(index_dir: &std::path::Path, symbol: &str) -> Result<()> 
 /// Run the `vera dead-code` command.
 pub fn run_dead_code(json: bool) -> Result<()> {
     let config = state::load_runtime_config()?;
-    let (cwd, _) = prepare_indexed_repo(&config.indexing)?;
-    let results = vera_core::stats::find_dead_symbols(&cwd)?;
+    let (_, index_dir) = prepare_indexed_repo(&config.indexing)?;
+    let results = vera_core::stats::find_dead_symbols_from_index_dir(&index_dir)?;
 
     if json {
         println!("{}", serde_json::to_string(&results)?);

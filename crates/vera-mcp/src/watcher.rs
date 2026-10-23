@@ -108,10 +108,14 @@ struct EmbeddingUpdateEngine {
     runtime: tokio::runtime::Runtime,
     provider: vera_core::embedding::DynamicProvider,
     model_name: String,
+    index_dir: Option<std::path::PathBuf>,
 }
 
 impl EmbeddingUpdateEngine {
-    fn build(runtime_config: &WatchRuntime) -> Result<Self, anyhow::Error> {
+    fn build(
+        runtime_config: &WatchRuntime,
+        index_dir: Option<std::path::PathBuf>,
+    ) -> Result<Self, anyhow::Error> {
         let runtime = tokio::runtime::Runtime::new()?;
         let (provider, model_name) =
             runtime.block_on(vera_core::embedding::create_dynamic_provider(
@@ -122,6 +126,7 @@ impl EmbeddingUpdateEngine {
             runtime,
             provider,
             model_name,
+            index_dir,
         })
     }
 }
@@ -132,13 +137,19 @@ impl IncrementalUpdate for EmbeddingUpdateEngine {
         repo_path: &Path,
         config: &VeraConfig,
     ) -> Result<UpdateSummary, anyhow::Error> {
-        self.runtime
-            .block_on(vera_core::indexing::update_repository(
+        self.runtime.block_on(
+            vera_core::indexing::update_repository_with_options_and_progress(
                 repo_path,
                 &self.provider,
                 config,
                 &self.model_name,
-            ))
+                &vera_core::indexing::UpdateOptions {
+                    index_dir: self.index_dir.clone(),
+                    ..Default::default()
+                },
+                |_| {},
+            ),
+        )
     }
 }
 
@@ -153,23 +164,41 @@ pub struct WatchHandle {
 /// index update in a background thread. Returns a handle that keeps the
 /// watcher alive; drop it to stop watching.
 pub fn start_watching(repo_path: &Path) -> Result<WatchHandle, String> {
-    start_watching_internal(repo_path, false)
+    start_watching_internal(repo_path, false, None)
 }
 
 /// Start watching with progress logs printed to stderr.
 ///
 /// Intended for `vera watch` CLI mode where users expect visible activity.
 pub fn start_watching_with_progress(repo_path: &Path) -> Result<WatchHandle, String> {
-    start_watching_internal(repo_path, true)
+    start_watching_internal(repo_path, true, None)
 }
 
-fn start_watching_internal(repo_path: &Path, progress_logs: bool) -> Result<WatchHandle, String> {
+pub fn start_watching_at_index_dir(
+    repo_path: &Path,
+    index_dir: &Path,
+    progress_logs: bool,
+) -> Result<WatchHandle, String> {
+    start_watching_internal(repo_path, progress_logs, Some(index_dir))
+}
+
+fn start_watching_internal(
+    repo_path: &Path,
+    progress_logs: bool,
+    explicit_index_dir: Option<&Path>,
+) -> Result<WatchHandle, String> {
     let runtime = resolve_watch_runtime()
         .map_err(|error| format!("Failed to resolve watcher runtime configuration: {error}"))?;
     let indexing = runtime.config.indexing.clone();
     let resolve: RuntimeResolver = Arc::new(resolve_watch_runtime);
-    let build: EngineBuilder =
-        Arc::new(|runtime| Ok(Arc::new(EmbeddingUpdateEngine::build(runtime)?) as Engine));
+    let explicit_index_dir = explicit_index_dir.map(Path::to_path_buf);
+    let build_index_dir = explicit_index_dir.clone();
+    let build: EngineBuilder = Arc::new(move |runtime| {
+        Ok(Arc::new(EmbeddingUpdateEngine::build(
+            runtime,
+            build_index_dir.clone(),
+        )?) as Engine)
+    });
 
     start_watching_with_runtime(
         repo_path,
@@ -178,6 +207,7 @@ fn start_watching_internal(repo_path: &Path, progress_logs: bool) -> Result<Watc
         &indexing,
         resolve,
         build,
+        explicit_index_dir.as_deref(),
     )
 }
 
@@ -198,7 +228,15 @@ fn start_watching_with(
         provider_identity: "test".to_string(),
     };
     let resolve: RuntimeResolver = Arc::new(move || Ok(runtime.clone()));
-    start_watching_with_runtime(repo_path, progress_logs, debounce, indexing, resolve, build)
+    start_watching_with_runtime(
+        repo_path,
+        progress_logs,
+        debounce,
+        indexing,
+        resolve,
+        build,
+        None,
+    )
 }
 
 fn start_watching_with_runtime(
@@ -208,12 +246,23 @@ fn start_watching_with_runtime(
     indexing: &IndexingConfig,
     resolve: RuntimeResolver,
     build: EngineBuilder,
+    explicit_index_dir: Option<&Path>,
 ) -> Result<WatchHandle, String> {
     let repo_path = repo_path
         .canonicalize()
         .map_err(|e| format!("Failed to resolve path: {e}"))?;
 
-    let idx_dir = vera_core::indexing::index_dir(&repo_path);
+    let idx_dir = explicit_index_dir.map_or_else(
+        || vera_core::indexing::index_dir(&repo_path),
+        Path::to_path_buf,
+    );
+    let idx_dir = if idx_dir.exists() {
+        idx_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve index directory: {e}"))?
+    } else {
+        idx_dir
+    };
     if !idx_dir.exists() {
         // This error surfaces to both audiences: `vera watch` (CLI) and the
         // MCP `start_watch` tool, so it cannot assume MCP wording.

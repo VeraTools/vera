@@ -253,6 +253,7 @@ fn run_inner(
         "Vera setup complete.",
         api_setup,
         true,
+        yes,
     )
 }
 
@@ -278,6 +279,7 @@ fn run_wizard() -> anyhow::Result<()> {
         "Backend configured.",
         api_setup,
         true,
+        false,
     )?;
 
     // Step 2: Agent skill installation
@@ -307,6 +309,7 @@ fn run_wizard() -> anyhow::Result<()> {
             false,
             false,
             false,
+            false,
         )?;
     }
 
@@ -332,6 +335,7 @@ pub(crate) fn repair_backend(
         success_header,
         None,
         false,
+        false,
     )
 }
 
@@ -343,6 +347,7 @@ fn configure_backend_with_api_setup(
     success_header: &str,
     api_setup: Option<ApiConfiguration>,
     persist_state: bool,
+    yes: bool,
 ) -> anyhow::Result<()> {
     let use_local = effective_backend.is_local();
     let mut models_prefetched = 0usize;
@@ -439,6 +444,7 @@ fn configure_backend_with_api_setup(
             false,
             false,
             false,
+            yes,
         )?;
     }
 
@@ -1252,6 +1258,7 @@ mod tests {
                     reranker_update: Some(default_reranker_update(preset_id, has_reranker)),
                 }),
                 true,
+                false,
             )
             .unwrap();
             let stored = state::load_saved_config().unwrap();
@@ -1334,6 +1341,7 @@ mod tests {
                     reranker_update: None,
                 }),
                 true,
+                false,
             )
             .unwrap();
             let retrieval = state::load_runtime_config().unwrap().retrieval;

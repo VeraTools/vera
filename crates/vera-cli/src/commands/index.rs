@@ -30,17 +30,35 @@ pub fn run(
     no_progress: bool,
     verbose: bool,
     low_vram: bool,
+    full_text_only: bool,
+    save: Option<std::path::PathBuf>,
+    yes: bool,
 ) -> anyhow::Result<()> {
-    let summary = execute(
-        path,
-        json_output,
-        backend,
-        exclude,
-        no_ignore,
-        no_default_excludes,
-        no_progress,
-        low_vram,
-    )?;
+    let summary = if full_text_only {
+        execute_full_text_only(
+            path,
+            exclude,
+            no_ignore,
+            no_default_excludes,
+            no_progress,
+            json_output,
+            save.as_deref(),
+            yes,
+        )?
+    } else {
+        execute_with_confirmation(
+            path,
+            json_output,
+            backend,
+            exclude,
+            no_ignore,
+            no_default_excludes,
+            no_progress,
+            low_vram,
+            save.as_deref(),
+            yes,
+        )?
+    };
 
     if json_output {
         let json = serde_json::to_string_pretty(&summary)
@@ -48,6 +66,69 @@ pub fn run(
         println!("{json}");
     } else {
         print_human_summary(&summary, verbose);
+    }
+
+    fn execute_full_text_only(
+        path: &str,
+        exclude: Vec<String>,
+        no_ignore: bool,
+        no_default_excludes: bool,
+        no_progress: bool,
+        json_output: bool,
+        save: Option<&Path>,
+        yes: bool,
+    ) -> anyhow::Result<vera_core::indexing::IndexSummary> {
+        let repo_path = Path::new(path);
+        if !repo_path.exists() {
+            bail!("path does not exist: {path}\nHint: check the path and try again.");
+        }
+        if !repo_path.is_dir() {
+            bail!(
+                "path is not a directory: {path}\nHint: vera index expects a directory path, not a file."
+            );
+        }
+        let replacement_confirmed =
+            ensure_replacement_confirmed(repo_path, save, json_output, yes)?;
+
+        let mut config = state::load_runtime_config()?;
+        config.indexing.extra_excludes.extend(exclude);
+        config.indexing.no_ignore |= no_ignore;
+        config.indexing.no_default_excludes |= no_default_excludes;
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|error| anyhow::anyhow!("failed to create async runtime: {error}"))?;
+
+        let show_progress = !no_progress && std::io::stderr().is_terminal();
+        let multi = show_progress.then(|| cliclack::multi_progress("Indexing full text..."));
+        let spinner = multi.as_ref().map(|multi| multi.add(cliclack::spinner()));
+        if let Some(spinner) = &spinner {
+            spinner.start("Discovering, parsing, and indexing full text...");
+        }
+        let result = rt.block_on(
+            vera_core::indexing::pipeline::index_repository_full_text_only_with_options(
+                repo_path,
+                &config,
+                &vera_core::CancellationToken::new(),
+                replacement_confirmed,
+                save,
+            ),
+        );
+        match result {
+            Ok(summary) => {
+                if let Some(spinner) = &spinner {
+                    spinner.stop(format!(
+                        "Indexed {} files into {} full-text chunks",
+                        summary.files_parsed, summary.chunks_created
+                    ));
+                }
+                Ok(summary)
+            }
+            Err(error) => {
+                if let Some(spinner) = &spinner {
+                    spinner.error(format!("Full-text indexing failed: {error}"));
+                }
+                Err(error).context("full-text indexing failed")
+            }
+        }
     }
 
     Ok(())
@@ -67,6 +148,33 @@ pub fn execute(
     no_default_excludes: bool,
     no_progress: bool,
     low_vram: bool,
+    yes: bool,
+) -> anyhow::Result<vera_core::indexing::IndexSummary> {
+    execute_with_confirmation(
+        path,
+        json_output,
+        backend,
+        exclude,
+        no_ignore,
+        no_default_excludes,
+        no_progress,
+        low_vram,
+        None,
+        yes,
+    )
+}
+
+fn execute_with_confirmation(
+    path: &str,
+    json_output: bool,
+    backend: InferenceBackend,
+    exclude: Vec<String>,
+    no_ignore: bool,
+    no_default_excludes: bool,
+    no_progress: bool,
+    low_vram: bool,
+    save: Option<&Path>,
+    yes: bool,
 ) -> anyhow::Result<vera_core::indexing::IndexSummary> {
     let repo_path = Path::new(path);
 
@@ -82,6 +190,7 @@ pub fn execute(
              Hint: vera index expects a directory path, not a file."
         );
     }
+    let replacement_confirmed = ensure_replacement_confirmed(repo_path, save, json_output, yes)?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
@@ -100,6 +209,7 @@ pub fn execute(
     ))?;
     let provider = Arc::new(provider);
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
+    let output_index_dir = save.map(Path::to_path_buf);
 
     // Show the progress display only for interactive, non-JSON runs. Mirrors
     // the same decision in `vera update` so both commands behave identically
@@ -109,12 +219,13 @@ pub fn execute(
         let cancellation = vera_core::CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task_repo_path = repo_path.to_path_buf();
+        let task_index_dir = output_index_dir.clone();
         let signal = wait_for_interrupt(rt.handle())?;
         let progress_reporter = reporter.clone();
         let tracker =
             std::sync::Mutex::new(vera_core::indexing::progress::HonestProgressTracker::new());
         let task = rt.handle().spawn(async move {
-            vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+            vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation_with_options(
                 &task_repo_path,
                 provider.as_ref(),
                 &config,
@@ -125,6 +236,8 @@ pub fn execute(
                     progress_reporter.observe(display, tracker.fixed_total());
                 },
                 &task_cancellation,
+                replacement_confirmed,
+                task_index_dir.as_deref(),
             )
             .await
         });
@@ -199,15 +312,18 @@ pub fn execute(
     let cancellation = vera_core::CancellationToken::new();
     let task_cancellation = cancellation.clone();
     let task_repo_path = repo_path.to_path_buf();
+    let task_index_dir = output_index_dir;
     let signal = wait_for_interrupt(rt.handle())?;
     let task = rt.handle().spawn(async move {
-        vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+        vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation_with_options(
             &task_repo_path,
             provider.as_ref(),
             &config,
             &model_name,
             on_progress,
             &task_cancellation,
+            replacement_confirmed,
+            task_index_dir.as_deref(),
         )
         .await
     });
@@ -220,4 +336,48 @@ pub fn execute(
     reporter.print_failure(&result);
 
     result.context("indexing failed")
+}
+
+fn ensure_replacement_confirmed(
+    repo_path: &Path,
+    save: Option<&Path>,
+    json_output: bool,
+    yes: bool,
+) -> anyhow::Result<bool> {
+    let canonical_repo = repo_path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
+    let index_dir = if let Some(path) = save {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        }
+    } else {
+        canonical_repo.join(".vera")
+    };
+    if !index_dir.exists() {
+        return Ok(yes);
+    }
+    if yes {
+        return Ok(true);
+    }
+
+    if json_output || !crate::helpers::prompts_available() {
+        bail!(
+            "an index already exists at {}; replacing it requires confirmation. Re-run with `--yes` to replace it without prompting.",
+            index_dir.display()
+        );
+    }
+
+    if !cliclack::confirm(format!(
+        "An index already exists at {}. Rebuild and replace it?",
+        index_dir.display()
+    ))
+    .initial_value(false)
+    .interact()?
+    {
+        bail!("index replacement cancelled; the existing index was not changed");
+    }
+    Ok(true)
 }
