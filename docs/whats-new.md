@@ -2,7 +2,7 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
-## Unreleased
+## v2.1.5
 
 - Agent guidance now allows normal search tools when no index exists and explains long first-index runs and reusing finished API-mode embeddings. Index-required commands share the same no-index guidance.
 - Indexing keeps its artifacts out of git through [local excludes](installation.md#index-and-search), including in linked worktrees and nested project directories.
