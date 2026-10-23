@@ -56,7 +56,7 @@ Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'
 
 ## Recovery
 
-If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted run resumes where it stopped. Otherwise, or without shell access, use your usual search tools.
+If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. Otherwise, or without shell access, use your usual search tools.
 
 | Symptom | Fix |
 |---------|-----|

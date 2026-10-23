@@ -93,7 +93,7 @@ vera index .
 vera search "authentication logic"
 ```
 
-Vera keeps its index files out of git through the repository's local exclude file (`.git/info/exclude`), so no `.gitignore` change is needed.
+Inside a git repository, Vera adds `.vera/` and its `.vera.*` siblings to the local exclude file when it can write it (the path printed by `git rev-parse --git-path info/exclude`, normally `.git/info/exclude`). This avoids a `.gitignore` change; if that file cannot be written, add those paths to `.gitignore` yourself.
 
 If you search in a project without an index, an interactive `vera search` offers to create one. Scripts and `--json` searches get an error instead, so they can handle it.
 

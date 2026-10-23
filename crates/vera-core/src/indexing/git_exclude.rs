@@ -10,7 +10,13 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Result, bail};
 
 const COMMENT: &str = "# Vera index files";
-const ARTIFACTS: [&str; 4] = [".vera/", ".vera.build/", ".vera.resume/", ".vera.lock"];
+const ARTIFACTS: [&str; 5] = [
+    ".vera/",
+    ".vera.build/",
+    ".vera.old/",
+    ".vera.resume/",
+    ".vera.lock",
+];
 
 pub(super) fn ensure(root: &Path) {
     let root = match root.canonicalize() {
@@ -32,12 +38,23 @@ pub(super) fn ensure(root: &Path) {
     handled.insert(root);
 }
 
+fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root);
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+    ] {
+        command.env_remove(variable);
+    }
+    command
+}
+
 fn git_path(root: &Path, args: &[&str]) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .arg("rev-parse")
-        .args(args)
-        .output()?;
+    let output = git_command(root).arg("rev-parse").args(args).output()?;
     if !output.status.success() {
         bail!("git rev-parse {args:?} failed");
     }
@@ -115,11 +132,7 @@ mod tests {
     use crate::indexing::lock::IndexLock;
 
     fn git(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
+        let output = git_command(root).args(args).output().unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -174,6 +187,41 @@ mod tests {
             "user-rule\n"
         );
         assert_ignored(root);
+    }
+
+    #[test]
+    fn inherited_git_environment_does_not_redirect_excludes() {
+        let foreign = tempfile::tempdir().unwrap();
+        git(foreign.path(), &["init", "-q"]);
+        let git_dir = foreign.path().join(".git");
+        let exclude = git_dir.join("info/exclude");
+        let original = std::fs::read_to_string(&exclude).unwrap();
+        crate::test_env::run_env_test(
+            "indexing::git_exclude::tests::inherited_git_environment_probe",
+            &[
+                ("GIT_DIR", Some(git_dir.to_str().unwrap())),
+                ("GIT_WORK_TREE", Some(foreign.path().to_str().unwrap())),
+                ("GIT_COMMON_DIR", Some(git_dir.to_str().unwrap())),
+                (
+                    "GIT_INDEX_FILE",
+                    Some(git_dir.join("index").to_str().unwrap()),
+                ),
+                (
+                    "GIT_OBJECT_DIRECTORY",
+                    Some(git_dir.join("objects").to_str().unwrap()),
+                ),
+            ],
+        );
+        assert_eq!(std::fs::read_to_string(exclude).unwrap(), original);
+    }
+
+    #[test]
+    #[ignore = "driven by inherited_git_environment_does_not_redirect_excludes"]
+    fn inherited_git_environment_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), &["init", "-q"]);
+        acquire(temp.path());
+        assert_ignored(temp.path());
     }
 
     #[tokio::test]

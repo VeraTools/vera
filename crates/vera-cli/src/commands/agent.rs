@@ -1156,7 +1156,7 @@ const VERA_SNIPPET_END_MARKER: &str = "<!-- vera:end -->";
 const AGENTS_MD_SNIPPET_HEADING: &str = "## Code Search";
 const LEGACY_AGENTS_MD_SNIPPET_INTRO: &str = "Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
 const AGENTS_MD_SNIPPET_INTRO: &str = "In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
-const AGENTS_MD_SNIPPET_NO_INDEX: &str = "If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted run resumes where it stopped. Otherwise, or if you cannot run shell commands, use your usual search tools.";
+const AGENTS_MD_SNIPPET_NO_INDEX: &str = "If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.";
 
 const AGENTS_MD_SNIPPET: &str = r#"## Code Search
 
@@ -1164,7 +1164,7 @@ const AGENTS_MD_SNIPPET: &str = r#"## Code Search
 
 In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. Fall back to grep or rg only after a Vera call has missed.
 
-If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted run resumes where it stopped. Otherwise, or if you cannot run shell commands, use your usual search tools.
+If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.
 
 Route by question type:
 

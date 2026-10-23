@@ -5,7 +5,17 @@ use vera_core::config::VeraConfig;
 use vera_core::embedding::{EmbeddingError, EmbeddingProvider};
 
 fn vera(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vera"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vera"));
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+    ] {
+        command.env_remove(variable);
+    }
+    command
         .current_dir(root)
         .env("VERA_HOME", root.join("vera-home"))
         .args(args)

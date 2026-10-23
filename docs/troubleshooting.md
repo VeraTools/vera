@@ -60,9 +60,9 @@ A `vera update` was interrupted. Vera refuses to read the partial index. Run `ve
 
 ### `.vera/` shows up in git
 
-Vera keeps its index files out of git through the repository's local exclude file (`.git/info/exclude`), so no `.gitignore` change is needed.
+See [index-file exclusions](installation.md#index-and-search).
 
-If the index was already tracked, remove it from git's tracking without deleting local files:
+If the index was already tracked, run this from the indexed directory to remove it from git's tracking without deleting local files:
 
 ```bash
 git rm -r --cached .vera
