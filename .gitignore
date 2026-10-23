@@ -35,3 +35,4 @@ skills-lock.json
 # benchmarks/agent-bench/results/ and benchmarks/results/ subdirectories)
 /benchmarks/results/*.json
 .output.txt
+.vera*
