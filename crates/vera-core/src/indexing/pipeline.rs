@@ -95,6 +95,19 @@ pub enum IndexProgress {
     StorageDone,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullTextIndexProgress {
+    DiscoveryStarted,
+    DiscoveryDone {
+        file_count: usize,
+    },
+    FilesIndexed {
+        files_done: usize,
+        file_count: usize,
+        chunks_created: usize,
+    },
+}
+
 // ── Index directory layout ───────────────────────────────────────────
 
 /// Default index directory name (placed inside the indexed repo).
@@ -247,6 +260,28 @@ pub async fn index_repository_full_text_only_with_options(
     replacement_confirmed: bool,
     output_index_dir: Option<&Path>,
 ) -> Result<IndexSummary> {
+    index_repository_full_text_only_with_progress(
+        repo_path,
+        config,
+        cancellation,
+        replacement_confirmed,
+        output_index_dir,
+        |_| {},
+    )
+    .await
+}
+
+pub async fn index_repository_full_text_only_with_progress<F>(
+    repo_path: &Path,
+    config: &VeraConfig,
+    cancellation: &CancellationToken,
+    replacement_confirmed: bool,
+    output_index_dir: Option<&Path>,
+    on_progress: F,
+) -> Result<IndexSummary>
+where
+    F: Fn(FullTextIndexProgress) + Send + Sync,
+{
     let start = Instant::now();
     let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
@@ -268,10 +303,15 @@ pub async fn index_repository_full_text_only_with_options(
     }
 
     let discovery_start = Instant::now();
+    on_progress(FullTextIndexProgress::DiscoveryStarted);
     let discovery =
         discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
             .context("file discovery failed")?;
     phase_secs.discovery = rounded_secs(discovery_start.elapsed());
+    let total_files = discovery.files.len();
+    on_progress(FullTextIndexProgress::DiscoveryDone {
+        file_count: total_files,
+    });
 
     let mut staging = StagingIndex::new(&idx_dir).context("failed to create staging index")?;
     let metadata_store = MetadataStore::open(&staging.build_dir.join(METADATA_DB))
@@ -294,7 +334,6 @@ pub async fn index_repository_full_text_only_with_options(
         .begin_bulk_build()
         .context("failed to create full-text index writer")?;
 
-    let total_files = discovery.files.len();
     let discovery = Arc::new(discovery);
     let repo_root = Arc::new(repo_root);
     let cancellation = cancellation.clone();
@@ -347,6 +386,11 @@ pub async fn index_repository_full_text_only_with_options(
             .insert_parse_artifacts_batch(&window.refs, &window.type_relations)
             .context("failed to store full-text parse artifacts")?;
         store_time += store_start.elapsed();
+        on_progress(FullTextIndexProgress::FilesIndexed {
+            files_done: file_index,
+            file_count: total_files,
+            chunks_created,
+        });
     }
     phase_secs.parse = rounded_secs(parse_start.elapsed());
 
@@ -1572,14 +1616,38 @@ mod resume_tests {
     async fn full_text_only_build_creates_searchable_index_without_vectors() {
         let root = tempdir().unwrap();
         write_corpus(root.path());
-        let summary =
-            index_repository_full_text_only(root.path(), &config(), &CancellationToken::new())
-                .await
-                .unwrap();
+        let progress = std::sync::Mutex::new(Vec::new());
+        let summary = index_repository_full_text_only_with_progress(
+            root.path(),
+            &config(),
+            &CancellationToken::new(),
+            true,
+            None,
+            |event| progress.lock().unwrap().push(event),
+        )
+        .await
+        .unwrap();
 
         let idx_dir = index_dir(root.path());
         assert_eq!(summary.files_parsed, 4);
         assert_eq!(summary.embeddings_generated, 0);
+        let progress = progress.into_inner().unwrap();
+        assert_eq!(
+            progress.first(),
+            Some(&FullTextIndexProgress::DiscoveryStarted)
+        );
+        assert_eq!(
+            progress.get(1),
+            Some(&FullTextIndexProgress::DiscoveryDone { file_count: 4 })
+        );
+        assert!(matches!(
+            progress.last(),
+            Some(FullTextIndexProgress::FilesIndexed {
+                files_done: 4,
+                file_count: 4,
+                ..
+            })
+        ));
         assert!(idx_dir.join(BM25_SUBDIR).exists());
         assert!(!idx_dir.join(VECTOR_DB).exists());
         let metadata = MetadataStore::open_existing(&idx_dir.join(METADATA_DB)).unwrap();

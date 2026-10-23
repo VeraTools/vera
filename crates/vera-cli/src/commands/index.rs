@@ -99,22 +99,69 @@ pub fn run(
 
         let show_progress = !no_progress && std::io::stderr().is_terminal();
         let multi = show_progress.then(|| cliclack::multi_progress("Indexing full text..."));
-        let spinner = multi.as_ref().map(|multi| multi.add(cliclack::spinner()));
-        if let Some(spinner) = &spinner {
-            spinner.start("Discovering, parsing, and indexing full text...");
+        let scan_spinner = Arc::new(std::sync::Mutex::new(
+            multi
+                .as_ref()
+                .map(|multi| Arc::new(multi.add(cliclack::spinner()))),
+        ));
+        if let Some(spinner) = scan_spinner.lock().unwrap().as_ref() {
+            spinner.start("Preparing full-text index...");
         }
+        let indexing_bar = Arc::new(std::sync::Mutex::new(None));
+        let scan_spinner_ref = Arc::clone(&scan_spinner);
+        let indexing_bar_ref = Arc::clone(&indexing_bar);
+        let multi_ref = multi.clone();
         let result = rt.block_on(
-            vera_core::indexing::pipeline::index_repository_full_text_only_with_options(
+            vera_core::indexing::pipeline::index_repository_full_text_only_with_progress(
                 repo_path,
                 &config,
                 &vera_core::CancellationToken::new(),
                 replacement_confirmed,
                 save,
+                move |event| match event {
+                    vera_core::indexing::pipeline::FullTextIndexProgress::DiscoveryStarted => {
+                        if let Some(spinner) = scan_spinner_ref.lock().unwrap().as_ref() {
+                            spinner.set_message("Scanning files...");
+                        }
+                    }
+                    vera_core::indexing::pipeline::FullTextIndexProgress::DiscoveryDone {
+                        file_count,
+                    } => {
+                        if let Some(spinner) = scan_spinner_ref.lock().unwrap().take() {
+                            spinner.stop(format!("Scanned {file_count} files"));
+                        }
+                        if file_count > 0 {
+                            if let Some(multi) = &multi_ref {
+                                let bar = Arc::new(multi.add(cliclack::progress_bar(file_count as u64)));
+                                bar.start(format!("Indexing files (0/{file_count})..."));
+                                *indexing_bar_ref.lock().unwrap() = Some(bar);
+                            }
+                        }
+                    }
+                    vera_core::indexing::pipeline::FullTextIndexProgress::FilesIndexed {
+                        files_done,
+                        file_count,
+                        chunks_created,
+                    } => {
+                        if let Some(bar) = indexing_bar_ref.lock().unwrap().as_ref() {
+                            bar.set_position(files_done as u64);
+                            bar.set_message(format!(
+                                "Indexing files ({files_done}/{file_count}; {chunks_created} chunks)"
+                            ));
+                        }
+                    }
+                },
             ),
         );
         match result {
             Ok(summary) => {
-                if let Some(spinner) = &spinner {
+                if let Some(bar) = indexing_bar.lock().unwrap().take() {
+                    bar.stop(format!(
+                        "Indexed {} files into {} full-text chunks",
+                        summary.files_parsed, summary.chunks_created
+                    ));
+                }
+                if let Some(spinner) = scan_spinner.lock().unwrap().take() {
                     spinner.stop(format!(
                         "Indexed {} files into {} full-text chunks",
                         summary.files_parsed, summary.chunks_created
@@ -123,8 +170,11 @@ pub fn run(
                 Ok(summary)
             }
             Err(error) => {
-                if let Some(spinner) = &spinner {
-                    spinner.error(format!("Full-text indexing failed: {error}"));
+                let message = format!("Full-text indexing failed: {error}");
+                if let Some(bar) = indexing_bar.lock().unwrap().take() {
+                    bar.error(message);
+                } else if let Some(spinner) = scan_spinner.lock().unwrap().take() {
+                    spinner.error(message);
                 }
                 Err(error).context("full-text indexing failed")
             }
