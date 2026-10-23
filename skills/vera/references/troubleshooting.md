@@ -15,6 +15,8 @@ vera index .
 
 Run it from the repository root. Search, grep, structural, references, overview, stats, and update commands resolve the nearest `.vera/` up the directory tree, so they work from subdirectories too.
 
+A first index can take several minutes. Give the shell command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. If this is not a code repository you will work in, or you cannot run shell commands, use your usual search tools instead.
+
 ## Results Are Stale
 
 Cause:

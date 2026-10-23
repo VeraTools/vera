@@ -13,9 +13,7 @@ pub fn run(
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
     let config = state::load_runtime_config()?;
 
-    // An ancestor's `.vera/` index covers this directory too; without one the
-    // existing no-index behavior is unchanged.
-    let repo_root = crate::helpers::resolve_index_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let repo_root = crate::helpers::resolve_index_root(&cwd)?;
 
     let exact_paths = if let Some(scope) = git_scope.as_ref() {
         Some(vera_core::git_scope::resolve_scope(&repo_root, scope)?)

@@ -101,7 +101,7 @@ tree-sitter-rst = "0.2.0"
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "load-dynamic"] }
 flate2 = "1"
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokenizers = { version = "0.22.2" }
 dirs = "6.0.0"
 ndarray = "0.17.2"

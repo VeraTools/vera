@@ -54,15 +54,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     // parents instead of the raw CLI path's lexical parents ("." would
     // never walk past the empty path).
     let start = repo_path.canonicalize()?;
-    let repo_path = match crate::helpers::find_index_root(&start) {
-        Some(root) => {
-            if root != start {
-                eprintln!("note: using index at {}", root.display());
-            }
-            root
-        }
-        None => repo_path.to_path_buf(),
-    };
+    let repo_path = crate::helpers::resolve_index_root(&start)?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
@@ -77,8 +69,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         &config, backend,
     ))?;
 
-    // Check metadata mismatch. Read-only open: a missing database means
-    // "no index yet", which the update itself will create.
+    // Check metadata mismatch without creating a missing database.
     let metadata_path = repo_path.join(".vera").join("metadata.db");
     if let Ok(metadata_store) =
         vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)

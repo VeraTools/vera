@@ -2,6 +2,12 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.1.5
+
+- Agent guidance now allows normal search tools when no index exists and explains long first-index runs and reusing finished API-mode embeddings. Index-required commands share the same no-index guidance.
+- Indexing keeps its artifacts out of git through [local excludes](installation.md#index-and-search), including in linked worktrees and nested project directories.
+- `vera references` accepts repeatable `--path` filters for callers and callees, using the same path rules as search.
+
 ## v2.1.4
 
 - `vera setup --api` and `vera backend --api` turn reranking on when you configure a reranker, including with the Qwen preset, and turn it off when you set up without one. Before, setup saved the reranker but left reranking off, so searches were never reranked. If you set up API mode with an earlier version, run setup again or `vera config set retrieval.reranking_enabled true`; `vera doctor` now warns when a reranker is saved but reranking is off.

@@ -294,6 +294,7 @@ fn main() {
             symbol,
             callees,
             receiver,
+            path,
             limit,
             git_scope,
             compact,
@@ -303,6 +304,7 @@ fn main() {
                 &symbol,
                 callees,
                 receiver.as_deref(),
+                path,
                 limit,
                 git_scope.resolve(),
                 cli.json,
@@ -921,15 +923,21 @@ mod tests {
             "7",
             "--changed",
             "--compact",
+            "--path",
+            "src/**/*.rs",
+            "--path",
+            "tests",
         ]) {
             Commands::References {
                 symbol,
+                path,
                 limit,
                 git_scope,
                 compact,
                 ..
             } => {
                 assert_eq!(symbol, "parse_config");
+                assert_eq!(path, ["src/**/*.rs", "tests"]);
                 assert_eq!(limit, Some(7));
                 assert!(git_scope.changed);
                 assert!(compact);

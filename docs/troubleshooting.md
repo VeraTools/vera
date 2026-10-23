@@ -60,10 +60,11 @@ A `vera update` was interrupted. Vera refuses to read the partial index. Run `ve
 
 ### `.vera/` shows up in git
 
-The index is machine-local and can be large. Ignore it, along with the resume directory a failed API index leaves behind:
+See [index-file exclusions](installation.md#index-and-search).
+
+If the index was already tracked, run this from the indexed directory to remove it from git's tracking without deleting local files:
 
 ```bash
-printf '.vera/\n.vera.resume/\n' >> .gitignore
 git rm -r --cached .vera
 ```
 

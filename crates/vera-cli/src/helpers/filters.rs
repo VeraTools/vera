@@ -162,7 +162,7 @@ fn absolute_path_filter_rewrite_inner(
 /// Rewrite every absolute `--path` entry that resolves under the index root to
 /// its root-relative form, since indexed paths are stored relative to it. The
 /// root is tried as-is and canonicalized so symlinked invocations work.
-fn rewrite_absolute_path_filters(repo_root: &Path, patterns: &mut Vec<String>) {
+pub fn rewrite_absolute_path_filters(repo_root: &Path, patterns: &mut Vec<String>) {
     if patterns.is_empty() {
         return;
     }
@@ -176,7 +176,8 @@ fn rewrite_absolute_path_filters(repo_root: &Path, patterns: &mut Vec<String>) {
     for pattern in patterns.drain(..) {
         match absolute_path_filter_rewrite(&pattern, &roots) {
             PathFilterRewrite::Keep => rewritten.push(pattern),
-            PathFilterRewrite::Drop => {}
+            // Patterns are ORed, so the index root admits every file.
+            PathFilterRewrite::Drop => return,
             PathFilterRewrite::Rewrite(rel) => rewritten.push(rel),
         }
     }
@@ -334,5 +335,12 @@ mod tests {
             absolute_path_filter_rewrite("src/**", &roots),
             PathFilterRewrite::Keep
         ));
+    }
+
+    #[test]
+    fn index_root_path_filter_removes_every_path_restriction() {
+        let mut patterns = vec!["src".to_string(), "/repo".to_string()];
+        rewrite_absolute_path_filters(Path::new("/repo"), &mut patterns);
+        assert!(patterns.is_empty());
     }
 }

@@ -3,6 +3,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub use vera_core::indexing::missing_index_message;
+
 pub fn warn_if_index_stale(repo_path: &Path, indexing_config: &vera_core::config::IndexingConfig) {
     match vera_core::indexing::detect_staleness(repo_path, indexing_config) {
         Ok(freshness) => {
@@ -105,30 +107,14 @@ pub fn find_index_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The paste-ready error shown when no `.vera/` index exists in `cwd` or any
-/// parent directory.
-pub fn missing_index_message(cwd: &Path) -> String {
-    let mut message = format!(
-        "no index found in {} or any parent directory.\nRun `vera index .` from the repository root, then rerun this command.",
-        cwd.display()
-    );
-    if cwd
-        .ancestors()
-        .any(|root| root.join(".vera.resume/embeddings.db").is_file())
-    {
-        message.push_str("\nA previous indexing run stopped early; `vera index` will resume from its saved embeddings.");
-    }
-    message
-}
-
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
 /// `note: using index at <root>` line once when the root is an ancestor.
-pub fn resolve_index_root(cwd: &Path) -> Option<PathBuf> {
-    let root = find_index_root(cwd)?;
+pub fn resolve_index_root(cwd: &Path) -> anyhow::Result<PathBuf> {
+    let root = find_index_root(cwd).ok_or_else(|| anyhow::anyhow!(missing_index_message(cwd)))?;
     if root != cwd {
         eprintln!("note: using index at {}", root.display());
     }
-    Some(root)
+    Ok(root)
 }
 
 pub fn prepare_indexed_repo(
@@ -136,9 +122,7 @@ pub fn prepare_indexed_repo(
 ) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
-    let Some(repo_root) = resolve_index_root(&cwd) else {
-        anyhow::bail!(missing_index_message(&cwd));
-    };
+    let repo_root = resolve_index_root(&cwd)?;
     let index_dir = vera_core::indexing::index_dir(&repo_root);
     // Index format version must match: legacy suffixed rows would be silently wrong.
     {
@@ -192,8 +176,7 @@ mod tests {
         let message = missing_index_message(Path::new("/repo/sub/dir"));
         assert_eq!(
             message,
-            "no index found in /repo/sub/dir or any parent directory.\n\
-             Run `vera index .` from the repository root, then rerun this command."
+            "no index found in /repo/sub/dir or any parent directory. Run `vera index .` from the repository root (a first index can take minutes), or search with rg until it exists."
         );
     }
 

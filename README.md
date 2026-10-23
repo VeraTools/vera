@@ -38,7 +38,7 @@ vera setup --potion-code --index .
 vera search "where expired sessions are cleaned up"
 ```
 
-Run `vera setup` with no flags in a terminal for a guided setup that can also install the agent skill. Add `.vera/` to your `.gitignore`. The [installation guide](docs/installation.md) covers GPU backends, API mode, prebuilt binaries, and Docker.
+Run `vera setup` with no flags in a terminal for a guided setup that can also install the agent skill. The [installation guide](docs/installation.md) covers GPU backends, API mode, prebuilt binaries, and Docker.
 
 ## What Vera does well
 

@@ -125,11 +125,13 @@ impl IndexLock {
 
     /// Block until the lock is acquired.
     pub fn acquire_blocking_for_index_dir(index_dir: &Path) -> Result<Self> {
-        Self::acquire_blocking(&lock_path_for_index_dir(index_dir))
+        let guard = Self::acquire_blocking(&lock_path_for_index_dir(index_dir))?;
+        super::git_exclude::ensure(index_dir.parent().unwrap_or_else(|| Path::new(".")));
+        Ok(guard)
     }
 
     pub fn acquire_blocking_for_repo(repo_path: &Path) -> Result<Self> {
-        Self::acquire_blocking(&lock_path_for_repo(repo_path))
+        Self::acquire_blocking_for_index_dir(&super::pipeline::index_dir(repo_path))
     }
 
     fn acquire_blocking(lock_path: &Path) -> Result<Self> {
@@ -227,7 +229,7 @@ fn try_lock_exclusive(file: &File) -> Result<bool> {
 }
 
 #[cfg(unix)]
-fn lock_exclusive_blocking(file: &File) -> Result<()> {
+pub(super) fn lock_exclusive_blocking(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
     // SAFETY: `file` owns a live descriptor throughout this blocking call;
     // flock does not take ownership of it or retain Rust memory.
@@ -290,7 +292,7 @@ fn try_lock_exclusive(file: &File) -> Result<bool> {
 }
 
 #[cfg(windows)]
-fn lock_exclusive_blocking(file: &File) -> Result<()> {
+pub(super) fn lock_exclusive_blocking(file: &File) -> Result<()> {
     lock_exclusive_windows(file, false).map(|_| ())
 }
 
@@ -319,7 +321,7 @@ fn try_lock_exclusive(_file: &File) -> Result<bool> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn lock_exclusive_blocking(_file: &File) -> Result<()> {
+pub(super) fn lock_exclusive_blocking(_file: &File) -> Result<()> {
     Ok(())
 }
 

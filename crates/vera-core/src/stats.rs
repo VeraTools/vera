@@ -106,10 +106,7 @@ pub fn collect_stats(repo_path: &Path) -> Result<IndexStats> {
     let idx_dir = index_dir(repo_path);
 
     if !idx_dir.exists() {
-        anyhow::bail!(
-            "no index found at: {}\nRun `vera index <path>` first to create an index.",
-            idx_dir.display()
-        );
+        anyhow::bail!(crate::indexing::missing_index_message(repo_path));
     }
 
     // Open metadata store. Read-only: a missing database must be an error,
@@ -177,10 +174,7 @@ pub fn collect_overview_filtered(
     let idx_dir = index_dir(repo_path);
 
     if !idx_dir.exists() {
-        anyhow::bail!(
-            "no index found at: {}\nRun `vera index <path>` first to create an index.",
-            idx_dir.display()
-        );
+        anyhow::bail!(crate::indexing::missing_index_message(repo_path));
     }
 
     let metadata_path = idx_dir.join("metadata.db");
@@ -490,10 +484,7 @@ pub use crate::storage::metadata::{CalleeRef, CallerRef, DeadSymbol};
 fn open_metadata(repo_path: &Path) -> Result<MetadataStore> {
     let idx_dir = index_dir(repo_path);
     if !idx_dir.exists() {
-        anyhow::bail!(
-            "no index found at: {}\nRun `vera index <path>` first.",
-            idx_dir.display()
-        );
+        anyhow::bail!(crate::indexing::missing_index_message(repo_path));
     }
     MetadataStore::open_existing(&idx_dir.join("metadata.db"))
         .context("failed to open metadata store")

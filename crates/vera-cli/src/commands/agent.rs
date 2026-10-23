@@ -1154,13 +1154,17 @@ fn sync_with_options(
 const VERA_SNIPPET_BEGIN_MARKER: &str = "<!-- vera:begin -->";
 const VERA_SNIPPET_END_MARKER: &str = "<!-- vera:end -->";
 const AGENTS_MD_SNIPPET_HEADING: &str = "## Code Search";
-const AGENTS_MD_SNIPPET_INTRO: &str = "Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
+const LEGACY_AGENTS_MD_SNIPPET_INTRO: &str = "Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
+const AGENTS_MD_SNIPPET_INTRO: &str = "In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
+const AGENTS_MD_SNIPPET_NO_INDEX: &str = "If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.";
 
 const AGENTS_MD_SNIPPET: &str = r#"## Code Search
 
 <!-- vera:begin -->
 
-Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. Fall back to grep or rg only after a Vera call has missed.
+In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. Fall back to grep or rg only after a Vera call has missed.
+
+If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.
 
 Route by question type:
 
@@ -1175,7 +1179,7 @@ Working with results:
 - If the top hit is a usage site, re-run with the symbol name or `vera structural definitions <symbol>` instead of trying more phrasings.
 - `--path` is relative to the repository root (`--path src/flask`, not an absolute path). Narrow with `--lang`, `--path`, `--type`, or `--scope docs`; widen with `--limit 8`.
 - Vera indexes this repository only. For dependency sources (site-packages, uv or pip caches) use rg, then return to Vera for repository code.
-- A stale-index warning does not invalidate hits. After editing files, run `vera update .` from any directory (it refreshes the repository root's index; `vera index .` from the repository root if none exists).
+- A stale-index warning does not invalidate hits. After editing files, run `vera update .` from any directory (it refreshes the repository root's index).
 - `vera explain-path <file>`, `vera stats --json`, and detailed usage are in the Vera skill installed by `vera agent install`.
 <!-- vera:end -->
 "#;
@@ -1341,7 +1345,8 @@ fn refresh_vera_snippet_in_markdown(existing: &str) -> Option<String> {
 
     let legacy_snippet = legacy_agents_md_snippet();
     let legacy_snippet = adapt_line_endings(&legacy_snippet, existing);
-    if !section.contains(AGENTS_MD_SNIPPET_INTRO) || section.trim_end() != legacy_snippet.trim_end()
+    if !section.contains(LEGACY_AGENTS_MD_SNIPPET_INTRO)
+        || section.trim_end() != legacy_snippet.trim_end()
     {
         return None;
     }
@@ -1376,6 +1381,12 @@ fn legacy_agents_md_snippet() -> String {
     AGENTS_MD_SNIPPET
         .replace(&format!("{VERA_SNIPPET_BEGIN_MARKER}\n\n"), "")
         .replace(&format!("\n{VERA_SNIPPET_END_MARKER}"), "")
+        .replace(AGENTS_MD_SNIPPET_INTRO, LEGACY_AGENTS_MD_SNIPPET_INTRO)
+        .replace(&format!("\n\n{AGENTS_MD_SNIPPET_NO_INDEX}"), "")
+        .replace(
+            "(it refreshes the repository root's index).",
+            "(it refreshes the repository root's index; `vera index .` from the repository root if none exists).",
+        )
 }
 
 /// Match generated content's line endings to the target file's.
@@ -1792,9 +1803,13 @@ mod tests {
 
     #[test]
     fn refresh_vera_snippet_in_markdown_migrates_identical_legacy_section() {
+        let legacy = legacy_agents_md_snippet();
+        assert!(legacy.contains(LEGACY_AGENTS_MD_SNIPPET_INTRO));
+        assert!(!legacy.contains(AGENTS_MD_SNIPPET_NO_INDEX));
+        assert!(legacy.contains("; `vera index .` from the repository root if none exists)"));
         let existing = format!(
             "# Repository Guidelines\n\n{}\n\n# Guidelines\n\nRun tests first.\n",
-            legacy_agents_md_snippet().trim_end()
+            legacy.trim_end()
         );
 
         let updated = refresh_vera_snippet_in_markdown(&existing).unwrap();
@@ -1803,6 +1818,20 @@ mod tests {
         assert!(updated.contains(VERA_SNIPPET_BEGIN_MARKER));
         assert!(updated.contains(VERA_SNIPPET_END_MARKER));
         assert!(updated.contains("# Guidelines\n\nRun tests first.\n"));
+        assert!(updated.contains(AGENTS_MD_SNIPPET_NO_INDEX));
+        assert!(!updated.contains(LEGACY_AGENTS_MD_SNIPPET_INTRO));
+        assert_eq!(refresh_vera_snippet_in_markdown(&updated).unwrap(), updated);
+    }
+
+    #[test]
+    fn refresh_previous_marked_snippet() {
+        let previous = legacy_agents_md_snippet().replacen(
+            "## Code Search\n\n",
+            &format!("## Code Search\n\n{VERA_SNIPPET_BEGIN_MARKER}\n\n"),
+            1,
+        ) + VERA_SNIPPET_END_MARKER;
+        let updated = refresh_vera_snippet_in_markdown(&previous).unwrap();
+        assert!(updated.contains(marked_snippet_body()));
     }
 
     #[test]

@@ -30,6 +30,7 @@ For structural queries about call relationships, use `references` or `dead-code`
 ```sh
 vera references parse_config            # who calls parse_config?
 vera references parse_config --callees  # what does parse_config call?
+vera references parse_config --path 'src/**/*.rs' --path tests  # either path
 vera dead-code                          # candidates with no indexed caller matches
 ```
 

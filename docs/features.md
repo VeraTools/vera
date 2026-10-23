@@ -94,9 +94,12 @@ These answer common questions directly from the index, without writing tree-sitt
 vera references parse_config             # who calls it
 vera references parse_config --callees   # what it calls
 vera references get --receiver app       # only calls written as app.get(...)
+vera references parse_config --path src  # callers under src; also works with --callees
 ```
 
 Call sites are extracted from the syntax tree at index time and matched by name, not resolved by a type checker. When several definitions share a name, the output lists the receivers the calls went through, and `--receiver` keeps just one.
+
+`--path` uses the same directory and glob rules as search; repeat it to include several patterns.
 
 ### Dead code candidates
 
