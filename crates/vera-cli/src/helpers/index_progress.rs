@@ -19,17 +19,19 @@ struct RunProgress {
 
 #[derive(Clone)]
 pub struct EmbeddingReporter {
-    provider: Arc<DynamicProvider>,
+    provider: Option<Arc<DynamicProvider>>,
     initial_stats: EmbeddingRequestStats,
     state: Arc<Mutex<RunProgress>>,
     enabled: bool,
 }
 
 impl EmbeddingReporter {
-    pub fn new(provider: Arc<DynamicProvider>, enabled: bool) -> Self {
+    pub fn new(provider: Option<Arc<DynamicProvider>>, enabled: bool) -> Self {
         let initial_stats = provider
-            .stats()
+            .as_deref()
+            .and_then(EmbeddingProvider::stats)
             .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot());
+        let enabled = enabled && provider.is_some();
         Self {
             provider,
             initial_stats,
@@ -59,7 +61,8 @@ impl EmbeddingReporter {
 
     fn stats(&self) -> EmbeddingRequestStats {
         self.provider
-            .stats()
+            .as_deref()
+            .and_then(EmbeddingProvider::stats)
             .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot())
             .since(self.initial_stats)
     }

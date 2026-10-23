@@ -136,6 +136,76 @@ fn index_fingerprint(idx_dir: &Path) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
+async fn full_text_only_build_and_mode_conversion() {
+    let dir = TempDir::new().unwrap();
+    write_window_corpus(dir.path(), 5);
+    let config = default_config();
+    let provider = RecordingProvider::new(8);
+    let idx = index_dir(dir.path());
+    assert!(!is_full_text_only(&idx).unwrap());
+
+    // Exercise replacement in both directions through the same staged pipeline.
+    index_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert!(!is_full_text_only(&idx).unwrap());
+    let events = Mutex::new(Vec::new());
+    let summary = index_repository_with_progress_and_cancellation_with_window_target(
+        dir.path(),
+        None::<&RecordingProvider>,
+        &config,
+        "unused-model",
+        |event| events.lock().unwrap().push(event),
+        &CancellationToken::new(),
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(summary.chunks_created >= 5);
+    assert_eq!(summary.embeddings_generated, 0);
+    assert_eq!(summary.embedding_requests, 0);
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, IndexProgress::EmbeddingDone { count: 0 }))
+    );
+    assert!(is_full_text_only(&idx).unwrap());
+    let store = MetadataStore::open_existing(&idx.join(METADATA_DB)).unwrap();
+    assert_eq!(
+        store.get_index_meta(INDEX_MODE_KEY).unwrap().as_deref(),
+        Some(FULL_TEXT_ONLY_MODE)
+    );
+    for key in ["model_name", "document_prefix", "embedding_dim"] {
+        assert_eq!(store.get_index_meta(key).unwrap(), None);
+    }
+    assert!(!idx.join(VECTOR_DB).exists());
+    assert!(!sibling_index_dir(&idx, INDEX_RESUME_SUFFIX).exists());
+    drop(store);
+    let context = crate::retrieval::search_service::SearchContext::bm25_only();
+    let (results, timings) = context
+        .search(
+            &idx,
+            "item_0",
+            None,
+            &config,
+            &crate::types::SearchFilters::default(),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(!results.is_empty());
+    assert!(timings.semantic_fallback.is_none());
+
+    index_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert!(!is_full_text_only(&idx).unwrap());
+    assert!(idx.join(VECTOR_DB).exists());
+}
+
+#[tokio::test]
 async fn full_index_embeds_bounded_windows_and_preserves_order() {
     let windowed_dir = TempDir::new().unwrap();
     let single_window_dir = TempDir::new().unwrap();
@@ -148,7 +218,7 @@ async fn full_index_embeds_bounded_windows_and_preserves_order() {
     let events_ref = events.clone();
     let windowed_summary = index_repository_with_progress_and_cancellation_with_window_target(
         windowed_dir.path(),
-        &windowed_provider,
+        Some(&windowed_provider),
         &config,
         "mock-model",
         move |event| events_ref.lock().unwrap().push(event),
@@ -161,7 +231,7 @@ async fn full_index_embeds_bounded_windows_and_preserves_order() {
     let single_window_provider = RecordingProvider::new(8);
     index_repository_with_progress_and_cancellation_with_window_target(
         single_window_dir.path(),
-        &single_window_provider,
+        Some(&single_window_provider),
         &config,
         "mock-model",
         |_| {},
@@ -299,7 +369,7 @@ async fn failed_window_keeps_live_index_and_cleans_staging() {
     let provider = RecordingProvider::failing_on_call(8, 2);
     let error = index_repository_with_progress_and_cancellation_with_window_target(
         dir.path(),
-        &provider,
+        Some(&provider),
         &default_config(),
         "mock-model",
         |_| {},
@@ -382,7 +452,7 @@ async fn pre_cancelled_index_stops_before_creating_artifacts() {
 
     let error = super::index_repository_with_progress_and_cancellation(
         dir.path(),
-        &provider,
+        Some(&provider),
         &config,
         "mock-model",
         |_| {},
@@ -411,7 +481,7 @@ async fn cancellation_stops_an_in_flight_embedding_request() {
     let task = tokio::spawn(async move {
         super::index_repository_with_progress_and_cancellation(
             &path,
-            &provider,
+            Some(&provider),
             &config,
             "mock-model",
             |_| {},
@@ -442,7 +512,7 @@ async fn cancellation_after_embedding_does_not_publish_index_artifacts() {
 
     let error = super::index_repository_with_progress_and_cancellation(
         dir.path(),
-        &provider,
+        Some(&provider),
         &config,
         "mock-model",
         move |event| {
@@ -467,7 +537,7 @@ async fn provider_error_wins_over_simultaneous_cancellation() {
 
     let error = super::index_repository_with_progress_and_cancellation(
         dir.path(),
-        &CancelThenFailProvider,
+        Some(&CancelThenFailProvider),
         &config,
         "mock-model",
         |_| {},

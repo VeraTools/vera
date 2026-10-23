@@ -132,6 +132,8 @@ vera config set retrieval.reranking_enabled true
 
 ### Setup or requests fail
 
+To index without an embedding provider, use a [keyword-only index](features.md#keyword-only-index).
+
 Re-run setup and enter the endpoint URL, model ID, and key:
 
 ```bash

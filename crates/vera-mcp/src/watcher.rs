@@ -68,6 +68,7 @@ struct WatchRuntime {
     config: VeraConfig,
     backend: InferenceBackend,
     provider_identity: String,
+    full_text_only: bool,
 }
 
 struct CachedEngine {
@@ -106,18 +107,23 @@ impl SharedEngine {
 /// single effective provider identity.
 struct EmbeddingUpdateEngine {
     runtime: tokio::runtime::Runtime,
-    provider: vera_core::embedding::DynamicProvider,
+    provider: Option<vera_core::embedding::DynamicProvider>,
     model_name: String,
 }
 
 impl EmbeddingUpdateEngine {
     fn build(runtime_config: &WatchRuntime) -> Result<Self, anyhow::Error> {
         let runtime = tokio::runtime::Runtime::new()?;
-        let (provider, model_name) =
-            runtime.block_on(vera_core::embedding::create_dynamic_provider(
-                &runtime_config.config,
-                runtime_config.backend,
-            ))?;
+        let (provider, model_name) = if runtime_config.full_text_only {
+            (None, String::new())
+        } else {
+            let (provider, model_name) =
+                runtime.block_on(vera_core::embedding::create_dynamic_provider(
+                    &runtime_config.config,
+                    runtime_config.backend,
+                ))?;
+            (Some(provider), model_name)
+        };
         Ok(Self {
             runtime,
             provider,
@@ -132,13 +138,17 @@ impl IncrementalUpdate for EmbeddingUpdateEngine {
         repo_path: &Path,
         config: &VeraConfig,
     ) -> Result<UpdateSummary, anyhow::Error> {
-        self.runtime
-            .block_on(vera_core::indexing::update_repository(
+        self.runtime.block_on(
+            vera_core::indexing::update_repository_with_options_and_progress_and_cancellation(
                 repo_path,
-                &self.provider,
+                self.provider.as_ref(),
                 config,
                 &self.model_name,
-            ))
+                &vera_core::indexing::UpdateOptions::default(),
+                |_| {},
+                &vera_core::CancellationToken::new(),
+            ),
+        )
     }
 }
 
@@ -167,7 +177,15 @@ fn start_watching_internal(repo_path: &Path, progress_logs: bool) -> Result<Watc
     let runtime = resolve_watch_runtime()
         .map_err(|error| format!("Failed to resolve watcher runtime configuration: {error}"))?;
     let indexing = runtime.config.indexing.clone();
-    let resolve: RuntimeResolver = Arc::new(resolve_watch_runtime);
+    let index_dir = vera_core::indexing::index_dir(repo_path);
+    let resolve: RuntimeResolver = Arc::new(move || {
+        let mut runtime = resolve_watch_runtime()?;
+        runtime.full_text_only = vera_core::indexing::is_full_text_only(&index_dir)?;
+        if runtime.full_text_only {
+            runtime.provider_identity = vera_core::indexing::FULL_TEXT_ONLY_MODE.to_string();
+        }
+        Ok(runtime)
+    });
     let build: EngineBuilder =
         Arc::new(|runtime| Ok(Arc::new(EmbeddingUpdateEngine::build(runtime)?) as Engine));
 
@@ -196,6 +214,7 @@ fn start_watching_with(
         },
         backend: InferenceBackend::Api,
         provider_identity: "test".to_string(),
+        full_text_only: false,
     };
     let resolve: RuntimeResolver = Arc::new(move || Ok(runtime.clone()));
     start_watching_with_runtime(repo_path, progress_logs, debounce, indexing, resolve, build)
@@ -361,6 +380,7 @@ fn resolve_watch_runtime() -> Result<WatchRuntime, anyhow::Error> {
         config,
         backend,
         provider_identity,
+        full_text_only: false,
     })
 }
 
@@ -477,6 +497,7 @@ fn test_runtime() -> WatchRuntime {
         config: VeraConfig::default(),
         backend: InferenceBackend::Api,
         provider_identity: "test".to_string(),
+        full_text_only: false,
     }
 }
 
@@ -651,6 +672,34 @@ mod tests {
             .block_on(future)
     }
 
+    #[test]
+    fn full_text_only_engine_updates_without_creating_a_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("lib.rs");
+        std::fs::write(&source, "pub fn original() {}\n").unwrap();
+        let mut runtime = test_runtime();
+        runtime.full_text_only = true;
+        block_on(
+            vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+                dir.path(),
+                None::<&TestProvider>,
+                &runtime.config,
+                "",
+                |_| {},
+                &vera_core::CancellationToken::new(),
+            ),
+        )
+        .unwrap();
+        let engine = EmbeddingUpdateEngine::build(&runtime).unwrap();
+        assert!(engine.provider.is_none());
+        std::fs::write(&source, "pub fn updated() {}\n").unwrap();
+        let summary = engine.update(dir.path(), &runtime.config).unwrap();
+        assert_eq!(summary.files_modified, 1);
+        let index_dir = vera_core::indexing::index_dir(dir.path());
+        assert!(vera_core::indexing::is_full_text_only(&index_dir).unwrap());
+        assert!(!index_dir.join("vectors.db").exists());
+    }
+
     fn counting_builder(builds: Arc<AtomicUsize>, updates: Arc<AtomicUsize>) -> EngineBuilder {
         Arc::new(move |_| {
             builds.fetch_add(1, Ordering::SeqCst);
@@ -809,6 +858,7 @@ mod tests {
             config: VeraConfig::default(),
             backend: InferenceBackend::Api,
             provider_identity: "model-a".to_string(),
+            full_text_only: false,
         };
 
         let first = shared.get(&runtime_a).expect("first engine");

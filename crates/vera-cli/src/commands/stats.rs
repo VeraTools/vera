@@ -13,6 +13,10 @@ pub fn run(json_output: bool) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to serialize stats: {e}"))?;
         println!("{json}");
     } else {
+        if vera_core::indexing::is_full_text_only(&vera_core::indexing::index_dir(&repo_root))? {
+            println!("Index mode: full-text only (BM25, no embeddings)");
+            println!();
+        }
         print_human_stats(&stats);
     }
 

@@ -53,12 +53,7 @@ pub fn run(
         crate::commands::index::execute(
             cwd.to_string_lossy().as_ref(),
             false,
-            backend,
-            Vec::new(),
-            false,
-            false,
-            false,
-            false,
+            crate::commands::index::CommandOptions::new(backend),
         )?;
     }
 
@@ -66,7 +61,11 @@ pub fn run(
         prepare_indexed_search(&config.indexing, filters, git_scope.as_ref())?;
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
-    let search_context = rt.block_on(SearchContext::new(&config, backend));
+    let search_context = if vera_core::indexing::is_full_text_only(&index_dir)? {
+        SearchContext::bm25_only()
+    } else {
+        rt.block_on(SearchContext::new(&config, backend))
+    };
 
     let runner = SearchRunner {
         rt: &rt,

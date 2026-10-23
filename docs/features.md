@@ -129,6 +129,16 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+### Keyword-only index
+
+```bash
+vera index . --full-text-only
+```
+
+Build a keyword (BM25) index without configuring or loading an embedding model. Grep, structural queries, references, and overview work exactly as with an embedded index. Search ranks by keyword match only, so queries that describe behavior in plain words find less than they would with embeddings. `vera update` and watch mode keep the index keyword-only.
+
+Run `vera index .` without the flag to rebuild with embeddings.
+
 ### Symbol-aware chunks
 
 Vera parses files with tree-sitter and indexes functions, classes, methods, structs, traits, interfaces, and `impl` blocks as separate chunks, each labeled with its path, line range, and symbol name. Symbols longer than 200 lines are split at natural boundaries and keep their name with a part number. Config files are indexed whole, Markdown and reStructuredText by section, and files in unrecognized formats by line windows. See [supported languages](supported-languages.md).

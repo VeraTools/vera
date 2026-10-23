@@ -19,8 +19,8 @@ pub use telemetry::PhaseSecs;
 
 pub use freshness::{IndexFreshness, detect_staleness};
 pub use pipeline::{
-    FileError, IndexProgress, IndexSummary, index_dir, index_repository,
-    index_repository_with_progress,
+    FULL_TEXT_ONLY_MODE, FileError, INDEX_MODE_KEY, IndexProgress, IndexSummary, index_dir,
+    index_repository, index_repository_with_progress, is_full_text_only,
 };
 pub use update::{
     UpdateOptions, UpdateProgress, UpdateSummary, content_hash, update_repository,
