@@ -61,6 +61,14 @@ fn main() {
             err.exit();
         }
     };
+    #[cfg(unix)]
+    if !matches!(cli.command, Commands::Mcp | Commands::Serve { .. }) {
+        // Let `vera stats | head` end quietly, as other CLI tools do, instead of
+        // panicking on a closed stdout. Servers keep Rust's default so a client
+        // that disconnects mid-write cannot kill them.
+        // SAFETY: SIG_DFL is a valid disposition and no handler state is shared.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     if let Err(err) = state::apply_saved_env() {
         // Diagnose/repair commands must still run against a broken saved
         // config; everything else keeps failing fast with the parse error.
