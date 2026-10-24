@@ -126,7 +126,7 @@ pub fn execute(
             json["path"] = path.into();
             println!("{}", serde_json::to_string_pretty(&json)?);
         } else {
-            print_index_estimate(path, &estimate);
+            print_index_estimate(path, &estimate, full_text_only);
         }
         return Ok(None);
     }

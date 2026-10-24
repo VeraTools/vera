@@ -413,7 +413,11 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-pub fn print_index_estimate(path: &str, estimate: &vera_core::indexing::IndexEstimate) {
+pub fn print_index_estimate(
+    path: &str,
+    estimate: &vera_core::indexing::IndexEstimate,
+    full_text_only: bool,
+) {
     let skipped: Vec<String> = [
         (estimate.binary_skipped, "binary"),
         (estimate.large_skipped, "oversized"),
@@ -442,7 +446,9 @@ pub fn print_index_estimate(path: &str, estimate: &vera_core::indexing::IndexEst
         format!("discovery {}", format_duration(estimate.discovery_secs)),
         format!("parsing {}", format_duration(estimate.estimated_parse_secs)),
     ];
-    if let Some(embedding) = estimate.estimated_embedding_secs {
+    if full_text_only {
+        parts.push("keyword-only, no embedding".to_string());
+    } else if let Some(embedding) = estimate.estimated_embedding_secs {
         parts.push(format!(
             "embedding {} from {} timed chunks",
             format_duration(embedding),

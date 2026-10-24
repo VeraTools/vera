@@ -81,7 +81,7 @@ pub async fn estimate_index<P: EmbeddingProvider>(
             sampled_chunks += chunks.len();
             embed_sample.extend(stride_sample(&chunks, per_group_sample));
         }
-        embed_sample.truncate(EMBED_SAMPLE_CHUNKS);
+        let embed_sample = stride_sample(&embed_sample, EMBED_SAMPLE_CHUNKS);
         let estimate = IndexEstimate {
             total_files: discovery.files.len(),
             total_bytes,
