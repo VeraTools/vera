@@ -195,6 +195,15 @@ impl Repository {
     }
 }
 
+/// Resolve `repo`, falling back to the legacy `path` argument when `repo` is absent or null.
+fn resolve_repository_or_path(args: &Value) -> Result<Repository, ToolCallResult> {
+    resolve_repository(
+        args.get("repo")
+            .filter(|value| !value.is_null())
+            .or_else(|| args.get("path")),
+    )
+}
+
 /// Resolve a repository without changing the server's process-wide directory.
 fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult> {
     let cwd = std::env::current_dir()
@@ -475,11 +484,7 @@ fn fuse_multi_query_results(
 
 /// Handle the `get_stats` tool.
 fn handle_get_stats(args: &Value) -> ToolCallResult {
-    let repo = match resolve_repository(
-        args.get("repo")
-            .filter(|value| !value.is_null())
-            .or_else(|| args.get("path")),
-    ) {
+    let repo = match resolve_repository_or_path(args) {
         Ok(repo) => repo,
         Err(e) => return e,
     };
@@ -494,11 +499,7 @@ fn handle_get_stats(args: &Value) -> ToolCallResult {
 
 /// Handle the `get_overview` tool.
 fn handle_get_overview(args: &Value) -> ToolCallResult {
-    let repo = match resolve_repository(
-        args.get("repo")
-            .filter(|value| !value.is_null())
-            .or_else(|| args.get("path")),
-    ) {
+    let repo = match resolve_repository_or_path(args) {
         Ok(repo) => repo,
         Err(e) => return e,
     };
