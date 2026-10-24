@@ -36,6 +36,7 @@ fn commands_share_no_index_guidance_and_resume_hint() {
         vec!["references", "foo"],
         vec!["overview"],
         vec!["update", "."],
+        vec!["watch", "."],
         vec!["stats"],
     ] {
         let output = vera(&root, &args);

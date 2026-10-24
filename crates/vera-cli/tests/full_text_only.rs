@@ -87,9 +87,10 @@ fn full_text_only_commands_need_no_embedding_configuration() {
     let output = run_from(dir.path(), &["-C", repo_name, "search", "keyword_target"]);
     let root = repo.canonicalize().unwrap();
     let warning = format!(
-        "warning: index may be stale: 1 added, 1 modified. Search and grep only cover indexed files. Run `vera -C '{root}' update .` or `vera -C '{root}' watch .`.",
-        root = root.display()
+        "warning: index may be stale: 1 added, 1 modified. Search and grep only cover indexed files. Run `{command} update .` or `{command} watch .`.",
+        command = vera_core::indexing::freshness::vera_command_for_repo(&root)
     );
+    assert!(warning.contains("vera -C '"), "{warning}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&warning), "{stderr}");
     let output = run(&["search", "keyword_target"]);

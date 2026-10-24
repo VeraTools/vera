@@ -111,8 +111,10 @@ mod tests {
             format!(
                 "warning: index may be stale: 1 added, 1 modified. \
              Search and grep only cover indexed files. \
-             Run `vera -C {root} update .` or `vera -C {root} watch .`.",
-                root = dir.path().canonicalize().unwrap().display()
+             Run `{command} update .` or `{command} watch .`.",
+                command = vera_core::indexing::freshness::vera_command_for_repo(
+                    &dir.path().canonicalize().unwrap()
+                )
             )
         );
     }

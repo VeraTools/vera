@@ -131,10 +131,11 @@ impl IndexFreshness {
     }
 }
 
-/// CLI prefix for a repository-specific hint, quoting paths with whitespace.
+/// CLI prefix for a repository-specific hint, shell-quoting paths that need it.
 pub fn vera_command_for_repo(repo: &Path) -> String {
     let path = repo.display().to_string();
-    if path.chars().any(char::is_whitespace) {
+    let shell_safe = |c: char| c.is_ascii_alphanumeric() || "/._-+:@,=~".contains(c);
+    if !path.chars().all(shell_safe) {
         format!("vera -C '{}'", path.replace('\'', "'\\''"))
     } else {
         format!("vera -C {path}")
@@ -448,6 +449,8 @@ mod tests {
             ("/dependency", "vera -C /dependency"),
             ("/dependency source", "vera -C '/dependency source'"),
             ("/user's dependency", "vera -C '/user'\\''s dependency'"),
+            ("/user'srepo", "vera -C '/user'\\''srepo'"),
+            ("/a$b", "vera -C '/a$b'"),
         ] {
             assert_eq!(vera_command_for_repo(Path::new(path)), command);
         }
