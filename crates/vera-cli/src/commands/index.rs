@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use vera_core::config::InferenceBackend;
+use vera_core::embedding::DynamicProvider;
 use vera_core::indexing::IndexProgress;
 
 use crate::helpers::{
@@ -15,59 +16,65 @@ use crate::helpers::{
 };
 use crate::state;
 
+pub struct CommandOptions {
+    pub backend: InferenceBackend,
+    pub exclude: Vec<String>,
+    pub no_ignore: bool,
+    pub no_default_excludes: bool,
+    pub no_progress: bool,
+    pub verbose: bool,
+    pub low_vram: bool,
+    pub full_text_only: bool,
+}
+
+impl CommandOptions {
+    pub fn new(backend: InferenceBackend) -> Self {
+        Self {
+            backend,
+            exclude: Vec::new(),
+            no_ignore: false,
+            no_default_excludes: false,
+            no_progress: false,
+            verbose: false,
+            low_vram: false,
+            full_text_only: false,
+        }
+    }
+}
+
 /// Run the `vera index <path>` command.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Index commands retain their existing CLI dispatch interface and independent options"
-)]
-pub fn run(
-    path: &str,
-    json_output: bool,
-    backend: InferenceBackend,
-    exclude: Vec<String>,
-    no_ignore: bool,
-    no_default_excludes: bool,
-    no_progress: bool,
-    verbose: bool,
-    low_vram: bool,
-) -> anyhow::Result<()> {
-    let summary = execute(
-        path,
-        json_output,
-        backend,
-        exclude,
-        no_ignore,
-        no_default_excludes,
-        no_progress,
-        low_vram,
-    )?;
+pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Result<()> {
+    let verbose = options.verbose;
+    let full_text_only = options.full_text_only;
+    let summary = execute(path, json_output, options)?;
 
     if json_output {
         let json = serde_json::to_string_pretty(&summary)
             .map_err(|e| anyhow::anyhow!("failed to serialize summary: {e}"))?;
         println!("{json}");
     } else {
-        print_human_summary(&summary, verbose);
+        print_human_summary(&summary, verbose, full_text_only);
     }
 
     Ok(())
 }
 
 /// Index a repository and return the resulting summary.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Index commands retain their existing CLI dispatch interface and independent options"
-)]
 pub fn execute(
     path: &str,
     json_output: bool,
-    backend: InferenceBackend,
-    exclude: Vec<String>,
-    no_ignore: bool,
-    no_default_excludes: bool,
-    no_progress: bool,
-    low_vram: bool,
+    options: CommandOptions,
 ) -> anyhow::Result<vera_core::indexing::IndexSummary> {
+    let CommandOptions {
+        backend,
+        exclude,
+        no_ignore,
+        no_default_excludes,
+        no_progress,
+        low_vram,
+        full_text_only,
+        ..
+    } = options;
     let repo_path = Path::new(path);
 
     if !repo_path.exists() {
@@ -95,10 +102,14 @@ pub fn execute(
     config.indexing.no_ignore |= no_ignore;
     config.indexing.no_default_excludes |= no_default_excludes;
 
-    let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
-        &config, backend,
-    ))?;
-    let provider = Arc::new(provider);
+    let (provider, model_name) = if full_text_only {
+        (None::<Arc<DynamicProvider>>, String::new())
+    } else {
+        let (provider, model_name) = rt
+            .block_on(vera_core::embedding::create_dynamic_provider(&config, backend))
+            .context("failed to create embedding provider; --full-text-only builds a keyword (BM25) index without embeddings")?;
+        (Some(Arc::new(provider)), model_name)
+    };
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
 
     // Show the progress display only for interactive, non-JSON runs. Mirrors
@@ -116,7 +127,7 @@ pub fn execute(
         let task = rt.handle().spawn(async move {
             vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
                 &task_repo_path,
-                provider.as_ref(),
+                provider.as_deref(),
                 &config,
                 &model_name,
                 move |event| {
@@ -190,7 +201,9 @@ pub fn execute(
                 );
             }
             IndexProgress::EmbeddingDone { .. } => {
-                handle_embedding_done(display, &embed_spinner_ref, &embed_bar_ref, &multi_ref);
+                if !full_text_only {
+                    handle_embedding_done(display, &embed_spinner_ref, &embed_bar_ref, &multi_ref);
+                }
             }
             IndexProgress::StorageDone => {}
         }
@@ -203,7 +216,7 @@ pub fn execute(
     let task = rt.handle().spawn(async move {
         vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
             &task_repo_path,
-            provider.as_ref(),
+            provider.as_deref(),
             &config,
             &model_name,
             on_progress,

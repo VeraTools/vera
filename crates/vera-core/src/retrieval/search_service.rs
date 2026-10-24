@@ -319,6 +319,19 @@ impl SearchContext {
             Ok((results, timings))
         };
 
+        // Profiling: docs/adr/009-filter-scan-profiling.md — three `get_index_meta` reads per
+        // query cost ~0.45 ms warm p50, served from stamp-guarded cache.
+        // Propagate cache errors to BM25-only rather than silently skipping
+        // compatibility checks (vector space mismatch would otherwise be missed).
+        let index_meta = match stores.cached_index_meta() {
+            Ok(meta) => meta,
+            Err(err) => {
+                return bm25_only(Some(format!("failed to read index metadata: {err}")));
+            }
+        };
+        if index_meta.full_text_only {
+            return bm25_only(None);
+        }
         let Some(provider) = self.provider.as_ref() else {
             return bm25_only(
                 self.provider_error
@@ -326,20 +339,12 @@ impl SearchContext {
                     .map(|error| format!("embedding provider unavailable: {error}")),
             );
         };
-
         let mut stored_dim = config.embedding.max_stored_dim;
-
-        // Profiling: docs/adr/009-filter-scan-profiling.md — three `get_index_meta` reads per
-        // query cost ~0.45 ms warm p50, served from stamp-guarded cache.
-        // Propagate cache errors to BM25-only rather than silently skipping
-        // compatibility checks (vector space mismatch would otherwise be missed).
-        let index_meta = match stores.cached_index_meta() {
-            Ok(meta) => Some(meta),
-            Err(err) => {
-                return bm25_only(Some(format!("failed to read index metadata: {err}")));
-            }
-        };
-        if let Some((Some(s_model), Some(s_dim), s_prefix)) = index_meta {
+        if let (Some(s_model), Some(s_dim), s_prefix) = (
+            index_meta.model_name,
+            index_meta.embedding_dim,
+            index_meta.document_prefix,
+        ) {
             if let Some(model_name) = self.model_name.as_deref()
                 && !crate::config::model_names_match_with_aliases(
                     &s_model,
@@ -647,6 +652,82 @@ mod tests {
     use crate::types::Language;
     use crate::types::{Chunk, SymbolType};
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn full_text_only_search_ignores_available_or_failed_provider() {
+        use crate::embedding::test_helpers::MockProvider;
+        use crate::embedding::{EmbeddingProviderConfig, OpenAiProvider};
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn keyword_target() {}\n").unwrap();
+        let config = VeraConfig::default();
+        crate::indexing::pipeline::index_repository_with_progress_and_cancellation(
+            dir.path(),
+            None::<&MockProvider>,
+            &config,
+            "",
+            |_| {},
+            &crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let index_dir = crate::indexing::index_dir(dir.path());
+        // API request telemetry counts any attempt, even a failed connection.
+        let provider = OpenAiProvider::new(EmbeddingProviderConfig::new(
+            "http://127.0.0.1:0/v1".to_string(),
+            "wrong-model".to_string(),
+            "test-key".to_string(),
+        ))
+        .unwrap();
+        let mut context = SearchContext::bm25_only();
+        context.provider = Some(CachedEmbeddingProvider::new(
+            DynamicProvider::Api(provider),
+            8,
+        ));
+        context.model_name = Some("wrong-model".to_string());
+        for _ in 0..2 {
+            let (results, timings) = context
+                .search(
+                    &index_dir,
+                    "keyword_target",
+                    None,
+                    &config,
+                    &SearchFilters::default(),
+                    5,
+                )
+                .await
+                .unwrap();
+            assert!(!results.is_empty());
+            assert!(timings.semantic_fallback.is_none());
+        }
+        assert_eq!(
+            context
+                .embedding_provider()
+                .unwrap()
+                .stats()
+                .unwrap()
+                .snapshot()
+                .requests,
+            0
+        );
+        assert_eq!(context.reranker_build_count(), 0);
+        context.provider = None;
+        context.provider_error = Some("unavailable".to_string());
+        let (results, timings) = context
+            .search(
+                &index_dir,
+                "keyword_target",
+                None,
+                &config,
+                &SearchFilters::default(),
+                5,
+            )
+            .await
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(timings.semantic_fallback.is_none());
+        assert!(!index_dir.join("vectors.db").exists());
+    }
 
     fn run_reranker_unavailability_probe(failed_build: bool) {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1612,7 +1693,8 @@ mod tests {
             .unwrap();
         let index_dir = crate::indexing::index_dir(&repo);
         let stores = SearchStores::open(&index_dir).unwrap();
-        let (m1, _d1, _p1) = stores.cached_index_meta().unwrap();
+        assert!(!stores.cached_index_meta().unwrap().full_text_only);
+        let m1 = stores.cached_index_meta().unwrap().model_name;
         assert_eq!(m1.as_deref(), Some("mock-model"));
         // Record stamp before mutation.
         let stamp_before = std::fs::metadata(index_dir.join("metadata.db"))
@@ -1624,6 +1706,12 @@ mod tests {
                 crate::storage::metadata::MetadataStore::open(&index_dir.join("metadata.db"))
                     .unwrap();
             store.set_index_meta("model_name", "new-model").unwrap();
+            store
+                .set_index_meta(
+                    crate::indexing::INDEX_MODE_KEY,
+                    crate::indexing::FULL_TEXT_ONLY_MODE,
+                )
+                .unwrap();
         }
         // Wait for filesystem mtime granularity: poll until stamp visibly changes or 1.2s elapsed.
         let start = std::time::Instant::now();
@@ -1636,7 +1724,8 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let (m2, _d2, _p2) = stores.cached_index_meta().unwrap();
+        let m2 = stores.cached_index_meta().unwrap().model_name;
+        assert!(stores.cached_index_meta().unwrap().full_text_only);
         // After stamp invalidation, the new value must be observed; stale cached value is impossible.
         assert_eq!(
             m2.as_deref(),

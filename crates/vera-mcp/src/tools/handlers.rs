@@ -7,7 +7,9 @@ use vera_core::presentation::{CompactResult, truncate_to_budget};
 
 use crate::protocol::ToolCallResult;
 
-use super::runtime::{cached_search_context, ensure_index_and_watcher, search_runtime};
+use super::runtime::{
+    cached_search_context, ensure_index_and_watcher, keyword_search_context, search_runtime,
+};
 
 /// Default total output budget for MCP responses (chars).
 const MCP_OUTPUT_BUDGET: usize = 20_000;
@@ -328,9 +330,14 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
         Ok(rt) => rt,
         Err(err) => return err,
     };
-    let search_context = match cached_search_context(rt, &config, backend) {
-        Ok(context) => context,
-        Err(err) => return err,
+    // A mode read error falls through to the embedded path, which degrades to BM25 itself.
+    let search_context = if matches!(vera_core::indexing::is_full_text_only(&index_dir), Ok(true)) {
+        keyword_search_context()
+    } else {
+        match cached_search_context(rt, &config, backend) {
+            Ok(context) => context,
+            Err(err) => return err,
+        }
     };
 
     // Run each query. A multi-query search over-fetches per query so fusion has

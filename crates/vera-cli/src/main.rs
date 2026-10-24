@@ -185,6 +185,7 @@ fn main() {
         }
         Commands::Index {
             path,
+            full_text_only,
             backend,
             exclude,
             no_ignore,
@@ -197,13 +198,16 @@ fn main() {
             commands::index::run(
                 &path,
                 cli.json,
-                backend.resolve(),
-                exclude,
-                no_ignore,
-                no_default_excludes,
-                no_progress,
-                verbose,
-                low_vram,
+                commands::index::CommandOptions {
+                    backend: backend.resolve(),
+                    exclude,
+                    no_ignore,
+                    no_default_excludes,
+                    no_progress,
+                    verbose,
+                    low_vram,
+                    full_text_only,
+                },
             )
         }
         Commands::Search {

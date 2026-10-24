@@ -403,12 +403,20 @@ fn format_bytes(bytes: u64) -> String {
 ///
 /// When `verbose` is true, individual file paths are listed for skipped-file
 /// categories. Otherwise only counts are shown with a hint to rerun with `-v`.
-pub fn print_human_summary(summary: &vera_core::indexing::IndexSummary, verbose: bool) {
+pub fn print_human_summary(
+    summary: &vera_core::indexing::IndexSummary,
+    verbose: bool,
+    full_text_only: bool,
+) {
     println!("Indexing complete!");
     println!();
     println!("  Files parsed:        {}", summary.files_parsed);
     println!("  Chunks created:      {}", summary.chunks_created);
-    println!("  Embeddings generated: {}", summary.embeddings_generated);
+    if full_text_only {
+        println!("  Index mode:          full-text only (BM25, no embeddings)");
+    } else {
+        println!("  Embeddings generated: {}", summary.embeddings_generated);
+    }
     println!("  Elapsed time:        {:.2}s", summary.elapsed_secs);
     print_embedding_request_summary(
         summary.embedding_requests,

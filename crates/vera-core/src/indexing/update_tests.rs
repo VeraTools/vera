@@ -29,6 +29,127 @@ fn default_config() -> VeraConfig {
     VeraConfig::default()
 }
 
+struct CountingProvider(AtomicUsize);
+
+impl EmbeddingProvider for CountingProvider {
+    fn expected_dim(&self) -> Option<usize> {
+        None
+    }
+
+    async fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Err(EmbeddingError::ApiError {
+            status: 400,
+            message: "full-text updates must not embed".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn full_text_only_updates_ignore_providers_and_preserve_mode() {
+    use crate::indexing::{FULL_TEXT_ONLY_MODE, INDEX_MODE_KEY, is_full_text_only};
+    use crate::retrieval::search_service::SearchContext;
+    use crate::types::SearchFilters;
+
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("lib.rs"), "pub fn original() {}\n").unwrap();
+    fs::write(dir.path().join("deleted.rs"), "pub fn removed() {}\n").unwrap();
+    let config = default_config();
+    crate::indexing::pipeline::index_repository_with_progress_and_cancellation(
+        dir.path(),
+        None::<&CountingProvider>,
+        &config,
+        "",
+        |_| {},
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let provider = CountingProvider(AtomicUsize::new(0));
+    let idx = index_dir(dir.path());
+    fs::remove_file(dir.path().join("deleted.rs")).unwrap();
+    for (provider, name) in [(None, "first_keyword"), (Some(&provider), "second_keyword")] {
+        fs::write(dir.path().join("lib.rs"), format!("pub fn {name}() {{}}\n")).unwrap();
+        fs::write(
+            dir.path().join(format!("{name}.rs")),
+            format!("pub fn added_{name}() {{}}\n"),
+        )
+        .unwrap();
+        let summary = update_repository_with_options_and_progress_and_cancellation(
+            dir.path(),
+            provider,
+            &config,
+            "wrong-model",
+            &UpdateOptions::default(),
+            |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.files_modified, 1);
+        assert_eq!(summary.files_added, 1);
+        assert_eq!(summary.embedding_requests, 0);
+        let context = SearchContext::bm25_only();
+        let (results, timings) = context
+            .search(&idx, name, None, &config, &SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert!(results.iter().any(|result| result.file_path == "lib.rs"));
+        assert!(
+            results
+                .iter()
+                .any(|result| result.file_path == format!("{name}.rs"))
+        );
+        assert!(timings.semantic_fallback.is_none());
+        assert!(is_full_text_only(&idx).unwrap());
+        assert!(!idx.join("vectors.db").exists());
+        let store = MetadataStore::open_existing(&idx.join("metadata.db")).unwrap();
+        assert_eq!(
+            store.get_index_meta(INDEX_MODE_KEY).unwrap().as_deref(),
+            Some(FULL_TEXT_ONLY_MODE)
+        );
+        assert_eq!(store.get_index_meta("model_name").unwrap(), None);
+        assert!(store.get_chunks_by_file("deleted.rs").unwrap().is_empty());
+    }
+    assert_eq!(provider.0.load(Ordering::Relaxed), 0);
+    let summary = update_repository_with_options_and_progress_and_cancellation(
+        dir.path(),
+        None::<&CountingProvider>,
+        &config,
+        "",
+        &UpdateOptions::default(),
+        |_| {},
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        summary.files_modified, 0,
+        "vector coverage must not force repairs"
+    );
+    assert_eq!(summary.files_added, 0);
+}
+
+#[tokio::test]
+async fn embedded_index_update_requires_provider() {
+    let (dir, _, config, _) = indexed_repo(&[("lib.rs", "pub fn embedded() {}\n")]).await;
+    let error = update_repository_with_options_and_progress_and_cancellation(
+        dir.path(),
+        None::<&MockProvider>,
+        &config,
+        "mock-model",
+        &UpdateOptions::default(),
+        |_| {},
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("embedding provider is required"),
+        "{error}"
+    );
+}
+
 /// Create a temp repo with `files`, run the initial index, and return the
 /// repo dir, provider, config, and initial index summary.
 async fn indexed_repo(
@@ -398,7 +519,7 @@ async fn update_cancellation_stops_embedding_before_publication() {
     let options = UpdateOptions::default();
     let update = update_repository_with_options_and_progress_and_cancellation(
         dir.path(),
-        &provider,
+        Some(&provider),
         &config,
         "mock-model",
         &options,
@@ -440,7 +561,7 @@ async fn update_cancellation_after_embedding_does_not_publish_changes() {
     let progress_cancellation = cancellation.clone();
     let error = update_repository_with_options_and_progress_and_cancellation(
         dir.path(),
-        &provider,
+        Some(&provider),
         &config,
         "mock-model",
         &UpdateOptions::default(),

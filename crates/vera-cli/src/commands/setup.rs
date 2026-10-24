@@ -301,12 +301,7 @@ fn run_wizard() -> anyhow::Result<()> {
         commands::index::execute(
             path.trim(),
             false,
-            effective_backend,
-            Vec::new(),
-            false,
-            false,
-            false,
-            false,
+            commands::index::CommandOptions::new(effective_backend),
         )?;
     }
 
@@ -433,12 +428,7 @@ fn configure_backend_with_api_setup(
         commands::index::execute(
             path,
             json_output,
-            effective_backend,
-            Vec::new(),
-            false,
-            false,
-            false,
-            false,
+            commands::index::CommandOptions::new(effective_backend),
         )?;
     }
 

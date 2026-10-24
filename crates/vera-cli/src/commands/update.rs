@@ -65,14 +65,22 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     config.indexing.no_ignore |= no_ignore;
     config.indexing.no_default_excludes |= no_default_excludes;
 
-    let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
-        &config, backend,
-    ))?;
+    let full_text_only =
+        vera_core::indexing::is_full_text_only(&vera_core::indexing::index_dir(&repo_path))?;
+    let (provider, model_name) = if full_text_only {
+        (None, String::new())
+    } else {
+        let (provider, model_name) = rt.block_on(vera_core::embedding::create_dynamic_provider(
+            &config, backend,
+        ))?;
+        (Some(Arc::new(provider)), model_name)
+    };
 
     // Check metadata mismatch without creating a missing database.
     let metadata_path = repo_path.join(".vera").join("metadata.db");
-    if let Ok(metadata_store) =
-        vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)
+    if let Some(provider) = &provider
+        && let Ok(metadata_store) =
+            vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)
         && let (Some(s_model), Some(s_dim)) = (
             metadata_store.get_index_meta("model_name").unwrap_or(None),
             metadata_store
@@ -107,7 +115,6 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     }
 
     let show_progress = !json_output && !no_progress && std::io::stderr().is_terminal();
-    let provider = Arc::new(provider);
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
     let options = UpdateOptions { max_files };
     let cancellation = vera_core::CancellationToken::new();
@@ -191,7 +198,14 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
                         display,
                         Some(vera_core::indexing::progress::EmbedDisplay::Done { .. })
                     );
-                    handle_embedding_done(display, &embed_spinner_ref, &embed_bar_ref, &multi_ref);
+                    if !full_text_only {
+                        handle_embedding_done(
+                            display,
+                            &embed_spinner_ref,
+                            &embed_bar_ref,
+                            &multi_ref,
+                        );
+                    }
                     if is_done {
                         parse_spinner_ref.start("Writing index updates...");
                     }
@@ -207,7 +221,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         let task = rt.handle().spawn(async move {
             vera_core::indexing::update_repository_with_options_and_progress_and_cancellation(
                 &task_repo_path,
-                provider.as_ref(),
+                provider.as_deref(),
                 &config,
                 &model_name,
                 &options,
@@ -233,7 +247,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         let task = rt.handle().spawn(async move {
             vera_core::indexing::update_repository_with_options_and_progress_and_cancellation(
                 &task_repo_path,
-                provider.as_ref(),
+                provider.as_deref(),
                 &config,
                 &model_name,
                 &options,

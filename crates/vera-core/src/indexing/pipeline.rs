@@ -113,6 +113,11 @@ const BM25_SUBDIR: &str = "bm25";
 const METADATA_DB: &str = "metadata.db";
 const VECTOR_DB: &str = "vectors.db";
 
+/// Metadata key recording an explicitly non-embedded index.
+pub const INDEX_MODE_KEY: &str = "index_mode";
+/// Index mode containing only BM25 and metadata stores.
+pub const FULL_TEXT_ONLY_MODE: &str = "full_text_only";
+
 /// Maximum number of parsed chunks held by the full-index pipeline at once.
 ///
 /// The actual bound is approximate when a parse group or a single file
@@ -126,6 +131,20 @@ const MAX_PARSE_FILE_GROUP: usize = 64;
 /// Resolve the index directory for a given repository root.
 pub fn index_dir(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(INDEX_DIR_NAME)
+}
+
+/// Whether an existing index was built without embeddings. Missing indexes return false.
+pub fn is_full_text_only(index_dir: &Path) -> Result<bool> {
+    let metadata_path = index_dir.join(METADATA_DB);
+    if !metadata_path.is_file() {
+        return Ok(false);
+    }
+    store_is_full_text_only(&MetadataStore::open_existing(&metadata_path)?)
+}
+
+/// Whether an open metadata store records a keyword-only index.
+pub(crate) fn store_is_full_text_only(store: &MetadataStore) -> Result<bool> {
+    Ok(store.get_index_meta(INDEX_MODE_KEY)?.as_deref() == Some(FULL_TEXT_ONLY_MODE))
 }
 
 /// True when `path` lives inside the live index directory or one of the
@@ -184,7 +203,7 @@ pub async fn index_repository_with_cancellation<P: EmbeddingProvider>(
 ) -> Result<IndexSummary> {
     index_repository_with_progress_and_cancellation(
         repo_path,
-        provider,
+        Some(provider),
         config,
         model_name,
         |_| {},
@@ -207,7 +226,7 @@ where
 {
     index_repository_with_progress_and_cancellation(
         repo_path,
-        provider,
+        Some(provider),
         config,
         model_name,
         on_progress,
@@ -219,7 +238,7 @@ where
 /// Index a repository with progress reporting and cooperative cancellation.
 pub async fn index_repository_with_progress_and_cancellation<P, F>(
     repo_path: &Path,
-    provider: &P,
+    provider: Option<&P>,
     config: &VeraConfig,
     model_name: &str,
     on_progress: F,
@@ -245,7 +264,7 @@ where
 /// Production uses `WINDOW_CHUNK_TARGET`; tests lower it to exercise staging windows.
 pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_target<P, F>(
     repo_path: &Path,
-    provider: &P,
+    provider: Option<&P>,
     config: &VeraConfig,
     model_name: &str,
     on_progress: F,
@@ -258,7 +277,7 @@ where
 {
     let start = Instant::now();
     let initial_stats = provider
-        .stats()
+        .and_then(EmbeddingProvider::stats)
         .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot());
     let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
@@ -287,7 +306,8 @@ where
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
         .context("failed to acquire index lock")?;
     recover_index_directories(&idx_dir).context("failed to recover index directories")?;
-    let checkpoint = EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name);
+    let checkpoint = provider
+        .and_then(|provider| EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name));
 
     // ── 2. Discover files ────────────────────────────────────────
     let discovery_start = Instant::now();
@@ -299,6 +319,12 @@ where
     if discovery.files.is_empty() {
         drop(checkpoint);
         EmbeddingCheckpoint::remove(&idx_dir);
+        // An index of files that no longer exist would keep serving them.
+        if idx_dir.exists() {
+            std::fs::remove_dir_all(&idx_dir).with_context(|| {
+                format!("failed to remove outdated index: {}", idx_dir.display())
+            })?;
+        }
         return Ok(IndexSummary {
             files_parsed: 0,
             chunks_created: 0,
@@ -343,8 +369,7 @@ where
     // unchanged: a failed build discards the staging directory either way.
     let mut stores = StoreHandle::spawn(
         staging.build_dir.clone(),
-        model_name.to_string(),
-        provider.document_prefix_identity(),
+        provider.map(|provider| (model_name.to_string(), provider.document_prefix_identity())),
     );
 
     // ── 3. Parse, embed, and store bounded windows ───────────────
@@ -427,7 +452,8 @@ where
         file_states.extend(window.file_states.iter().cloned());
 
         cancellation.check()?;
-        if !window.chunks.is_empty() {
+        let mut embeddings = if let Some(provider) = provider.filter(|_| !window.chunks.is_empty())
+        {
             let embedded_before_window = embedded_count;
             let parsed_through_window = parsed_chunk_count;
             let window_batch_size = batch_size.min(window_chunk_target);
@@ -451,7 +477,7 @@ where
             )
             .await;
             embed_busy += embed_start.elapsed();
-            let mut embeddings = match embedding_result {
+            let embeddings = match embedding_result {
                 Ok(embeddings) => embeddings,
                 Err(error) => {
                     // A completed provider error outranks a simultaneous cancellation,
@@ -467,35 +493,23 @@ where
                 }
             };
             cancellation.check()?;
-
-            let window_dim =
-                super::truncate_embeddings(&mut embeddings, config.embedding.max_stored_dim);
-            embedded_count += embeddings.len();
-
-            stores
-                .send_window(WindowStore {
-                    chunks: window.chunks,
-                    embeddings,
-                    window_dim,
-                    file_states: window.file_states,
-                    refs: window.refs,
-                    type_relations: window.type_relations,
-                })
-                .await?;
+            embeddings
         } else {
-            // Parse-error-only windows still need their file state and parse
-            // artifacts persisted if a later window contains chunks.
-            stores
-                .send_window(WindowStore {
-                    chunks: Vec::new(),
-                    embeddings: Vec::new(),
-                    window_dim: 0,
-                    file_states: window.file_states,
-                    refs: window.refs,
-                    type_relations: window.type_relations,
-                })
-                .await?;
-        }
+            Vec::new()
+        };
+        let window_dim =
+            super::truncate_embeddings(&mut embeddings, config.embedding.max_stored_dim);
+        embedded_count += embeddings.len();
+        stores
+            .send_window(WindowStore {
+                chunks: window.chunks,
+                embeddings,
+                window_dim,
+                file_states: window.file_states,
+                refs: window.refs,
+                type_relations: window.type_relations,
+            })
+            .await?;
 
         cancellation.check()?;
     }
@@ -535,7 +549,7 @@ where
     // The worker commits the BM25 index, applies the empty-vector
     // dimensionality fallback, and certifies the build before replying.
     let store_busy = stores
-        .finish(parsed_chunk_count > 0, file_hashes, config.indexing.clone())
+        .finish(provider.is_some(), file_hashes, config.indexing.clone())
         .await?;
 
     let publication_start = Instant::now();
@@ -552,7 +566,7 @@ where
     phase_secs.embed = rounded_secs(embed_busy);
     phase_secs.store = rounded_secs(store_busy + publication_start.elapsed());
     let stats = provider
-        .stats()
+        .and_then(EmbeddingProvider::stats)
         .map_or(EmbeddingRequestStats::default(), |stats| stats.snapshot())
         .since(initial_stats);
 
@@ -684,13 +698,12 @@ struct StoreHandle {
 }
 
 impl StoreHandle {
-    fn spawn(build_dir: PathBuf, model_name: String, document_prefix: String) -> Self {
+    fn spawn(build_dir: PathBuf, embedding_identity: Option<(String, String)>) -> Self {
         // Capacity bounds in-flight windows to one being stored plus one
         // queued, applying backpressure to the embed stage if stores lag.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let worker = tokio::task::spawn_blocking(move || {
-            store_worker(&build_dir, &model_name, &document_prefix, rx)
-        });
+        let worker =
+            tokio::task::spawn_blocking(move || store_worker(&build_dir, embedding_identity, rx));
         Self {
             tx,
             worker: Some(worker),
@@ -754,19 +767,24 @@ impl StoreHandle {
 /// is committed and the staging guard removes the directory.
 fn store_worker(
     build_dir: &Path,
-    model_name: &str,
-    document_prefix: &str,
+    embedding_identity: Option<(String, String)>,
     mut rx: tokio::sync::mpsc::Receiver<StoreCommand>,
 ) -> Result<Duration> {
     let setup_start = Instant::now();
     let metadata_store = MetadataStore::open(&build_dir.join(METADATA_DB))
         .context("failed to open staging metadata store")?;
-    metadata_store
-        .set_index_meta("model_name", model_name)
-        .context("failed to store model_name")?;
-    metadata_store
-        .set_index_meta("document_prefix", document_prefix)
-        .context("failed to store document_prefix")?;
+    if let Some((model_name, document_prefix)) = embedding_identity {
+        metadata_store
+            .set_index_meta("model_name", &model_name)
+            .context("failed to store model_name")?;
+        metadata_store
+            .set_index_meta("document_prefix", &document_prefix)
+            .context("failed to store document_prefix")?;
+    } else {
+        metadata_store
+            .set_index_meta(INDEX_MODE_KEY, FULL_TEXT_ONLY_MODE)
+            .context("failed to store index mode")?;
+    }
     let bm25_index = Bm25Index::open(&build_dir.join(BM25_SUBDIR))
         .context("failed to open staging BM25 index")?;
     // One writer for the whole build: a writer per window would pay creation,
@@ -1265,7 +1283,7 @@ mod resume_tests {
     ) -> Result<IndexSummary> {
         index_repository_with_progress_and_cancellation_with_window_target(
             root,
-            provider,
+            Some(provider),
             &config(),
             "checkpoint-model",
             |_| {},

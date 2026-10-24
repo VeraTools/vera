@@ -127,11 +127,13 @@ struct CachedIndexedFiles {
     files: Arc<Vec<String>>,
 }
 
-struct CachedIndexMeta {
+#[derive(Clone)]
+pub(crate) struct CachedIndexMeta {
     stamp: MetadataDbStamp,
-    model_name: Option<String>,
-    embedding_dim: Option<String>,
-    document_prefix: Option<String>,
+    pub(crate) model_name: Option<String>,
+    pub(crate) embedding_dim: Option<String>,
+    pub(crate) document_prefix: Option<String>,
+    pub(crate) full_text_only: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -266,7 +268,7 @@ impl SearchStores {
         Ok(files)
     }
 
-    /// Index metadata (model_name, embedding_dim, document_prefix) cached
+    /// Index metadata (mode, model_name, embedding_dim, document_prefix) cached
     /// against the metadata database stamp.
     ///
     /// Profiling (`docs/adr/009-filter-scan-profiling.md`): `SearchContext::search` performs
@@ -280,9 +282,7 @@ impl SearchStores {
     /// invalidates the entry rather than certifying stale metadata. On miss a
     /// fresh `MetadataStore` connection is used to avoid coupling to the
     /// `bm25_metadata` lock.
-    pub(crate) fn cached_index_meta(
-        &self,
-    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    pub(crate) fn cached_index_meta(&self) -> Result<CachedIndexMeta> {
         let stamp = metadata_db_stamp(&self.metadata_path);
         {
             let cached = self
@@ -292,29 +292,24 @@ impl SearchStores {
             if let Some(cached) = cached.as_ref()
                 && cached.stamp == stamp
             {
-                return Ok((
-                    cached.model_name.clone(),
-                    cached.embedding_dim.clone(),
-                    cached.document_prefix.clone(),
-                ));
+                return Ok(cached.clone());
             }
         }
         let store = MetadataStore::open(&self.metadata_path)
             .context("failed to open metadata store for index meta")?;
-        let model_name = store.get_index_meta("model_name")?;
-        let embedding_dim = store.get_index_meta("embedding_dim")?;
-        let document_prefix = store.get_index_meta("document_prefix")?;
+        let meta = CachedIndexMeta {
+            stamp,
+            model_name: store.get_index_meta("model_name")?,
+            embedding_dim: store.get_index_meta("embedding_dim")?,
+            document_prefix: store.get_index_meta("document_prefix")?,
+            full_text_only: crate::indexing::pipeline::store_is_full_text_only(&store)?,
+        };
         let mut cached = self
             .cached_index_meta
             .lock()
             .map_err(|_| anyhow::anyhow!("index meta cache lock poisoned"))?;
-        *cached = Some(CachedIndexMeta {
-            stamp,
-            model_name: model_name.clone(),
-            embedding_dim: embedding_dim.clone(),
-            document_prefix: document_prefix.clone(),
-        });
-        Ok((model_name, embedding_dim, document_prefix))
+        *cached = Some(meta.clone());
+        Ok(meta)
     }
 
     pub(crate) fn is_open_stamp_current(&self) -> bool {

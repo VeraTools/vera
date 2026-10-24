@@ -110,6 +110,19 @@ pub(super) fn cached_search_context(
     Ok(context)
 }
 
+/// Search context for full-text-only indexes. Kept apart from the embedding
+/// context so a keyword index never loads a model and alternating between
+/// index kinds does not rebuild either context.
+pub(super) fn keyword_search_context() -> Arc<vera_core::retrieval::search_service::SearchContext> {
+    static CONTEXT: OnceLock<Arc<vera_core::retrieval::search_service::SearchContext>> =
+        OnceLock::new();
+    Arc::clone(
+        CONTEXT.get_or_init(|| {
+            Arc::new(vera_core::retrieval::search_service::SearchContext::bm25_only())
+        }),
+    )
+}
+
 fn search_context_key(
     config: &vera_core::config::VeraConfig,
     backend: vera_core::config::InferenceBackend,

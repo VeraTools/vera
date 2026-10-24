@@ -314,6 +314,9 @@ pub enum Commands {
     Index {
         /// Path to the directory to index.
         path: String,
+        /// Build a keyword (BM25) index without embeddings.
+        #[arg(long)]
+        full_text_only: bool,
         #[command(flatten)]
         backend: crate::helpers::LocalBackendFlags,
         /// Exclude files matching this glob pattern (repeatable).
