@@ -10,7 +10,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 - `vera grep` accepts `-C` as the short form of `--context`.
 - `vera watch` run from a subdirectory watches the index that covers it, as `vera update` already did. Stale-index warnings after `vera -C` name the command that refreshes that index.
 - Re-indexing a directory that no longer has any indexable files removes its old index instead of leaving stale results behind.
-- Incremental updates no longer fail now and then with a BM25 "lock busy" error when another thread of the same process has just started a child process, as `vera watch` and the MCP server do.
+- Incremental updates no longer fail now and then with a BM25 "lock busy" error when another thread of the same process starts a child process (such as `git`) at the same moment.
 - Piping output into a command that exits early, such as `vera stats | head -1`, now ends quietly instead of panicking (Linux and macOS).
 - Updates tokio to 1.54.1 for RUSTSEC-2026-0386.
 
