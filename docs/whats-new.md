@@ -2,6 +2,17 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.2.0
+
+- `vera index --full-text-only` builds a keyword (BM25) index without embeddings, so large trees such as a dependency cache index quickly with no model or API calls. Search, grep, structural queries, and the MCP tools all work on it. See [keyword-only index](features.md#keyword-only-index).
+- `vera index <path> --dry-run` reports the files, size, estimated chunks, and rough indexing time for a directory without writing an index. See [dry run](features.md#dry-run).
+- `vera -C <dir>` runs a command as if started in `<dir>`, like `git -C`, so you can query a second index (for example `vera -C ~/.cargo/registry/src search "retry backoff"`) without leaving your project. MCP tools take a matching optional `repo` argument; a `repo` other than the server's directory must already be indexed. See [querying another index](features.md#querying-another-index).
+- `vera grep` accepts `-C` as the short form of `--context`.
+- `vera watch` run from a subdirectory watches the index that covers it, as `vera update` already did. Stale-index warnings after `vera -C` name the command that refreshes that index.
+- Re-indexing a directory that no longer has any indexable files removes its old index instead of leaving stale results behind.
+- Piping output into a command that exits early, such as `vera stats | head -1`, now ends quietly instead of panicking (Linux and macOS).
+- Updates tokio to 1.54.1 for RUSTSEC-2026-0386.
+
 ## v2.1.5
 
 - Agent guidance now allows normal search tools when no index exists and explains long first-index runs and reusing finished API-mode embeddings. Index-required commands share the same no-index guidance.
