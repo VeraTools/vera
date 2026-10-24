@@ -11,8 +11,8 @@ use vera_core::indexing::IndexProgress;
 
 use crate::helpers::{
     EmbeddingReporter, cancel_task_on_signal, finalize_progress_ui, handle_embedding_done,
-    print_human_summary, render_embed_display, stop_embed_spinner_on_parsing_done,
-    wait_for_interrupt,
+    print_human_summary, print_index_estimate, render_embed_display,
+    stop_embed_spinner_on_parsing_done, wait_for_interrupt,
 };
 use crate::state;
 
@@ -25,6 +25,7 @@ pub struct CommandOptions {
     pub verbose: bool,
     pub low_vram: bool,
     pub full_text_only: bool,
+    pub dry_run: bool,
 }
 
 impl CommandOptions {
@@ -38,6 +39,7 @@ impl CommandOptions {
             verbose: false,
             low_vram: false,
             full_text_only: false,
+            dry_run: false,
         }
     }
 }
@@ -46,7 +48,9 @@ impl CommandOptions {
 pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Result<()> {
     let verbose = options.verbose;
     let full_text_only = options.full_text_only;
-    let summary = execute(path, json_output, options)?;
+    let Some(summary) = execute(path, json_output, options)? else {
+        return Ok(());
+    };
 
     if json_output {
         let json = serde_json::to_string_pretty(&summary)
@@ -59,12 +63,12 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     Ok(())
 }
 
-/// Index a repository and return the resulting summary.
+/// Index a repository and return its summary, or print a dry-run report.
 pub fn execute(
     path: &str,
     json_output: bool,
     options: CommandOptions,
-) -> anyhow::Result<vera_core::indexing::IndexSummary> {
+) -> anyhow::Result<Option<vera_core::indexing::IndexSummary>> {
     let CommandOptions {
         backend,
         exclude,
@@ -73,6 +77,7 @@ pub fn execute(
         no_progress,
         low_vram,
         full_text_only,
+        dry_run,
         ..
     } = options;
     let repo_path = Path::new(path);
@@ -110,6 +115,21 @@ pub fn execute(
             .context("failed to create embedding provider; --full-text-only builds a keyword (BM25) index without embeddings")?;
         (Some(Arc::new(provider)), model_name)
     };
+    if dry_run {
+        let estimate = rt.block_on(vera_core::indexing::estimate_index(
+            repo_path,
+            provider.as_deref(),
+            &config,
+        ))?;
+        if json_output {
+            let mut json = serde_json::to_value(&estimate)?;
+            json["path"] = path.into();
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else {
+            print_index_estimate(path, &estimate, full_text_only);
+        }
+        return Ok(None);
+    }
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
 
     // Show the progress display only for interactive, non-JSON runs. Mirrors
@@ -145,7 +165,7 @@ pub fn execute(
             |_| {},
         ));
         reporter.print_failure(&result);
-        return result.context("indexing failed");
+        return result.context("indexing failed").map(Some);
     }
 
     let multi = cliclack::multi_progress("Indexing...");
@@ -232,5 +252,5 @@ pub fn execute(
     finalize_progress_ui(&result, &parse_spinner, &embed_spinner, &embed_bar, &multi);
     reporter.print_failure(&result);
 
-    result.context("indexing failed")
+    result.context("indexing failed").map(Some)
 }

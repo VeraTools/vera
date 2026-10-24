@@ -7,6 +7,7 @@
 //! - Incremental update logic (detect changed files, re-index only those)
 
 pub(crate) mod checkpoint;
+pub mod estimate;
 pub mod freshness;
 mod git_exclude;
 pub mod lock;
@@ -17,6 +18,7 @@ pub mod update;
 
 pub use telemetry::PhaseSecs;
 
+pub use estimate::{IndexEstimate, estimate_index};
 pub use freshness::{IndexFreshness, detect_staleness};
 pub use pipeline::{
     FULL_TEXT_ONLY_MODE, FileError, INDEX_MODE_KEY, IndexProgress, IndexSummary, index_dir,
