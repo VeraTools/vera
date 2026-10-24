@@ -129,6 +129,14 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+### Dry run
+
+```bash
+vera index . --dry-run
+```
+
+Report files, bytes, estimated chunks, and rough indexing time without writing an index. Parsing and embedding are timed on samples, so API timings vary; add `--full-text-only` to estimate keyword-only indexing without loading an embedding model.
+
 ### Keyword-only index
 
 ```bash

@@ -194,6 +194,7 @@ fn main() {
         Commands::Index {
             path,
             full_text_only,
+            dry_run,
             backend,
             exclude,
             no_ignore,
@@ -215,6 +216,7 @@ fn main() {
                     verbose,
                     low_vram,
                     full_text_only,
+                    dry_run,
                 },
             )
         }

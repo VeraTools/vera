@@ -900,7 +900,7 @@ fn store_worker(
     clippy::type_complexity,
     reason = "One parse window returns aligned chunks, errors, hashes, references, relations, and file states."
 )]
-fn parse_discovered_files_parallel(
+pub(crate) fn parse_discovered_files_parallel(
     discovery: &DiscoveryResult,
     files: &[discovery::DiscoveredFile],
     repo_root: &Path,

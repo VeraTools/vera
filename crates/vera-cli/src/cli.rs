@@ -310,6 +310,7 @@ pub enum Commands {
                       Examples:\n  \
                       vera index .                  # Index current directory\n  \
                       vera index /path/to/repo      # Index a specific repo\n  \
+                      vera index . --dry-run        # Estimate work without writing an index\n  \
                       vera index . --json           # Output summary as JSON")]
     Index {
         /// Path to the directory to index.
@@ -317,6 +318,9 @@ pub enum Commands {
         /// Build a keyword (BM25) index without embeddings.
         #[arg(long)]
         full_text_only: bool,
+        /// Report files, estimated chunks, and rough indexing time without writing an index.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         backend: crate::helpers::LocalBackendFlags,
         /// Exclude files matching this glob pattern (repeatable).

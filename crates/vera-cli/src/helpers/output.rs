@@ -399,6 +399,61 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_duration(seconds: f64) -> String {
+    if seconds < 1.0 {
+        "<1s".to_string()
+    } else if seconds < 60.0 {
+        format!("{seconds:.0}s")
+    } else if seconds < 3600.0 {
+        format!("{:.0}m", seconds / 60.0)
+    } else {
+        format!("{:.1}h", seconds / 3600.0)
+    }
+}
+
+pub fn print_index_estimate(
+    path: &str,
+    estimate: &vera_core::indexing::IndexEstimate,
+    full_text_only: bool,
+) {
+    let skipped = if estimate.binary_skipped == 0 && estimate.large_skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {} binary and {} oversized files skipped",
+            estimate.binary_skipped, estimate.large_skipped
+        )
+    };
+    println!("Dry run for {path}: nothing was written.");
+    println!(
+        "  Files:            {} ({}{skipped})",
+        estimate.total_files,
+        format_bytes(estimate.total_bytes)
+    );
+    println!(
+        "  Estimated chunks: about {} (from {} sampled files)",
+        estimate.estimated_chunks, estimate.sampled_files
+    );
+    let parsing = format_duration(estimate.estimated_parse_secs);
+    let detail = if full_text_only {
+        "keyword-only, no embedding".to_string()
+    } else if let Some(embedding) = estimate.estimated_embedding_secs {
+        format!(
+            "parsing {parsing}, embedding {} from {} timed chunks",
+            format_duration(embedding),
+            estimate.embedded_sample_chunks
+        )
+    } else {
+        format!("parsing {parsing}, no chunks to embed")
+    };
+    println!(
+        "  Estimated time:   about {} ({detail})",
+        format_duration(
+            estimate.estimated_parse_secs + estimate.estimated_embedding_secs.unwrap_or(0.0)
+        )
+    );
+}
+
 /// Print a human-readable summary of the indexing run.
 ///
 /// When `verbose` is true, individual file paths are listed for skipped-file
