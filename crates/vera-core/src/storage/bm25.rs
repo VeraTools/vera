@@ -112,16 +112,6 @@ impl Bm25Index {
         })
     }
 
-    /// Insert a batch of documents into the index.
-    ///
-    /// Each document is a tuple of (chunk_id, file_path, content, symbol_name, language).
-    ///
-    /// The per-call cost is the writer lifecycle: allocating a
-    /// `WRITER_HEAP_SIZE` writer, committing a segment and joining the merge
-    /// threads costs on the order of tens of milliseconds regardless of batch
-    /// size. Incremental updates batch many files into one call; full builds
-    /// must use [`Bm25Index::begin_bulk_build`] instead of calling this once
-    /// per window.
     /// Create a Tantivy writer, retrying briefly while its lock is busy.
     ///
     /// Tantivy takes the writer lock with a non-blocking `flock`. A child
@@ -142,6 +132,16 @@ impl Bm25Index {
         }
     }
 
+    /// Insert a batch of documents into the index.
+    ///
+    /// Each document is a tuple of (chunk_id, file_path, content, symbol_name, language).
+    ///
+    /// The per-call cost is the writer lifecycle: allocating a
+    /// `WRITER_HEAP_SIZE` writer, committing a segment and joining the merge
+    /// threads costs on the order of tens of milliseconds regardless of batch
+    /// size. Incremental updates batch many files into one call; full builds
+    /// must use [`Bm25Index::begin_bulk_build`] instead of calling this once
+    /// per window.
     pub fn insert_batch(&self, docs: &[Bm25Document<'_>]) -> Result<()> {
         let mut writer: IndexWriter = self
             .writer()
@@ -495,26 +495,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writers_survive_lock_files_inherited_by_spawned_processes() {
+    fn writer_waits_for_a_briefly_held_lock() {
+        // Stands in for a lock file inherited by a child process that has
+        // not exec'd yet: the lock is held outside any Vera writer.
         let dir = tempfile::tempdir().unwrap();
         let index = Bm25Index::open(dir.path()).unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let spawner = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = std::process::Command::new("true").status();
-                }
-            })
-        };
-        let results: Vec<_> = (0..100)
-            .map(|_| index.insert_batch(&sample_docs()))
-            .collect();
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        spawner.join().unwrap();
-        for result in results {
-            result.unwrap();
-        }
+        let held = tantivy::Directory::acquire_lock(
+            index.index.directory(),
+            &tantivy::directory::INDEX_WRITER_LOCK,
+        )
+        .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        index.insert_batch(&sample_docs()).unwrap();
+        release.join().unwrap();
     }
 
     fn sample_docs() -> Vec<Bm25Document<'static>> {
