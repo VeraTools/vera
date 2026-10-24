@@ -200,7 +200,7 @@ fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult
     let cwd = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
         .map_err(|e| ToolCallResult::error(format!("Failed to get working directory: {e}")))?;
-    let root = match repo {
+    let root = match repo.filter(|value| !value.is_null()) {
         Some(value) => {
             let path = value
                 .as_str()
@@ -218,7 +218,7 @@ fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult
         )));
     }
     let is_server_repo = root == cwd;
-    if !is_server_repo && !vera_core::indexing::index_dir(&root).is_dir() {
+    if !is_server_repo && !vera_core::indexing::index_exists(&root) {
         return Err(ToolCallResult::error(format!(
             "No index found at {}. Run `vera index {}` first.",
             root.display(),
@@ -475,7 +475,11 @@ fn fuse_multi_query_results(
 
 /// Handle the `get_stats` tool.
 fn handle_get_stats(args: &Value) -> ToolCallResult {
-    let repo = match resolve_repository(args.get("repo").or_else(|| args.get("path"))) {
+    let repo = match resolve_repository(
+        args.get("repo")
+            .filter(|value| !value.is_null())
+            .or_else(|| args.get("path")),
+    ) {
         Ok(repo) => repo,
         Err(e) => return e,
     };
@@ -490,7 +494,11 @@ fn handle_get_stats(args: &Value) -> ToolCallResult {
 
 /// Handle the `get_overview` tool.
 fn handle_get_overview(args: &Value) -> ToolCallResult {
-    let repo = match resolve_repository(args.get("repo").or_else(|| args.get("path"))) {
+    let repo = match resolve_repository(
+        args.get("repo")
+            .filter(|value| !value.is_null())
+            .or_else(|| args.get("path")),
+    ) {
         Ok(repo) => repo,
         Err(e) => return e,
     };
@@ -827,8 +835,18 @@ mod tests {
             assert!(!result.is_error, "{tool}: {:?}", result.content);
         }
         for tool in ["get_stats", "get_overview"] {
-            let result = handle_tool_call(tool, &serde_json::json!({"path": dir.path()}));
-            assert!(!result.is_error, "{tool}: {:?}", result.content);
+            for args in [
+                serde_json::json!({"path": dir.path()}),
+                serde_json::json!({"repo": null, "path": dir.path()}),
+                serde_json::json!({"repo": dir.path(), "path": null}),
+            ] {
+                let result = handle_tool_call(tool, &args);
+                assert!(!result.is_error, "{tool}: {:?}", result.content);
+            }
+            let absent = handle_tool_call(tool, &serde_json::json!({}));
+            let null = handle_tool_call(tool, &serde_json::json!({"repo": null, "path": null}));
+            assert_eq!(null.is_error, absent.is_error);
+            assert_eq!(null.content[0].text, absent.content[0].text);
         }
         let result = handle_tool_call(
             "find_references",
@@ -850,31 +868,43 @@ mod tests {
             "symbol": "dependency_marker",
             "path": "src/dependency.rs",
         });
-        for tool in [
-            "search_code",
-            "get_stats",
-            "get_overview",
-            "regex_search",
-            "structural_search",
-            "find_references",
-            "explain_path",
-        ] {
-            let result = handle_tool_call(tool, &args);
-            assert!(result.is_error, "{tool}");
-            assert_eq!(
-                result.content[0].text,
-                format!(
-                    "No index found at {}. Run `vera index {}` first.",
-                    root.display(),
-                    root.display()
-                ),
-                "{tool}"
-            );
-            assert!(
-                !dir.path().join(".vera").exists(),
-                "{tool} created an index"
-            );
-            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        for empty_index_dir in [false, true] {
+            if empty_index_dir {
+                std::fs::create_dir(root.join(".vera")).unwrap();
+            }
+            for tool in [
+                "search_code",
+                "get_stats",
+                "get_overview",
+                "regex_search",
+                "structural_search",
+                "find_references",
+                "explain_path",
+            ] {
+                let result = handle_tool_call(tool, &args);
+                assert!(result.is_error, "{tool}");
+                assert_eq!(
+                    result.content[0].text,
+                    format!(
+                        "No index found at {}. Run `vera index {}` first.",
+                        root.display(),
+                        root.display()
+                    ),
+                    "{tool}"
+                );
+                assert_eq!(root.join(".vera").exists(), empty_index_dir, "{tool}");
+                assert_eq!(
+                    std::fs::read_dir(&root).unwrap().count(),
+                    usize::from(empty_index_dir)
+                );
+                if empty_index_dir {
+                    assert_eq!(
+                        std::fs::read_dir(root.join(".vera")).unwrap().count(),
+                        0,
+                        "{tool}"
+                    );
+                }
+            }
         }
     }
 
@@ -883,6 +913,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
         for value in [
             None,
+            Some(Value::Null),
             Some(serde_json::json!(".")),
             Some(serde_json::json!(cwd)),
         ] {
@@ -922,9 +953,12 @@ mod tests {
         assert_eq!(result.content[0].text, results);
         assert_eq!(
             result.content[1].text,
-            "warning: index may be stale: 1 modified. \
+            format!(
+                "warning: index may be stale: 1 modified. \
              Search and grep only cover indexed files. \
-             Run `vera update .` or `vera watch .`."
+             Run `vera -C {root} update .` or `vera -C {root} watch .`.",
+                root = dir.path().canonicalize().unwrap().display()
+            )
         );
     }
 

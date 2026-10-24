@@ -78,6 +78,7 @@ fn main() {
         );
         process::exit(1);
     }
+    helpers::set_directory_override(cli.directory.is_some());
     if let Err(err) = state::apply_saved_env() {
         // Diagnose/repair commands must still run against a broken saved
         // config; everything else keeps failing fast with the parse error.
