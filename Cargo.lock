@@ -4168,6 +4168,7 @@ dependencies = [
  "cliclack",
  "console 0.16.6",
  "dirs",
+ "libc",
  "reqwest",
  "semver",
  "serde",
