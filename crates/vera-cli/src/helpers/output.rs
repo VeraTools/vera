@@ -424,7 +424,7 @@ pub fn print_index_estimate(
             estimate.binary_skipped, estimate.large_skipped
         )
     };
-    println!("Dry run for {path}: nothing was written.");
+    println!("Dry run for {path}: no index was written.");
     println!(
         "  Files:            {} ({}{skipped})",
         estimate.total_files,
