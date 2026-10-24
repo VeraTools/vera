@@ -12,9 +12,9 @@ fn full_text_only_commands_need_no_embedding_configuration() {
         "pub fn keyword_target() {}\npub fn caller() { keyword_target(); }\n",
     )
     .unwrap();
-    let run = |args: &[&str]| {
+    let run_from = |cwd: &std::path::Path, args: &[&str]| {
         let output = Command::new(env!("CARGO_BIN_EXE_vera"))
-            .current_dir(&repo)
+            .current_dir(cwd)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", dir.path().join("home"))
@@ -38,10 +38,23 @@ fn full_text_only_commands_need_no_embedding_configuration() {
         assert!(!stderr.contains("embedding provider"), "{stderr}");
         output
     };
+    let run = |args: &[&str]| run_from(&repo, args);
     let output = run(&["index", ".", "--full-text-only", "--json"]);
     let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(summary["embeddings_generated"], 0);
     assert_eq!(summary["embedding_requests"], 0);
+    for args in [
+        vec!["-C", repo.to_str().unwrap(), "grep", "keyword_target"],
+        vec!["-C", "repo", "grep", "keyword_target", "-C", "1"],
+        vec!["--directory", "repo", "grep", "keyword_target", "-C", "3"],
+    ] {
+        let output = run_from(dir.path(), &args);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("keyword_target"));
+    }
+    assert!(
+        String::from_utf8_lossy(&run(&["grep", "keyword_target", "-C", "0"]).stdout)
+            .contains("keyword_target")
+    );
     assert!(
         String::from_utf8_lossy(&run(&["search", "keyword_target"]).stdout)
             .contains("keyword_target")

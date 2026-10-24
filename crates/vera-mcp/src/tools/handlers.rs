@@ -179,9 +179,56 @@ fn scope_from_args(args: &Value) -> Result<Option<vera_core::types::SearchScope>
     }
 }
 
-fn current_working_dir() -> Result<std::path::PathBuf, ToolCallResult> {
-    std::env::current_dir()
-        .map_err(|e| ToolCallResult::error(format!("Failed to get working directory: {e}")))
+struct Repository {
+    root: std::path::PathBuf,
+    is_server_repo: bool,
+}
+
+impl Repository {
+    fn search_index_dir(&self) -> Result<std::path::PathBuf, ToolCallResult> {
+        if self.is_server_repo {
+            ensure_index_and_watcher(&self.root)
+        } else {
+            // The resolver requires an existing index for secondary repositories.
+            existing_index_dir(&self.root)
+        }
+    }
+}
+
+/// Resolve a repository without changing the server's process-wide directory.
+fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult> {
+    let cwd = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .map_err(|e| ToolCallResult::error(format!("Failed to get working directory: {e}")))?;
+    let root = match repo {
+        Some(value) => {
+            let path = value
+                .as_str()
+                .ok_or_else(|| ToolCallResult::error("Parameter 'repo' must be a string"))?;
+            cwd.join(path).canonicalize().map_err(|err| {
+                ToolCallResult::error(format!("Cannot resolve repository {path}: {err}"))
+            })?
+        }
+        None => cwd.clone(),
+    };
+    if !root.is_dir() {
+        return Err(ToolCallResult::error(format!(
+            "Repository is not a directory: {}",
+            root.display()
+        )));
+    }
+    let is_server_repo = root == cwd;
+    if !is_server_repo && !vera_core::indexing::index_dir(&root).is_dir() {
+        return Err(ToolCallResult::error(format!(
+            "No index found at {}. Run `vera index {}` first.",
+            root.display(),
+            root.display()
+        )));
+    }
+    Ok(Repository {
+        root,
+        is_server_repo,
+    })
 }
 
 fn exact_paths_from_args(
@@ -315,14 +362,14 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
     config.adjust_for_backend(backend);
     let result_limit = limit.unwrap_or(config.retrieval.default_limit);
 
-    let cwd = match current_working_dir() {
-        Ok(cwd) => cwd,
+    let repo = match resolve_repository(args.get("repo")) {
+        Ok(repo) => repo,
         Err(err) => return err,
     };
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repo.root, &mut filters) {
         return err;
     }
-    let index_dir = match ensure_index_and_watcher(&cwd) {
+    let index_dir = match repo.search_index_dir() {
         Ok(index_dir) => index_dir,
         Err(err) => return err,
     };
@@ -394,7 +441,7 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
 
     match compact_results_json(&all_results, MCP_OUTPUT_BUDGET, signatures_only) {
         Ok(json) => results_with_notices(
-            &cwd,
+            &repo.root,
             json,
             degraded_search_notices(&timings, queries.len() > 1),
         ),
@@ -426,28 +473,13 @@ fn fuse_multi_query_results(
     )
 }
 
-/// Resolve an optional path argument to a validated directory path.
-fn resolve_repo_path(args: &Value) -> Result<std::path::PathBuf, ToolCallResult> {
-    let repo_path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => std::path::PathBuf::from(p),
-        None => current_working_dir()?,
-    };
-    if !repo_path.exists() {
-        return Err(ToolCallResult::error(format!(
-            "Path does not exist: {}",
-            repo_path.display()
-        )));
-    }
-    Ok(repo_path)
-}
-
 /// Handle the `get_stats` tool.
 fn handle_get_stats(args: &Value) -> ToolCallResult {
-    let repo_path = match resolve_repo_path(args) {
-        Ok(p) => p,
+    let repo = match resolve_repository(args.get("repo").or_else(|| args.get("path"))) {
+        Ok(repo) => repo,
         Err(e) => return e,
     };
-    match vera_core::stats::collect_stats(&repo_path) {
+    match vera_core::stats::collect_stats(&repo.root) {
         Ok(stats) => match serde_json::to_string_pretty(&stats) {
             Ok(json) => ToolCallResult::success(json),
             Err(e) => ToolCallResult::error(format!("Failed to serialize stats: {e}")),
@@ -458,12 +490,12 @@ fn handle_get_stats(args: &Value) -> ToolCallResult {
 
 /// Handle the `get_overview` tool.
 fn handle_get_overview(args: &Value) -> ToolCallResult {
-    let repo_path = match resolve_repo_path(args) {
-        Ok(p) => p,
+    let repo = match resolve_repository(args.get("repo").or_else(|| args.get("path"))) {
+        Ok(repo) => repo,
         Err(e) => return e,
     };
     let exact_paths = match git_scope_from_args(args) {
-        Ok(Some(scope)) => match vera_core::git_scope::resolve_scope(&repo_path, &scope) {
+        Ok(Some(scope)) => match vera_core::git_scope::resolve_scope(&repo.root, &scope) {
             Ok(paths) => Some(paths),
             Err(err) => {
                 return ToolCallResult::error(format!("Failed to resolve git scope: {err}"));
@@ -472,9 +504,9 @@ fn handle_get_overview(args: &Value) -> ToolCallResult {
         Ok(None) => None,
         Err(err) => return ToolCallResult::error(err),
     };
-    match vera_core::stats::collect_overview_filtered(&repo_path, exact_paths.as_ref()) {
+    match vera_core::stats::collect_overview_filtered(&repo.root, exact_paths.as_ref()) {
         Ok(overview) => match serde_json::to_string_pretty(&overview) {
-            Ok(json) => results_with_staleness(&repo_path, json),
+            Ok(json) => results_with_staleness(&repo.root, json),
             Err(e) => ToolCallResult::error(format!("Failed to serialize overview: {e}")),
         },
         Err(e) => ToolCallResult::error(format!("Failed to collect overview: {e}")),
@@ -507,17 +539,17 @@ fn handle_regex_search(args: &Value) -> ToolCallResult {
         .map(|v| v as usize)
         .unwrap_or(2);
 
-    let cwd = match current_working_dir() {
-        Ok(cwd) => cwd,
+    let repo = match resolve_repository(args.get("repo")) {
+        Ok(repo) => repo,
         Err(err) => return err,
     };
-    let index_dir = match existing_index_dir(&cwd) {
+    let index_dir = match existing_index_dir(&repo.root) {
         Ok(index_dir) => index_dir,
         Err(err) => return err,
     };
 
     let mut filters = regex_search_filters(args, scope);
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repo.root, &mut filters) {
         return err;
     }
 
@@ -535,7 +567,7 @@ fn handle_regex_search(args: &Value) -> ToolCallResult {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                Ok(json) => results_with_staleness(&cwd, json),
+                Ok(json) => results_with_staleness(&repo.root, json),
                 Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
             }
         }
@@ -565,17 +597,17 @@ fn handle_structural_search(args: &Value) -> ToolCallResult {
         .unwrap_or(20);
     let query = args.get("query").and_then(|v| v.as_str());
 
-    let cwd = match current_working_dir() {
-        Ok(cwd) => cwd,
+    let repo = match resolve_repository(args.get("repo")) {
+        Ok(repo) => repo,
         Err(err) => return err,
     };
 
     let mut filters = search_code_filters(args, scope);
-    if let Err(err) = apply_git_scope_filters(args, &cwd, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repo.root, &mut filters) {
         return err;
     }
 
-    let index_dir = match ensure_index_and_watcher(&cwd) {
+    let index_dir = match repo.search_index_dir() {
         Ok(index_dir) => index_dir,
         Err(err) => return err,
     };
@@ -587,7 +619,7 @@ fn handle_structural_search(args: &Value) -> ToolCallResult {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                Ok(json) => results_with_staleness(&cwd, json),
+                Ok(json) => results_with_staleness(&repo.root, json),
                 Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
             }
         }
@@ -611,29 +643,29 @@ fn handle_find_references(args: &Value) -> ToolCallResult {
         .map(|v| v as usize)
         .unwrap_or(20);
 
-    let cwd = match current_working_dir() {
-        Ok(cwd) => cwd,
+    let repo = match resolve_repository(args.get("repo")) {
+        Ok(repo) => repo,
         Err(err) => return err,
     };
 
-    let exact_paths = match exact_paths_from_args(args, &cwd) {
+    let exact_paths = match exact_paths_from_args(args, &repo.root) {
         Ok(paths) => paths,
         Err(err) => return err,
     };
-    let index_dir = match ensure_index_and_watcher(&cwd) {
+    let index_dir = match repo.search_index_dir() {
         Ok(index_dir) => index_dir,
         Err(err) => return err,
     };
 
     if callees {
-        match vera_core::stats::find_callees(&cwd, symbol) {
+        match vera_core::stats::find_callees(&repo.root, symbol) {
             Ok(mut results) => {
                 if let Some(paths) = exact_paths.as_ref() {
                     results.retain(|result| paths.contains(&result.file_path));
                 }
                 results.truncate(limit);
                 match serde_json::to_string(&results) {
-                    Ok(json) => results_with_staleness(&cwd, json),
+                    Ok(json) => results_with_staleness(&repo.root, json),
                     Err(err) => {
                         ToolCallResult::error(format!("Failed to serialize references: {err}"))
                     }
@@ -655,7 +687,7 @@ fn handle_find_references(args: &Value) -> ToolCallResult {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 match compact_results_json(&results, MCP_OUTPUT_BUDGET, signatures_only) {
-                    Ok(json) => results_with_staleness(&cwd, json),
+                    Ok(json) => results_with_staleness(&repo.root, json),
                     Err(err) => {
                         ToolCallResult::error(format!("Failed to serialize references: {err}"))
                     }
@@ -672,8 +704,8 @@ fn handle_explain_path(args: &Value) -> ToolCallResult {
         None => return ToolCallResult::error("Missing required parameter: path"),
     };
 
-    let cwd = match current_working_dir() {
-        Ok(cwd) => cwd,
+    let repo = match resolve_repository(args.get("repo")) {
+        Ok(repo) => repo,
         Err(err) => return err,
     };
 
@@ -694,7 +726,11 @@ fn handle_explain_path(args: &Value) -> ToolCallResult {
         );
     }
 
-    match vera_core::discovery::explain_path(&cwd, std::path::Path::new(path), &config.indexing) {
+    match vera_core::discovery::explain_path(
+        &repo.root,
+        std::path::Path::new(path),
+        &config.indexing,
+    ) {
         Ok(explanation) => match serde_json::to_string_pretty(&explanation) {
             Ok(json) => ToolCallResult::success(json),
             Err(e) => ToolCallResult::error(format!("Failed to serialize explanation: {e}")),
@@ -708,6 +744,166 @@ mod tests {
     use super::*;
 
     use crate::test_support::repo_indexed_as;
+
+    fn temporary_repo() -> tempfile::TempDir {
+        let scratch =
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        tempfile::tempdir_in(scratch).unwrap()
+    }
+
+    fn keyword_repo() -> tempfile::TempDir {
+        let dir = temporary_repo();
+        crate::test_support::write_file(
+            dir.path(),
+            "src/dependency.rs",
+            "pub fn dependency_marker() {}\npub fn dependency_caller() { dependency_marker(); }\n",
+        );
+        search_runtime()
+            .unwrap()
+            .block_on(
+                vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+                    dir.path(),
+                    None::<&vera_core::embedding::DynamicProvider>,
+                    &vera_core::config::VeraConfig::default(),
+                    "",
+                    |_| {},
+                    &vera_core::CancellationToken::new(),
+                ),
+            )
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn search_tools_query_a_secondary_keyword_index() {
+        let dir = keyword_repo();
+        for (tool, mut args) in [
+            (
+                "regex_search",
+                serde_json::json!({"pattern": "dependency_marker"}),
+            ),
+            (
+                "search_code",
+                serde_json::json!({"query": "dependency_marker"}),
+            ),
+            (
+                "structural_search",
+                serde_json::json!({"kind": "definitions", "query": "dependency_marker"}),
+            ),
+            (
+                "find_references",
+                serde_json::json!({"symbol": "dependency_marker"}),
+            ),
+        ] {
+            args["repo"] = serde_json::json!(dir.path());
+            let result = handle_tool_call(tool, &args);
+            assert!(!result.is_error, "{tool}: {:?}", result.content);
+            let hits: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            let hits = hits.as_array().unwrap();
+            assert!(!hits.is_empty(), "{tool}: no hits");
+            assert!(
+                hits.iter()
+                    .all(|hit| hit["file_path"] == "src/dependency.rs")
+            );
+            assert!(hits.iter().any(|hit| {
+                hit["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("dependency_marker")
+            }));
+            assert_eq!(result.content.len(), 1, "{tool}: {:?}", result.content);
+        }
+    }
+
+    #[test]
+    fn secondary_repo_metadata_and_path_tools_use_its_root() {
+        let dir = keyword_repo();
+        for tool in ["get_stats", "get_overview", "explain_path"] {
+            let result = handle_tool_call(
+                tool,
+                &serde_json::json!({"repo": dir.path(), "path": "src/dependency.rs"}),
+            );
+            assert!(!result.is_error, "{tool}: {:?}", result.content);
+        }
+        for tool in ["get_stats", "get_overview"] {
+            let result = handle_tool_call(tool, &serde_json::json!({"path": dir.path()}));
+            assert!(!result.is_error, "{tool}: {:?}", result.content);
+        }
+        let result = handle_tool_call(
+            "find_references",
+            &serde_json::json!({"repo": dir.path(), "symbol": "dependency_caller", "callees": true}),
+        );
+        assert!(!result.is_error, "{:?}", result.content);
+        assert!(result.content[0].text.contains("dependency_marker"));
+    }
+
+    #[test]
+    fn unindexed_secondary_repo_is_never_created() {
+        let dir = temporary_repo();
+        let root = dir.path().canonicalize().unwrap();
+        let args = serde_json::json!({
+            "repo": dir.path(),
+            "query": "dependency_marker",
+            "pattern": "dependency_marker",
+            "kind": "definitions",
+            "symbol": "dependency_marker",
+            "path": "src/dependency.rs",
+        });
+        for tool in [
+            "search_code",
+            "get_stats",
+            "get_overview",
+            "regex_search",
+            "structural_search",
+            "find_references",
+            "explain_path",
+        ] {
+            let result = handle_tool_call(tool, &args);
+            assert!(result.is_error, "{tool}");
+            assert_eq!(
+                result.content[0].text,
+                format!(
+                    "No index found at {}. Run `vera index {}` first.",
+                    root.display(),
+                    root.display()
+                ),
+                "{tool}"
+            );
+            assert!(
+                !dir.path().join(".vera").exists(),
+                "{tool} created an index"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn repository_resolution_recognizes_the_server_root() {
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        for value in [
+            None,
+            Some(serde_json::json!(".")),
+            Some(serde_json::json!(cwd)),
+        ] {
+            let repo = resolve_repository(value.as_ref()).unwrap();
+            assert!(repo.is_server_repo);
+            assert_eq!(repo.root, cwd);
+        }
+    }
+
+    #[test]
+    fn repository_resolution_rejects_files_and_invalid_arguments() {
+        let dir = temporary_repo();
+        crate::test_support::write_file(dir.path(), "src/dependency.rs", "");
+        for value in [
+            serde_json::json!(dir.path().join("missing")),
+            serde_json::json!(dir.path().join("src/dependency.rs")),
+            serde_json::json!(42),
+        ] {
+            assert!(resolve_repository(Some(&value)).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn stale_index_result_carries_the_warning_after_the_results() {

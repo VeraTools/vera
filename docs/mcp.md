@@ -16,15 +16,25 @@ For most coding agents, the CLI plus the skill installed by `vera agent install`
 | `find_references` | Callers or callees from Vera's stored reference data. |
 | `explain_path` | Why a path is or is not indexed: ignore rules, binary detection, size, or default exclusions. |
 
-If the project has no index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
+If the server's working directory has no index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
 
 A search result can include a second text block with warnings: the index is stale, semantic search was unavailable so results are keyword-only, or the reranker failed so results are not reranked. Each warning names its cause; see [Troubleshooting](troubleshooting.md#keyword-only-results).
+
+### Querying another index
+
+All seven tools accept an optional `repo` string: an existing repository root, absolute or relative to the server's working directory. Build its index first with `vera index <repo>`. For example, pass these arguments to `search_code`:
+
+```json
+{"repo":"/home/user/.cargo/registry/src","query":"retry backoff"}
+```
+
+A different repository is never auto-indexed or watched. Omitting `repo`, or selecting the server's working directory, keeps the normal auto-index and watcher behavior. Filters, relative file paths, and staleness checks use the selected repository. The existing project `path` argument on `get_stats` and `get_overview` remains supported; `repo` takes precedence.
 
 ## Client setup
 
 The server uses the backend saved by `vera setup`, unless `VERA_BACKEND` is set (the Docker images set it). Configure a backend first.
 
-The server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory.
+By default, the server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory.
 
 ### Claude Code
 
