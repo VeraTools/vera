@@ -4,7 +4,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 
 ## v2.2.0
 
-- `vera index --full-text-only` builds a keyword (BM25) index without embeddings, so large trees such as a dependency cache index quickly with no model or API calls. Search, grep, structural queries, and the MCP tools all work on it. See [keyword-only index](features.md#keyword-only-index).
+- `vera index <path> --full-text-only` builds a keyword (BM25) index without embeddings, so large trees such as a dependency cache index quickly with no model or API calls. Search, grep, structural queries, and the MCP tools all work on it. See [keyword-only index](features.md#keyword-only-index).
 - `vera index <path> --dry-run` reports the files, size, estimated chunks, and rough indexing time for a directory without writing an index. See [dry run](features.md#dry-run).
 - `vera -C <dir>` runs a command as if started in `<dir>`, like `git -C`, so you can query a second index (for example `vera -C ~/.cargo/registry/src search "retry backoff"`) without leaving your project. MCP tools take a matching optional `repo` argument; a `repo` other than the server's directory must already be indexed. See [querying another index](features.md#querying-another-index).
 - `vera grep` accepts `-C` as the short form of `--context`.
