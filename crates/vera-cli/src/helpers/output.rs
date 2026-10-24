@@ -394,8 +394,10 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} GB", b / GB)
     } else if b >= MB {
         format!("{:.1} MB", b / MB)
-    } else {
+    } else if b >= KB {
         format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -411,18 +413,20 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-pub fn print_index_estimate(
-    path: &str,
-    estimate: &vera_core::indexing::IndexEstimate,
-    full_text_only: bool,
-) {
-    let skipped = if estimate.binary_skipped == 0 && estimate.large_skipped == 0 {
+pub fn print_index_estimate(path: &str, estimate: &vera_core::indexing::IndexEstimate) {
+    let skipped: Vec<String> = [
+        (estimate.binary_skipped, "binary"),
+        (estimate.large_skipped, "oversized"),
+        (estimate.error_skipped, "unreadable"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, kind)| format!("{count} {kind}"))
+    .collect();
+    let skipped = if skipped.is_empty() {
         String::new()
     } else {
-        format!(
-            "; {} binary and {} oversized files skipped",
-            estimate.binary_skipped, estimate.large_skipped
-        )
+        format!("; {} files skipped", skipped.join(", "))
     };
     println!("Dry run for {path}: no index was written.");
     println!(
@@ -434,23 +438,24 @@ pub fn print_index_estimate(
         "  Estimated chunks: about {} (from {} sampled files)",
         estimate.estimated_chunks, estimate.sampled_files
     );
-    let parsing = format_duration(estimate.estimated_parse_secs);
-    let detail = if full_text_only {
-        "keyword-only, no embedding".to_string()
-    } else if let Some(embedding) = estimate.estimated_embedding_secs {
-        format!(
-            "parsing {parsing}, embedding {} from {} timed chunks",
+    let mut parts = vec![
+        format!("discovery {}", format_duration(estimate.discovery_secs)),
+        format!("parsing {}", format_duration(estimate.estimated_parse_secs)),
+    ];
+    if let Some(embedding) = estimate.estimated_embedding_secs {
+        parts.push(format!(
+            "embedding {} from {} timed chunks",
             format_duration(embedding),
             estimate.embedded_sample_chunks
-        )
-    } else {
-        format!("parsing {parsing}, no chunks to embed")
-    };
+        ));
+    }
+    let total = estimate.discovery_secs
+        + estimate.estimated_parse_secs
+        + estimate.estimated_embedding_secs.unwrap_or(0.0);
     println!(
-        "  Estimated time:   about {} ({detail})",
-        format_duration(
-            estimate.estimated_parse_secs + estimate.estimated_embedding_secs.unwrap_or(0.0)
-        )
+        "  Estimated time:   about {} ({}; index writes not included)",
+        format_duration(total),
+        parts.join(", ")
     );
 }
 

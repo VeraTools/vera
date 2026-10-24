@@ -135,7 +135,7 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 vera index . --dry-run
 ```
 
-Report files, bytes, estimated chunks, and rough indexing time without writing an index. Parsing and embedding are timed on samples, so the time is rough, especially with API backends. Without `--full-text-only`, the dry run loads the embedding model (downloading it on first use) to time it.
+Report files, bytes, estimated chunks, and rough indexing time without writing an index. Parsing and embedding are timed on samples, so the time is rough and leaves out index writes. Without `--full-text-only`, the dry run embeds up to 256 sampled chunks with your configured backend: a local model is loaded (and downloaded on first use), and an API backend receives those chunks like a normal index would send them.
 
 ### Keyword-only index
 

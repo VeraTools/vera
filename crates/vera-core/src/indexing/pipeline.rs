@@ -126,7 +126,7 @@ pub const FULL_TEXT_ONLY_MODE: &str = "full_text_only";
 const WINDOW_CHUNK_TARGET: usize = 2048;
 
 /// Keep each rayon parse group bounded while a window is being assembled.
-const MAX_PARSE_FILE_GROUP: usize = 64;
+pub(crate) const MAX_PARSE_FILE_GROUP: usize = 64;
 
 /// Resolve the index directory for a given repository root.
 pub fn index_dir(repo_root: &Path) -> std::path::PathBuf {

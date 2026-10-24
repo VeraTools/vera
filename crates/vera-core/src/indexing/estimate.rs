@@ -11,7 +11,7 @@ use crate::config::VeraConfig;
 use crate::discovery::discover_files_with_cancellation;
 use crate::embedding::{EmbeddingProvider, embed_chunks_concurrent_with_progress_and_cancellation};
 
-use super::pipeline::parse_discovered_files_parallel;
+use super::pipeline::{MAX_PARSE_FILE_GROUP, parse_discovered_files_parallel};
 
 const SAMPLE_FILE_LIMIT: usize = 1000;
 const EMBED_SAMPLE_CHUNKS: usize = 256;
@@ -22,8 +22,10 @@ pub struct IndexEstimate {
     pub total_bytes: u64,
     pub binary_skipped: usize,
     pub large_skipped: usize,
+    pub error_skipped: usize,
     pub sampled_files: usize,
     pub estimated_chunks: u64,
+    pub discovery_secs: f64,
     pub estimated_parse_secs: f64,
     pub embedded_sample_chunks: usize,
     pub estimated_embedding_secs: Option<f64>,
@@ -46,11 +48,13 @@ pub async fn estimate_index<P: EmbeddingProvider>(
         .canonicalize()
         .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
     let parse_config = config.clone();
-    let (mut estimate, chunks) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (mut estimate, embed_sample) = tokio::task::spawn_blocking(move || -> Result<_> {
         let cancellation = CancellationToken::new();
+        let discovery_start = Instant::now();
         let discovery =
             discover_files_with_cancellation(&repo_root, &parse_config.indexing, &cancellation)
                 .context("file discovery failed")?;
+        let discovery_secs = discovery_start.elapsed().as_secs_f64();
         let files = stride_sample(&discovery.files, SAMPLE_FILE_LIMIT);
         let total_bytes: u64 = discovery.files.iter().map(|file| file.size).sum();
         let sampled_bytes: u64 = files.iter().map(|file| file.size).sum();
@@ -59,39 +63,50 @@ pub async fn estimate_index<P: EmbeddingProvider>(
         } else {
             total_bytes as f64 / sampled_bytes as f64
         };
+        // Parse in bounded groups like the indexing pipeline, keeping only a
+        // count and an even share of each group for the embedding sample.
+        let groups = files.len().div_ceil(MAX_PARSE_FILE_GROUP).max(1);
+        let per_group_sample = EMBED_SAMPLE_CHUNKS.div_ceil(groups);
+        let mut sampled_chunks = 0;
+        let mut embed_sample = Vec::new();
         let start = Instant::now();
-        let (chunks, ..) = parse_discovered_files_parallel(
-            &discovery,
-            &files,
-            &repo_root,
-            &parse_config,
-            &cancellation,
-        )?;
-        let estimated_parse_secs = start.elapsed().as_secs_f64() * scale;
+        for group in files.chunks(MAX_PARSE_FILE_GROUP) {
+            let (chunks, ..) = parse_discovered_files_parallel(
+                &discovery,
+                group,
+                &repo_root,
+                &parse_config,
+                &cancellation,
+            )?;
+            sampled_chunks += chunks.len();
+            embed_sample.extend(stride_sample(&chunks, per_group_sample));
+        }
+        embed_sample.truncate(EMBED_SAMPLE_CHUNKS);
         let estimate = IndexEstimate {
             total_files: discovery.files.len(),
             total_bytes,
             binary_skipped: discovery.binary_skipped,
             large_skipped: discovery.large_skipped,
+            error_skipped: discovery.error_skipped,
             sampled_files: files.len(),
-            estimated_chunks: (chunks.len() as f64 * scale).round() as u64,
-            estimated_parse_secs,
+            estimated_chunks: (sampled_chunks as f64 * scale).round() as u64,
+            discovery_secs,
+            estimated_parse_secs: start.elapsed().as_secs_f64() * scale,
             embedded_sample_chunks: 0,
             estimated_embedding_secs: None,
         };
-        Ok((estimate, chunks))
+        Ok((estimate, embed_sample))
     })
     .await
     .context("estimate parsing task failed")??;
 
-    if let Some(provider) = provider.filter(|_| !chunks.is_empty()) {
-        let sample = stride_sample(&chunks, EMBED_SAMPLE_CHUNKS);
+    if let Some(provider) = provider.filter(|_| !embed_sample.is_empty()) {
         let (batch_size, max_concurrent) = config.embedding.bounded_parallelism();
         let cancellation = CancellationToken::new();
         let start = Instant::now();
         let vectors = embed_chunks_concurrent_with_progress_and_cancellation(
             provider,
-            &sample,
+            &embed_sample,
             batch_size,
             max_concurrent,
             config.indexing.max_chunk_bytes,
@@ -109,11 +124,18 @@ pub async fn estimate_index<P: EmbeddingProvider>(
     Ok(estimate)
 }
 
+/// Pick up to `limit` items, one from each equal-width interval. The position
+/// inside each interval varies so a repeating file layout cannot alias the sample.
 fn stride_sample<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
-    items
-        .iter()
-        .step_by(items.len().div_ceil(limit).max(1))
-        .cloned()
+    let step = items.len().div_ceil(limit).max(1);
+    (0..items.len().div_ceil(step))
+        .filter_map(|interval| {
+            let offset = interval.wrapping_mul(2_654_435_761) % step;
+            items
+                .get(interval * step + offset)
+                .or_else(|| items.get(interval * step))
+                .cloned()
+        })
         .collect()
 }
 
@@ -195,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn estimate_samples_are_evenly_strided_and_bounded() {
+    fn estimate_samples_one_item_per_interval_without_aliasing() {
         for (count, limit) in [
             (0_usize, SAMPLE_FILE_LIMIT),
             (3, SAMPLE_FILE_LIMIT),
@@ -206,7 +228,14 @@ mod tests {
             let sample = stride_sample(&items, limit);
             let step = count.div_ceil(limit).max(1);
             assert!(sample.len() <= limit);
-            assert_eq!(sample, (0..count).step_by(step).collect::<Vec<_>>());
+            assert_eq!(sample.len(), count.div_ceil(step));
+            for (interval, item) in sample.iter().enumerate() {
+                assert_eq!(item / step, interval);
+            }
         }
+        // Alternating layouts must not land on a single residue class.
+        let sample = stride_sample(&(0..2000).collect::<Vec<_>>(), 1000);
+        assert!(sample.iter().any(|item| item % 2 == 0));
+        assert!(sample.iter().any(|item| item % 2 == 1));
     }
 }
