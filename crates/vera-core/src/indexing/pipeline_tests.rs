@@ -136,6 +136,26 @@ fn index_fingerprint(idx_dir: &Path) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
+async fn reindexing_an_emptied_repo_removes_the_old_index() {
+    let dir = TempDir::new().unwrap();
+    write_window_corpus(dir.path(), 1);
+    let config = default_config();
+    let provider = RecordingProvider::new(8);
+    index_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    let idx = index_dir(dir.path());
+    assert!(idx.exists());
+
+    fs::remove_file(dir.path().join("file_00.rs")).unwrap();
+    let summary = index_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(summary.files_parsed, 0);
+    assert!(!idx.exists());
+}
+
+#[tokio::test]
 async fn full_text_only_build_and_mode_conversion() {
     let dir = TempDir::new().unwrap();
     write_window_corpus(dir.path(), 5);

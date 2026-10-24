@@ -1,6 +1,6 @@
 # Models and backends
 
-Vera needs an embedding model to index and search. It can run one locally or call a hosted API.
+Vera needs an embedding model for semantic search. It can run one locally or call a hosted API. For keyword search only, skip the model with a [keyword-only index](features.md#keyword-only-index).
 
 ## Which backend to use
 

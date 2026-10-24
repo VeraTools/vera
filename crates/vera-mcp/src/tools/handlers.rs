@@ -330,13 +330,14 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
         Ok(rt) => rt,
         Err(err) => return err,
     };
-    let search_context = match vera_core::indexing::is_full_text_only(&index_dir) {
-        Ok(true) => keyword_search_context(),
-        Ok(false) => match cached_search_context(rt, &config, backend) {
+    // A mode read error falls through to the embedded path, which degrades to BM25 itself.
+    let search_context = if matches!(vera_core::indexing::is_full_text_only(&index_dir), Ok(true)) {
+        keyword_search_context()
+    } else {
+        match cached_search_context(rt, &config, backend) {
             Ok(context) => context,
             Err(err) => return err,
-        },
-        Err(err) => return ToolCallResult::error(format!("Failed to read index mode: {err}")),
+        }
     };
 
     // Run each query. A multi-query search over-fetches per query so fusion has

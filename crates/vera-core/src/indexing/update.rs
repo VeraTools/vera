@@ -297,6 +297,8 @@ where
 /// Cancellation is observed through discovery, parsing, and embedding. Once publication
 /// starts, all index stores are updated before the operation returns so callers never
 /// receive a cancellation result while writes are still in progress.
+///
+/// `provider` is ignored for keyword-only indexes and required for embedded ones.
 pub async fn update_repository_with_options_and_progress_and_cancellation<P, F>(
     repo_path: &Path,
     provider: Option<&P>,
@@ -351,10 +353,7 @@ where
     let metadata_path = idx_dir.join("metadata.db");
     let metadata_store =
         MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
-    let full_text_only = metadata_store
-        .get_index_meta(pipeline::INDEX_MODE_KEY)?
-        .as_deref()
-        == Some(pipeline::FULL_TEXT_ONLY_MODE);
+    let full_text_only = pipeline::store_is_full_text_only(&metadata_store)?;
     let provider = if full_text_only {
         None
     } else {

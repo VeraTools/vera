@@ -302,10 +302,7 @@ impl SearchStores {
             model_name: store.get_index_meta("model_name")?,
             embedding_dim: store.get_index_meta("embedding_dim")?,
             document_prefix: store.get_index_meta("document_prefix")?,
-            full_text_only: store
-                .get_index_meta(crate::indexing::INDEX_MODE_KEY)?
-                .as_deref()
-                == Some(crate::indexing::FULL_TEXT_ONLY_MODE),
+            full_text_only: crate::indexing::pipeline::store_is_full_text_only(&store)?,
         };
         let mut cached = self
             .cached_index_meta

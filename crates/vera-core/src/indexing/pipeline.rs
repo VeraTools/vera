@@ -139,7 +139,11 @@ pub fn is_full_text_only(index_dir: &Path) -> Result<bool> {
     if !metadata_path.is_file() {
         return Ok(false);
     }
-    let store = MetadataStore::open_existing(&metadata_path)?;
+    store_is_full_text_only(&MetadataStore::open_existing(&metadata_path)?)
+}
+
+/// Whether an open metadata store records a keyword-only index.
+pub(crate) fn store_is_full_text_only(store: &MetadataStore) -> Result<bool> {
     Ok(store.get_index_meta(INDEX_MODE_KEY)?.as_deref() == Some(FULL_TEXT_ONLY_MODE))
 }
 
@@ -315,6 +319,12 @@ where
     if discovery.files.is_empty() {
         drop(checkpoint);
         EmbeddingCheckpoint::remove(&idx_dir);
+        // An index of files that no longer exist would keep serving them.
+        if idx_dir.exists() {
+            std::fs::remove_dir_all(&idx_dir).with_context(|| {
+                format!("failed to remove outdated index: {}", idx_dir.display())
+            })?;
+        }
         return Ok(IndexSummary {
             files_parsed: 0,
             chunks_created: 0,
