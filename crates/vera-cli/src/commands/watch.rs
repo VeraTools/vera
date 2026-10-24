@@ -4,9 +4,12 @@ use anyhow::Result;
 
 /// Run the watch command. Blocks until the process is killed (Ctrl-C).
 pub fn run(path: &str, json: bool) -> Result<()> {
-    let repo_path = std::path::Path::new(path)
+    let start = std::path::Path::new(path)
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("Failed to resolve path: {e}"))?;
+    // Watch the index that covers `path`, like `vera update`, so `vera watch .`
+    // from a subdirectory does not watch a directory without its own index.
+    let repo_path = crate::helpers::resolve_index_root(&start)?;
 
     let _handle = vera_mcp::watcher::start_watching_with_progress(&repo_path)
         .map_err(|e| anyhow::anyhow!("{e}"))?;

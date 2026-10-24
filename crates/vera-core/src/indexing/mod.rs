@@ -30,6 +30,11 @@ pub use update::{
     update_repository_with_options_and_progress_and_cancellation, update_repository_with_progress,
 };
 
+/// Whether a repository has index metadata, rather than just a stray `.vera/`.
+pub fn index_exists(root: &std::path::Path) -> bool {
+    index_dir(root).join("metadata.db").is_file()
+}
+
 /// Guidance for commands that require an index but could not find one.
 pub fn missing_index_message(root: &std::path::Path) -> String {
     let mut message = format!(

@@ -120,14 +120,25 @@ impl IndexFreshness {
     /// The stale-index warning shown to users, or `None` when the index covers
     /// the tree. Single-sourced here because the CLI prints it on stderr and
     /// the MCP server attaches it to tool results, and the two must agree.
-    pub fn stale_warning(&self) -> Option<String> {
+    pub fn stale_warning(&self, vera_command: &str) -> Option<String> {
         if !self.is_stale() {
             return None;
         }
         Some(format!(
-            "warning: index may be stale: {}. Search and grep only cover indexed files. Run `vera update .` or `vera watch .`.",
+            "warning: index may be stale: {}. Search and grep only cover indexed files. Run `{vera_command} update .` or `{vera_command} watch .`.",
             self.summary()
         ))
+    }
+}
+
+/// CLI prefix for a repository-specific hint, shell-quoting paths that need it.
+pub fn vera_command_for_repo(repo: &Path) -> String {
+    let path = repo.display().to_string();
+    let shell_safe = |c: char| c.is_ascii_alphanumeric() || "/._-+:@,=~".contains(c);
+    if !path.chars().all(shell_safe) {
+        format!("vera -C '{}'", path.replace('\'', "'\\''"))
+    } else {
+        format!("vera -C {path}")
     }
 }
 
@@ -406,7 +417,7 @@ mod tests {
             files_deleted: 3,
         };
         assert_eq!(
-            freshness.stale_warning().unwrap(),
+            freshness.stale_warning("vera").unwrap(),
             "warning: index may be stale: 1 added, 2 modified, 3 deleted. \
              Search and grep only cover indexed files. \
              Run `vera update .` or `vera watch .`."
@@ -415,7 +426,34 @@ mod tests {
 
     #[test]
     fn fresh_index_has_no_stale_warning() {
-        assert_eq!(IndexFreshness::default().stale_warning(), None);
+        assert_eq!(IndexFreshness::default().stale_warning("vera"), None);
+    }
+
+    #[test]
+    fn stale_warning_uses_the_selected_repository_command() {
+        let freshness = IndexFreshness {
+            files_modified: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            freshness
+                .stale_warning("vera -C '/dependency source'")
+                .unwrap(),
+            "warning: index may be stale: 1 modified. Search and grep only cover indexed files. Run `vera -C '/dependency source' update .` or `vera -C '/dependency source' watch .`."
+        );
+    }
+
+    #[test]
+    fn repository_command_quotes_only_paths_with_whitespace() {
+        for (path, command) in [
+            ("/dependency", "vera -C /dependency"),
+            ("/dependency source", "vera -C '/dependency source'"),
+            ("/user's dependency", "vera -C '/user'\\''s dependency'"),
+            ("/user'srepo", "vera -C '/user'\\''srepo'"),
+            ("/a$b", "vera -C '/a$b'"),
+        ] {
+            assert_eq!(vera_command_for_repo(Path::new(path)), command);
+        }
     }
 
     #[test]

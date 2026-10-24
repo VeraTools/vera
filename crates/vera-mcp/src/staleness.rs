@@ -33,6 +33,14 @@ fn cache_key(repo: &Path) -> PathBuf {
     std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf())
 }
 
+fn vera_command(repo: &Path) -> String {
+    if std::env::current_dir().is_ok_and(|cwd| cache_key(&cwd) == repo) {
+        "vera".to_string()
+    } else {
+        vera_core::indexing::freshness::vera_command_for_repo(repo)
+    }
+}
+
 /// Cached notice for `key`, or `None` when there is no live entry.
 fn cached_notice(key: &Path) -> Option<Option<String>> {
     let guard = CACHE.lock().unwrap_or_else(|err| err.into_inner());
@@ -77,7 +85,7 @@ pub fn notice_for_repo(repo: &Path) -> Option<String> {
     // concurrent scan of the same repository is wasteful, never wrong.
     let config = crate::saved_config::load_saved_runtime_config();
     let notice = match vera_core::indexing::detect_staleness(repo, &config.indexing) {
-        Ok(freshness) => freshness.stale_warning(),
+        Ok(freshness) => freshness.stale_warning(&vera_command(&key)),
         Err(err) => {
             tracing::debug!(error = %err, "failed to check index freshness");
             None
@@ -100,10 +108,21 @@ mod tests {
         let notice = notice_for_repo(dir.path()).expect("stale index must produce a notice");
         assert_eq!(
             notice,
-            "warning: index may be stale: 1 added, 1 modified. \
+            format!(
+                "warning: index may be stale: 1 added, 1 modified. \
              Search and grep only cover indexed files. \
-             Run `vera update .` or `vera watch .`."
+             Run `{command} update .` or `{command} watch .`.",
+                command = vera_core::indexing::freshness::vera_command_for_repo(
+                    &dir.path().canonicalize().unwrap()
+                )
+            )
         );
+    }
+
+    #[test]
+    fn server_repository_keeps_the_plain_vera_command() {
+        let root = cache_key(&std::env::current_dir().unwrap());
+        assert_eq!(vera_command(&root), "vera");
     }
 
     #[test]

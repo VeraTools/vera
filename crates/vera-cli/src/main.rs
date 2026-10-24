@@ -69,6 +69,16 @@ fn main() {
         // SAFETY: SIG_DFL is a valid disposition and no handler state is shared.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
+    if let Some(directory) = &cli.directory
+        && let Err(err) = std::env::set_current_dir(directory)
+    {
+        eprintln!(
+            "Error: cannot change to directory {}: {err}",
+            directory.display()
+        );
+        process::exit(1);
+    }
+    helpers::set_directory_override(cli.directory.is_some());
     if let Err(err) = state::apply_saved_env() {
         // Diagnose/repair commands must still run against a broken saved
         // config; everything else keeps failing fast with the parse error.

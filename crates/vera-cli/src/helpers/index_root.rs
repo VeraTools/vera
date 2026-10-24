@@ -2,13 +2,25 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use vera_core::indexing::missing_index_message;
+
+static DIRECTORY_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_directory_override(enabled: bool) {
+    DIRECTORY_OVERRIDE.store(enabled, Ordering::Relaxed);
+}
 
 pub fn warn_if_index_stale(repo_path: &Path, indexing_config: &vera_core::config::IndexingConfig) {
     match vera_core::indexing::detect_staleness(repo_path, indexing_config) {
         Ok(freshness) => {
-            if let Some(warning) = freshness.stale_warning() {
+            let command = if DIRECTORY_OVERRIDE.load(Ordering::Relaxed) {
+                vera_core::indexing::freshness::vera_command_for_repo(repo_path)
+            } else {
+                "vera".to_string()
+            };
+            if let Some(warning) = freshness.stale_warning(&command) {
                 print_stale_warning(
                     &vera_core::indexing::index_dir(repo_path),
                     &freshness.summary(),
@@ -96,10 +108,7 @@ fn print_stale_warning(index_dir: &Path, summary: &str, warning: &str) {
 pub fn find_index_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(candidate) = dir {
-        if vera_core::indexing::index_dir(candidate)
-            .join("metadata.db")
-            .is_file()
-        {
+        if vera_core::indexing::index_exists(candidate) {
             return Some(candidate.to_path_buf());
         }
         dir = candidate.parent();

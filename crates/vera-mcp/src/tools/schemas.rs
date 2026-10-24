@@ -61,6 +61,14 @@ fn project_path_prop() -> Value {
     })
 }
 
+/// Shared secondary-repository selection property.
+fn repo_prop() -> Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "Repository root to query instead of the server's working directory. It must already have an index (`vera index <repo>`); use it for a second index such as a dependency source tree."
+    })
+}
+
 /// Shared `limit` property; `what` is the counted noun ("results", "matches").
 fn limit_prop(what: &str, default: usize) -> Value {
     serde_json::json!({
@@ -91,6 +99,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "query": {
                         "type": "string",
                         "description": "Search query (keyword or natural language)"
@@ -136,6 +145,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "path": project_path_prop()
                 }
             }),
@@ -150,6 +160,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "path": project_path_prop(),
                 }
             }), "overview"),
@@ -167,6 +178,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "pattern": {
                         "type": "string",
                         "description": "Regex pattern to search for"
@@ -203,6 +215,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "kind": {
                         "type": "string",
                         "enum": ["definitions", "env_reads", "route_handlers", "sql_queries", "implementations"],
@@ -248,6 +261,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: with_git_scope(serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "symbol": {
                         "type": "string",
                         "description": "Symbol name to look up."
@@ -272,6 +286,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "repo": repo_prop(),
                     "path": {
                         "type": "string",
                         "description": "Repository-relative or absolute path to explain."
@@ -362,6 +377,14 @@ mod tests {
         for tool in &tools {
             let schema = &tool.input_schema;
             assert_eq!(schema["type"], "object", "tool {} schema type", tool.name);
+            assert_eq!(schema["properties"]["repo"], repo_prop(), "{}", tool.name);
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .is_none_or(|required| !required.iter().any(|value| value == "repo")),
+                "repo must be optional for {}",
+                tool.name
+            );
         }
     }
 

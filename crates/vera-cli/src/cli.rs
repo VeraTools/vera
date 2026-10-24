@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
                   vera setup                          # Download built-in local models\n  \
                   vera index .                        # Index current directory\n  \
                   vera search \"auth\"                  # Search for authentication code\n  \
+                  vera -C ~/.cargo/registry/src search \"auth\"  # Search another indexed tree\n  \
                   vera doctor                         # Check local setup and index health\n  \
                   vera repair                         # Re-fetch missing backend assets\n  \
                   vera upgrade                        # Show the binary update plan",
@@ -28,6 +29,10 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Change working directory before running the command.
+    #[arg(short = 'C', long, value_name = "DIR")]
+    pub directory: Option<std::path::PathBuf>,
 
     /// Output command results as JSON when supported.
     ///
@@ -561,7 +566,7 @@ pub enum Commands {
                       vera grep \"queryClient|invalidateQueries\" --path \"frontend/src/**\"\n  \
                       vera grep \"Authorization\" --lang rust --type function\n  \
                       vera grep \"keybind\" --scope docs                  # Search docs first\n  \
-                      vera grep \"use std::\" --context 0                 # No context lines")]
+                      vera grep \"use std::\" -C 0                        # No context lines")]
     Grep {
         /// Regex pattern to search for.
         pattern: String,
@@ -579,7 +584,7 @@ pub enum Commands {
         ignore_case: bool,
 
         /// Number of context lines before and after each match (default: 2).
-        #[arg(long, default_value = "2")]
+        #[arg(long, short = 'C', default_value = "2")]
         context: usize,
 
         #[command(flatten)]

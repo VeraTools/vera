@@ -125,6 +125,8 @@ vera grep "TODO|FIXME" --path "src/**"
 vera grep "queryClient" -i --context 3
 ```
 
+`-C` is short for `--context` after `grep`.
+
 Regex search over indexed files, with the same filters and git scopes as `vera search`. It uses Rust regex syntax: `|` is alternation and `\|` matches a literal pipe. Use `rg` instead for files outside the index, counting matches, or find-and-replace work.
 
 ## Indexing
@@ -161,9 +163,20 @@ vera update . --max-files 250    # cap the work in one run
 vera watch .                     # update automatically as files change
 ```
 
-`vera update` compares content hashes and re-parses only the files that changed, re-embedding them unless the index is keyword-only. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
+`vera update` compares content hashes and re-parses only the files that changed, re-embedding them unless the index is keyword-only. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
 
 Search warns when the index is behind the working tree and tells you how many files changed.
+
+### Querying another index
+
+Index a dependency source tree once, then use `-C <DIR>` (or `--directory <DIR>`) before the subcommand to query it without leaving your project:
+
+```bash
+vera index ~/.cargo/registry/src
+vera -C ~/.cargo/registry/src search "retry backoff"
+```
+
+Each tree keeps its own `.vera/` index. With MCP, use the optional [`repo` argument](mcp.md#querying-another-index) instead.
 
 ### Choosing what gets indexed
 
@@ -224,6 +237,8 @@ vera serve --port 3000
 ```
 
 `vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
+
+Vera itself can be one of those clients. Opening an index takes milliseconds, but loading a local ONNX model can take seconds, and each CLI call or MCP session loads it again. Running `vera serve --idle-timeout -1` once and pointing Vera at it in API mode keeps one model loaded for every command, session, and index on the machine (`vera serve --help` shows the client setup).
 
 ## Maintenance
 
