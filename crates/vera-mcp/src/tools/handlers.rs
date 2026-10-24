@@ -213,7 +213,7 @@ fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult
         Some(value) => {
             let path = value
                 .as_str()
-                .ok_or_else(|| ToolCallResult::error("Parameter 'repo' must be a string"))?;
+                .ok_or_else(|| ToolCallResult::error("Repository path must be a string"))?;
             cwd.join(path).canonicalize().map_err(|err| {
                 ToolCallResult::error(format!("Cannot resolve repository {path}: {err}"))
             })?
