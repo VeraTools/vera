@@ -7,12 +7,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use tantivy::collector::TopDocs;
+use tantivy::directory::error::LockError;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
     IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
 };
 use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
-use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, doc};
+use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, TantivyError, doc};
 
 use crate::chunk_text;
 
@@ -111,6 +112,26 @@ impl Bm25Index {
         })
     }
 
+    /// Create a Tantivy writer, retrying briefly while its lock is busy.
+    ///
+    /// Tantivy takes the writer lock with a non-blocking `flock`. A child
+    /// process spawned by another thread (a `git` call, for example) holds an
+    /// inherited copy of the lock file until it execs, so the previous
+    /// writer's lock can outlive that writer for a moment. Vera's index lock
+    /// already keeps other processes out, so a short retry hides nothing.
+    fn writer(&self) -> tantivy::Result<IndexWriter> {
+        let mut attempts = 0;
+        loop {
+            match self.index.writer(WRITER_HEAP_SIZE) {
+                Err(TantivyError::LockFailure(LockError::LockBusy, _)) if attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// Insert a batch of documents into the index.
     ///
     /// Each document is a tuple of (chunk_id, file_path, content, symbol_name, language).
@@ -123,8 +144,7 @@ impl Bm25Index {
     /// per window.
     pub fn insert_batch(&self, docs: &[Bm25Document<'_>]) -> Result<()> {
         let mut writer: IndexWriter = self
-            .index
-            .writer(WRITER_HEAP_SIZE)
+            .writer()
             .context("failed to create BM25 index writer")?;
 
         for doc_data in docs {
@@ -150,10 +170,7 @@ impl Bm25Index {
     /// bounded by the writer heap because Tantivy flushes segments as the
     /// heap fills, same as with per-window writers.
     pub fn begin_bulk_build(&self) -> Result<Bm25BulkWriter> {
-        let writer = self
-            .index
-            .writer(WRITER_HEAP_SIZE)
-            .context("failed to create BM25 bulk writer")?;
+        let writer = self.writer().context("failed to create BM25 bulk writer")?;
         Ok(Bm25BulkWriter {
             writer,
             schema: self.schema.clone(),
@@ -246,8 +263,7 @@ impl Bm25Index {
     /// Delete all documents matching a chunk ID.
     pub fn delete_by_chunk_id(&self, chunk_id: &str) -> Result<()> {
         let mut writer: IndexWriter = self
-            .index
-            .writer(WRITER_HEAP_SIZE)
+            .writer()
             .context("failed to create BM25 writer for delete")?;
 
         let term = tantivy::Term::from_field_text(self.schema.chunk_id, chunk_id);
@@ -273,8 +289,7 @@ impl Bm25Index {
         }
 
         let mut writer: IndexWriter = self
-            .index
-            .writer(WRITER_HEAP_SIZE)
+            .writer()
             .context("failed to create BM25 writer for file delete")?;
 
         for file_path in file_paths {
@@ -294,8 +309,7 @@ impl Bm25Index {
     /// Clear the entire index (drop and recreate).
     pub fn clear(&self) -> Result<()> {
         let mut writer: IndexWriter = self
-            .index
-            .writer(WRITER_HEAP_SIZE)
+            .writer()
             .context("failed to create BM25 writer for clear")?;
         writer
             .delete_all_documents()
@@ -479,6 +493,25 @@ fn looks_path_weighted(query_text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writer_waits_for_a_briefly_held_lock() {
+        // Stands in for a lock file inherited by a child process that has
+        // not exec'd yet: the lock is held outside any Vera writer.
+        let dir = tempfile::tempdir().unwrap();
+        let index = Bm25Index::open(dir.path()).unwrap();
+        let held = tantivy::Directory::acquire_lock(
+            index.index.directory(),
+            &tantivy::directory::INDEX_WRITER_LOCK,
+        )
+        .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        index.insert_batch(&sample_docs()).unwrap();
+        release.join().unwrap();
+    }
 
     fn sample_docs() -> Vec<Bm25Document<'static>> {
         vec![
