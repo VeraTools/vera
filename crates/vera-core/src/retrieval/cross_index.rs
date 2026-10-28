@@ -98,7 +98,7 @@ fn absolute_path_filter_rewrite_inner(
     roots: &[PathBuf],
     case_insensitive: bool,
 ) -> PathFilterRewrite {
-    let normalized = pattern.replace('\\', "/");
+    let normalized = without_verbatim_prefix(&pattern.replace('\\', "/"));
     let bytes = normalized.as_bytes();
     let is_absolute = normalized.starts_with('/')
         || (bytes.len() >= 3
@@ -116,7 +116,7 @@ fn absolute_path_filter_rewrite_inner(
         }
     };
     for root in roots {
-        let root = root.to_string_lossy().replace('\\', "/");
+        let root = without_verbatim_prefix(&root.to_string_lossy().replace('\\', "/"));
         let root = root.trim_end_matches('/');
         if matches(&normalized, root) {
             return PathFilterRewrite::Drop;
@@ -134,6 +134,15 @@ fn absolute_path_filter_rewrite_inner(
         }
     }
     PathFilterRewrite::Keep
+}
+
+/// Windows canonical paths use verbatim forms (`\\?\C:\repo`,
+/// `\\?\UNC\server\share`) that ordinary absolute filters never spell out.
+fn without_verbatim_prefix(path: &str) -> String {
+    match path.strip_prefix("//?/UNC/") {
+        Some(rest) => format!("//{rest}"),
+        None => path.strip_prefix("//?/").unwrap_or(path).to_string(),
+    }
 }
 
 pub struct IndexSearch<'a> {
@@ -234,6 +243,14 @@ mod tests {
             ("C:\\repo\\src", "C:\\repo", false, Some("src")),
             ("C:\\Repo\\Src", "c:\\repo", true, Some("Src")),
             ("C:\\Repo\\Src", "c:\\repo", false, None),
+            ("C:\\repo\\src", "\\\\?\\C:\\repo", true, Some("src")),
+            ("\\\\?\\C:\\repo\\src", "C:\\repo", true, Some("src")),
+            (
+                "\\\\server\\share\\src",
+                "\\\\?\\UNC\\server\\share",
+                true,
+                Some("src"),
+            ),
             ("/other/src", "/repo", false, None),
             ("src/**", "/repo", false, None),
         ] {

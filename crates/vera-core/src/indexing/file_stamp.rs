@@ -135,15 +135,20 @@ fn read_with_stamp(
     mut after_read: impl FnMut(&File),
 ) -> io::Result<(String, Option<String>)> {
     for attempt in 0..2 {
+        // The race window ends when the read starts: a same-size write in the
+        // same coarse timestamp tick as a slow read leaves both stats equal.
+        let started = SystemTime::now();
         let before = from_handle(file)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         after_read(file);
         let after = from_handle(file)?;
-        let now = SystemTime::now();
         if before == after || attempt == 1 {
-            let stamp = if before == after {
-                after.and_then(|stamp| stamp.trustworthy(now))
+            // Discovery skips the binary sniff for files with a matching stamp,
+            // so content that turned binary since discovery must stay unstamped.
+            let looks_binary = bytes[..bytes.len().min(8192)].contains(&0);
+            let stamp = if before == after && !looks_binary {
+                after.and_then(|stamp| stamp.trustworthy(started))
             } else {
                 None
             };
@@ -221,6 +226,25 @@ mod tests {
             .trustworthy(now)
             .is_some()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_reads_and_binary_content_are_not_stamped() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("file"), "text").unwrap();
+        std::fs::write(root.path().join("binary"), b"bin\0ary").unwrap();
+        let dir = crate::discovery::open_root_dir(root.path()).unwrap();
+        let read = |name: &str, after_read: fn(&File)| {
+            read_with_stamp(&mut dir.open(name).unwrap(), after_read)
+                .unwrap()
+                .1
+        };
+        // Written just before the read: a read that outlasts the window still
+        // started inside it.
+        assert!(read("file", |_| std::thread::sleep(Duration::from_millis(3100))).is_none());
+        assert!(read("file", |_| {}).is_some());
+        assert!(read("binary", |_| {}).is_none());
     }
 
     #[cfg(unix)]

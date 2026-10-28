@@ -140,7 +140,8 @@ pub fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let index_dir = vera_core::indexing::index_dir(&repo_root);
     let metadata_path = index_dir.join("metadata.db");
     if metadata_path.is_file()
-        && let Ok(store) = vera_core::storage::metadata::MetadataStore::open(&metadata_path)
+        && let Ok(store) =
+            vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)
         && !vera_core::indexing::freshness::index_format_is_current(&store)
     {
         anyhow::bail!(
