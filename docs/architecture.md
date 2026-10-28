@@ -66,6 +66,7 @@ Everything is stored in `.vera/` at the project root.
 
 - `pipeline.rs`: full build. Discovers, parses, chunks, embeds, and stores files in bounded windows, writes to `.vera.build` and swaps it in, keeps `.vera.old` for crash recovery, and stores parse diagnostics.
 - `update.rs`: incremental update. Detects changes by content hash, reprocesses only changed files, and refreshes per-file index state.
+- `file_stamp.rs`: per-file metadata stamps (size, modification and change times, file identity) captured around each read. `freshness.rs` and `update.rs` share one classifier that trusts a matching stamp and hashes everything else; stamps are stored next to each content hash and never written for files changed within the last 3 seconds, files that changed during the read, or RST files.
 
 ### Other modules
 

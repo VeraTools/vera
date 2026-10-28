@@ -163,7 +163,7 @@ vera update . --max-files 250    # cap the work in one run
 vera watch .                     # update automatically as files change
 ```
 
-`vera update` compares content hashes and re-parses only the files that changed, re-embedding them unless the index is keyword-only. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
+`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
 
 Search warns when the index is behind the working tree and tells you how many files changed.
 

@@ -68,4 +68,6 @@ Full builds are written to a staging directory and swapped in when complete, so 
 
 ## Incremental updates
 
-`vera update .` compares each file's content hash with the stored one and re-parses, re-chunks, and re-embeds only files that changed. Deleted files are removed. `vera watch .` runs the same update automatically as you edit.
+`vera update .` re-parses, re-chunks, and re-embeds only files that changed. Deleted files are removed. `vera watch .` runs the same update automatically as you edit.
+
+To find changes without reading every file, Vera records each indexed file's size, modification and change times, and file identity (inode on Unix, file ID on Windows). A file whose metadata still matches is unchanged; any other file is read and its content hash compared with the stored one. The stale-index check before each search uses the same test. Files modified in the last few seconds and reStructuredText files (their content depends on included files) are always hashed. `vera update --verify .` ignores the recorded metadata and hashes every file, for filesystems that report unreliable metadata.
