@@ -38,7 +38,7 @@ The server exposes:
 - `find_references` (indexed caller or callee matches, with git-scoped filtering; auto-indexes and starts watcher on first use)
 - `explain_path` (explains why a file is or is not indexed)
 
-Every tool accepts `repo`, an absolute repository root or one relative to the server's working directory. Use it for a second index such as a dependency source tree; run `vera index <repo>` first. A different repository is never auto-indexed or watched. Omitting `repo`, or setting it to the server's working directory, keeps normal behavior. Filters and file paths are relative to the selected repository.
+Every tool accepts `repo`, an indexed repository root or any directory inside one, absolute or relative to the server's working directory. Use it for a second index such as a dependency source tree; run `vera index <repo>` first. A different repository is never auto-indexed or watched. Omitting `repo`, or setting it to the server's working directory, keeps normal behavior. Filters and file paths are relative to the selected repository. A server started in a subdirectory uses the enclosing repository's index, and it never auto-indexes `/` or the home directory.
 
 ## Guidance
 

@@ -208,7 +208,7 @@ Indexing shows a progress display in a terminal. In CI or agent runs, it prints 
 | `--compact` | Signatures only |
 | `--json` | Compact JSON |
 | `--raw` | Verbose, human-readable output with every field |
-| `--timing` | Timings on stderr: per stage for `search`, total time for `grep` and `structural` |
+| `--timing` | Timings on stderr for `search`, `grep`, and `structural`: index lookup, freshness check, setup, each search stage, output, and the end-to-end total |
 
 `--json`, `--raw`, and `--timing` can go before or after the subcommand. `vera search --json --rerank-status` also reports whether results were reranked and, if not, why.
 

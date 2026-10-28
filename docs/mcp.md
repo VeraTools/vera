@@ -22,7 +22,7 @@ A search result can include a second text block with warnings: the index is stal
 
 ### Querying another index
 
-All seven tools accept an optional `repo` string: an existing repository root, absolute or relative to the server's working directory. Build its index first with `vera index <repo>`. For example, pass these arguments to `search_code`:
+All seven tools accept an optional `repo` string: an indexed repository root or any directory inside one, absolute or relative to the server's working directory. Build its index first with `vera index <repo>`. For example, pass these arguments to `search_code`:
 
 ```json
 {"repo":"/home/user/.cargo/registry/src","query":"retry backoff"}
@@ -34,7 +34,7 @@ A different repository is never auto-indexed or watched. Omitting `repo`, or sel
 
 The server uses the backend saved by `vera setup`, unless `VERA_BACKEND` is set (the Docker images set it). Configure a backend first.
 
-By default, the server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory.
+By default, the server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory. A server started inside an indexed repository uses that repository's index rather than creating a nested one. The server refuses to auto-index the filesystem root or your home directory; run `vera index <dir>` to index one deliberately.
 
 ### Claude Code
 
