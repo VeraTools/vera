@@ -21,6 +21,7 @@ pub struct CommandOptions {
     pub no_default_excludes: bool,
     pub no_progress: bool,
     pub max_files: Option<usize>,
+    pub verify: bool,
 }
 
 /// Run the `vera update <path>` command.
@@ -32,6 +33,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
         no_default_excludes,
         no_progress,
         max_files,
+        verify,
     } = options;
     let repo_path = Path::new(path);
 
@@ -116,7 +118,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
 
     let show_progress = !json_output && !no_progress && std::io::stderr().is_terminal();
     let reporter = EmbeddingReporter::new(provider.clone(), !no_progress);
-    let options = UpdateOptions { max_files };
+    let options = UpdateOptions { max_files, verify };
     let cancellation = vera_core::CancellationToken::new();
     let operation_cancellation = cancellation.clone();
     let summary = if show_progress {

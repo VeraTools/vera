@@ -1,19 +1,20 @@
 //! Index freshness metadata and stale-index detection.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use tracing::warn;
 
+use crate::CancellationToken;
 use crate::config::IndexingConfig;
 use crate::discovery;
-use crate::storage::metadata::MetadataStore;
+use crate::storage::metadata::{FileFingerprint, MetadataStore, StampedFileHash};
 
-use super::index_dir;
 use super::update::{detect_language_for_path, hash_for_indexing_source};
+use super::{file_stamp, index_dir};
 
 pub const INDEXING_CONFIG_KEY: &str = "indexing_config";
 const INDEX_REFRESHED_AT_KEY: &str = "index_refreshed_at_unix_ms";
@@ -175,7 +176,7 @@ pub(crate) fn record_index_snapshot(
 /// Compare the current repo contents against the index metadata.
 ///
 /// New and deleted files are detected via discovery vs tracked files. Modified
-/// files are verified with the stored content hashes for every tracked file.
+/// files use metadata fingerprints, falling back to content hashes when needed.
 pub fn detect_staleness(
     repo_path: &Path,
     fallback_config: &IndexingConfig,
@@ -185,87 +186,118 @@ pub fn detect_staleness(
         .with_context(|| format!("failed to resolve repo path: {}", repo_path.display()))?;
     let metadata_path = index_dir(&repo_root).join("metadata.db");
     let metadata_store =
-        MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
+        MetadataStore::open_existing(&metadata_path).context("failed to open metadata store")?;
 
     ensure_index_chunking_compatible(&metadata_store, &repo_root)?;
 
     let indexing_config = load_indexing_config(&metadata_store, fallback_config);
-    let discovery = discovery::discover_files(&repo_root, &indexing_config)
-        .context("failed to discover files for freshness scan")?;
-
-    let current_files: HashMap<String, PathBuf> = discovery
-        .files
-        .into_iter()
-        .map(|file| (file.relative_path, file.absolute_path))
-        .collect();
-    let tracked_files: HashSet<String> = metadata_store
-        .tracked_files()
-        .context("failed to read tracked files")?
-        .into_iter()
-        .collect();
-
-    let files_added = current_files
-        .keys()
-        .filter(|path| !tracked_files.contains(path.as_str()))
-        .count();
-    let files_deleted = tracked_files
-        .iter()
-        .filter(|path| !current_files.contains_key(path.as_str()))
-        .count();
-
-    let files_modified = count_modified_files(
-        &current_files,
-        &tracked_files,
-        &metadata_store,
-        &discovery.root_dir,
+    let stored = metadata_store.file_fingerprints()?;
+    let stamps = known_stamps(&stored);
+    let cancellation = CancellationToken::new();
+    let discovery = discovery::discover_files_with_stamps(
+        &repo_root,
+        &indexing_config,
+        &cancellation,
+        Some(&stamps),
+    )
+    .context("failed to discover files for freshness scan")?;
+    let classified = classify_files(
+        &discovery,
+        &stored,
         &repo_root,
         indexing_config.max_file_size_bytes,
+        false,
+        &cancellation,
     )?;
-
+    if let Err(error) =
+        MetadataStore::try_backfill_file_stamps(&metadata_path, &classified.backfills)
+    {
+        tracing::debug!(%error, "could not backfill freshness file stamps");
+    }
     Ok(IndexFreshness {
-        files_added,
-        files_modified,
-        files_deleted,
+        files_added: classified.added.len(),
+        files_modified: classified.modified.len() + classified.unreadable.len(),
+        files_deleted: classified.deleted.len(),
     })
 }
 
-fn count_modified_files(
-    current_files: &HashMap<String, PathBuf>,
-    tracked_files: &HashSet<String>,
-    metadata_store: &MetadataStore,
-    root_dir: &cap_std::fs::Dir,
+pub(crate) fn known_stamps(stored: &HashMap<String, FileFingerprint>) -> HashMap<String, String> {
+    stored
+        .iter()
+        .filter_map(|(path, fingerprint)| {
+            // RST hashes include dependencies, so its own stat can never certify it.
+            (detect_language_for_path(path) != crate::types::Language::Rst)
+                .then(|| {
+                    fingerprint
+                        .file_stamp
+                        .as_ref()
+                        .map(|stamp| (path.clone(), stamp.clone()))
+                })
+                .flatten()
+        })
+        .collect()
+}
+
+#[derive(Default)]
+pub(crate) struct FileClassification {
+    pub modified: Vec<String>,
+    pub added: Vec<String>,
+    pub deleted: Vec<String>,
+    pub unchanged: Vec<String>,
+    pub unreadable: Vec<String>,
+    pub backfills: Vec<StampedFileHash>,
+}
+
+/// Shared by freshness and update. Contents are dropped on the hashing worker;
+/// only changed paths and conditional stamp backfills leave this phase.
+pub(crate) fn classify_files(
+    discovery: &discovery::DiscoveryResult,
+    stored: &HashMap<String, FileFingerprint>,
     repo_root: &Path,
     max_file_size_bytes: u64,
-) -> Result<usize> {
-    let tracked_current: Vec<(&String, &PathBuf)> = current_files
-        .iter()
-        .filter(|(path, _)| tracked_files.contains(path.as_str()))
-        .collect();
-
-    // Reading and hashing is I/O and CPU bound, so it runs under rayon. The
-    // metadata lookup that follows stays sequential: `MetadataStore` wraps a
-    // single SQLite connection and is not `Sync`, so it cannot be called from
-    // several rayon threads at once.
-    //
-    // `None` means the file could not be read. It is counted as modified
-    // rather than skipped, so an unreadable tracked file cannot make a stale
-    // index look current (#74).
-    let hashed: Vec<(&String, Option<String>)> = tracked_current
+    verify: bool,
+    cancellation: &CancellationToken,
+) -> Result<FileClassification> {
+    enum Status {
+        Added,
+        Modified,
+        Unchanged(Option<StampedFileHash>),
+        Unreadable,
+    }
+    let results: Vec<_> = discovery
+        .files
         .par_iter()
-        .map(|(rel_path, _absolute_path)| {
-            let content =
-                match crate::discovery::read_source_lossy_at(root_dir, Path::new(rel_path)) {
-                    Ok(content) => content,
-                    Err(err) => {
-                        warn!(
-                            file = %rel_path,
-                            error = %err,
-                            "failed to read file during freshness scan"
-                        );
-                        return (*rel_path, None);
-                    }
-                };
+        .map(|file| -> Result<_> {
+            cancellation.check()?;
+            let rel_path = &file.relative_path;
+            let Some(previous) = stored.get(rel_path) else {
+                return Ok((rel_path.clone(), Status::Added));
+            };
             let language = detect_language_for_path(rel_path);
+            if !verify
+                && language != crate::types::Language::Rst
+                && let Some(known) = &previous.file_stamp
+                && file_stamp::at(&discovery.root_dir, Path::new(rel_path))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|stamp| stamp.value() == known)
+            {
+                return Ok((rel_path.clone(), Status::Unchanged(None)));
+            }
+            let (content, stamp) = match file_stamp::read_source_with_stamp_at(
+                &discovery.root_dir,
+                Path::new(rel_path),
+            ) {
+                Ok(read) => read,
+                Err(err) => {
+                    warn!(
+                        file = %rel_path,
+                        error = %err,
+                        "failed to read file during classification"
+                    );
+                    return Ok((rel_path.clone(), Status::Unreadable));
+                }
+            };
             let current_hash = hash_for_indexing_source(
                 &content,
                 rel_path,
@@ -273,25 +305,44 @@ fn count_modified_files(
                 repo_root,
                 max_file_size_bytes,
             );
-            (*rel_path, Some(current_hash))
+            let status = if current_hash == previous.content_hash {
+                let stamp = stamp.filter(|_| language != crate::types::Language::Rst);
+                let backfill = (stamp.is_some() && stamp != previous.file_stamp)
+                    .then(|| (rel_path.clone(), current_hash, stamp));
+                Status::Unchanged(backfill)
+            } else {
+                Status::Modified
+            };
+            Ok((rel_path.clone(), status))
         })
+        .collect::<Result<_>>()?;
+    cancellation.check()?;
+    let mut classified = FileClassification::default();
+    let current: HashSet<_> = discovery
+        .files
+        .iter()
+        .map(|file| file.relative_path.as_str())
         .collect();
-
-    let mut files_modified = 0usize;
-    for (rel_path, current_hash) in hashed {
-        let Some(current_hash) = current_hash else {
-            files_modified += 1;
-            continue;
-        };
-        let stored_hash = metadata_store
-            .get_file_hash(rel_path)
-            .with_context(|| format!("failed to read stored hash for {rel_path}"))?;
-        if stored_hash.as_deref() != Some(current_hash.as_str()) {
-            files_modified += 1;
+    classified.deleted = stored
+        .keys()
+        .filter(|path| !current.contains(path.as_str()))
+        .cloned()
+        .collect();
+    classified.deleted.sort();
+    for (path, status) in results {
+        match status {
+            Status::Added => classified.added.push(path),
+            Status::Modified => classified.modified.push(path),
+            Status::Unreadable => classified.unreadable.push(path),
+            Status::Unchanged(backfill) => {
+                classified.unchanged.push(path);
+                if let Some(backfill) = backfill {
+                    classified.backfills.push(backfill);
+                }
+            }
         }
     }
-
-    Ok(files_modified)
+    Ok(classified)
 }
 
 fn load_indexing_config(
@@ -555,19 +606,25 @@ mod tests {
             .set_file_hash("src/unreadable.rs", &content_hash("fn indexed() {}\n"))
             .unwrap();
 
-        let current_files = HashMap::from([("src/unreadable.rs".to_string(), read_failure_path)]);
-        let tracked_files = HashSet::from(["src/unreadable.rs".to_string()]);
-        let files_modified = count_modified_files(
-            &current_files,
-            &tracked_files,
-            &metadata,
-            &crate::discovery::open_root_dir(dir.path()).unwrap(),
+        let mut discovery =
+            discovery::discover_files(dir.path(), &IndexingConfig::default()).unwrap();
+        discovery.files.push(discovery::DiscoveredFile {
+            relative_path: "src/unreadable.rs".into(),
+            absolute_path: read_failure_path,
+            size: 1,
+        });
+        let classified = classify_files(
+            &discovery,
+            &metadata.file_fingerprints().unwrap(),
             dir.path(),
             IndexingConfig::default().max_file_size_bytes,
+            false,
+            &CancellationToken::new(),
         )
         .unwrap();
 
-        assert_eq!(files_modified, 1);
+        assert_eq!(classified.unreadable, ["src/unreadable.rs"]);
+        assert!(classified.deleted.is_empty());
     }
 
     #[test]
@@ -587,5 +644,161 @@ mod tests {
 
         let freshness = detect_staleness(dir.path(), &IndexingConfig::default()).unwrap();
         assert_eq!(freshness.files_added, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn freshness_backfills_old_and_racy_stamps_then_skips_reads() {
+        let dir = tempdir().unwrap();
+        let content = "pub fn current() {}\n";
+        write_file(dir.path(), "lib.rs", content);
+        std::fs::create_dir(dir.path().join(".vera")).unwrap();
+        let metadata = MetadataStore::open(&dir.path().join(".vera/metadata.db")).unwrap();
+        metadata
+            .set_file_hash("lib.rs", &content_hash(content))
+            .unwrap();
+        // A just-written file is inside the race window and cannot be certified.
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert!(
+            metadata.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_none()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3100));
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert!(
+            metadata.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_some()
+        );
+        // Simulate an older index with no stored fingerprints.
+        let db = rusqlite::Connection::open(dir.path().join(".vera/metadata.db")).unwrap();
+        db.execute("UPDATE file_hashes SET file_stamp=NULL", [])
+            .unwrap();
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert!(
+            metadata.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_some()
+        );
+        let root = discovery::open_root_dir(dir.path()).unwrap();
+        let reads = file_stamp::read_counter(&root, Path::new("lib.rs"), false);
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert_eq!(
+            reads,
+            file_stamp::read_counter(&root, Path::new("lib.rs"), false)
+        );
+
+        let modified = std::fs::metadata(dir.path().join("lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        write_file(dir.path(), "lib.rs", "pub fn changed() {}\n");
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("lib.rs"))
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .files_modified,
+            1
+        );
+        write_file(dir.path(), "replacement", "pub fn swapped() {}\n");
+        std::fs::rename(dir.path().join("replacement"), dir.path().join("lib.rs")).unwrap();
+        assert_eq!(
+            detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .files_modified,
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn freshness_works_with_read_only_old_metadata_and_busy_backfills() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "lib.rs", "fn current() {}\n");
+        let db_path = dir.path().join(".vera/metadata.db");
+        std::fs::create_dir(dir.path().join(".vera")).unwrap();
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        metadata
+            .set_file_hash("lib.rs", &content_hash("fn current() {}\n"))
+            .unwrap();
+        drop(metadata);
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "ALTER TABLE file_hashes DROP COLUMN file_stamp; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        drop(db);
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // SQLite creates WAL/shm with the database's permissions, even for a
+        // read-only reader. Restore these too before exercising migration.
+        for sidecar in ["metadata.db-wal", "metadata.db-shm"] {
+            let path = db_path.with_file_name(sidecar);
+            if path.exists() {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3100));
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let start = std::time::Instant::now();
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            metadata.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_none()
+        );
+        db.execute_batch("ROLLBACK").unwrap();
+        drop(db);
+        drop(metadata);
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // This scan attempts a trustworthy backfill, which must fail harmlessly.
+        assert!(
+            !detect_staleness(dir.path(), &IndexingConfig::default())
+                .unwrap()
+                .is_stale()
+        );
+        assert!(
+            MetadataStore::open_existing(&db_path)
+                .unwrap()
+                .file_fingerprints()
+                .unwrap()["lib.rs"]
+                .file_stamp
+                .is_none()
+        );
     }
 }

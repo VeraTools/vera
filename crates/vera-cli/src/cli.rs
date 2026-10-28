@@ -479,6 +479,9 @@ pub enum Commands {
         /// Maximum added or modified files to process in this run.
         #[arg(long, value_name = "N")]
         max_files: Option<std::num::NonZeroUsize>,
+        /// Re-read and hash every file instead of trusting recorded file metadata.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Show architecture overview of the indexed project.

@@ -287,6 +287,7 @@ fn main() {
             no_default_excludes,
             no_progress,
             max_files,
+            verify,
         } => {
             tracing::info!(path = %path, "updating");
             commands::update::run(
@@ -299,6 +300,7 @@ fn main() {
                     no_default_excludes,
                     no_progress,
                     max_files: max_files.map(std::num::NonZeroUsize::get),
+                    verify,
                 },
             )
         }
@@ -761,6 +763,18 @@ mod tests {
                 max_files: Some(max_files),
                 ..
             } if max_files.get() == 250
+        ));
+    }
+
+    #[test]
+    fn cli_parses_update_verify_flag() {
+        assert!(matches!(
+            parse(&["vera", "update", ".", "--verify"]),
+            Commands::Update { verify: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["vera", "update", "."]),
+            Commands::Update { verify: false, .. }
         ));
     }
 
