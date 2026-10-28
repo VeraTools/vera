@@ -19,15 +19,16 @@ use std::fmt;
 use std::io::Read;
 use std::path::Component;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use ignore::Match;
-use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob as GitignoreGlob};
 use ignore::overrides::{Override, OverrideBuilder};
+use ignore::{WalkBuilder, WalkState};
+use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::CancellationToken;
@@ -381,160 +382,213 @@ pub(crate) fn discover_files_with_stamps(
     let overrides = build_overrides(&root, config)?;
     walker.overrides(overrides);
 
+    let collected = Mutex::new((Vec::new(), 0usize));
+    walker.build_parallel().run(|| {
+        Box::new(|entry| {
+            if cancellation.is_cancelled() {
+                return WalkState::Quit;
+            }
+            match entry {
+                Ok(entry) => {
+                    // Keep only regular files. `file_type()` reports the entry's own type,
+                    // so a symlink is skipped rather than indexed through its target: the
+                    // walker does not follow links, and resolving one here would pull
+                    // content from outside the repository under an in-repository path.
+                    if entry.file_type().is_some_and(|ft| ft.is_file()) {
+                        collected
+                            .lock()
+                            .expect("discovery collector mutex poisoned")
+                            .0
+                            .push(entry.into_path());
+                    }
+                }
+                Err(err) => {
+                    warn!("file discovery error: {err}");
+                    collected
+                        .lock()
+                        .expect("discovery collector mutex poisoned")
+                        .1 += 1;
+                }
+            }
+            WalkState::Continue
+        })
+    });
+    cancellation.check()?;
+    let (mut candidates, mut error_skipped) = collected
+        .into_inner()
+        .expect("discovery collector mutex poisoned");
+    candidates.sort();
+
+    // Preserve the calling thread's test-only sniff counter while the work
+    // moves to Rayon workers. Each worker contributes only this call's reads.
+    #[cfg(test)]
+    let sniffs_before = BINARY_SNIFFS.with(|count| count.get());
+    #[cfg(test)]
+    let sniffs = std::sync::atomic::AtomicUsize::new(0);
+    let outcomes: Vec<_> = candidates
+        .par_iter()
+        .map(|path| {
+            cancellation.check()?;
+            #[cfg(test)]
+            let before = BINARY_SNIFFS.with(|count| count.get());
+            let outcome = discover_file(path, &root, &root_dir, config, known_stamps);
+            #[cfg(test)]
+            sniffs.fetch_add(
+                BINARY_SNIFFS.with(|count| count.get()) - before,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            Ok(outcome)
+        })
+        .collect::<Result<_>>()?;
+    cancellation.check()?;
+    #[cfg(test)]
+    BINARY_SNIFFS
+        .with(|count| count.set(sniffs_before + sniffs.load(std::sync::atomic::Ordering::Relaxed)));
+
     let mut files = Vec::new();
     let mut binary_skipped = 0usize;
-    let mut large_skipped = 0usize;
     let mut large_skipped_paths = Vec::new();
-    let mut error_skipped = 0usize;
-
-    for entry in walker.build() {
-        cancellation.check()?;
-        let entry = match entry {
-            Ok(e) => e,
-            Err(err) => {
-                warn!("file discovery error: {err}");
-                error_skipped += 1;
-                continue;
-            }
-        };
-
-        // Keep only regular files. `file_type()` reports the entry's own type,
-        // so a symlink is skipped rather than indexed through its target: the
-        // walker does not follow links, and resolving one here would pull
-        // content from outside the repository under an in-repository path.
-        let path = entry.path();
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
+    // Indexed parallel collection keeps candidate order, so counters and path
+    // lists are folded deterministically even when workers finish out of order.
+    for outcome in outcomes {
+        match outcome {
+            DiscoveryOutcome::File(file) => files.push(file),
+            DiscoveryOutcome::Binary => binary_skipped += 1,
+            DiscoveryOutcome::Large(path, size) => large_skipped_paths.push((path, size)),
+            DiscoveryOutcome::Error => error_skipped += 1,
+            DiscoveryOutcome::Skipped => {}
         }
-
-        // Sphinx include fragments are inlined into parent RST documents,
-        // so indexing them separately duplicates content by default.
-        if !config.no_default_excludes && is_rst_include_fragment(path) {
-            debug!("skipping rst include fragment: {}", path.display());
-            continue;
-        }
-
-        let relative_path = match path.strip_prefix(&root) {
-            Ok(rel) => rel.to_string_lossy().to_string(),
-            Err(_) => path.to_string_lossy().to_string(),
-        };
-
-        #[cfg(unix)]
-        if let Some(known) = known_stamps.and_then(|stamps| stamps.get(&relative_path))
-            && let Ok(metadata) = root_dir.symlink_metadata(Path::new(&relative_path))
-            && let Some(stamp) = crate::indexing::file_stamp::from_metadata(&metadata)
-            && stamp.value() == known
-            && metadata.len() > 0
-            && metadata.len() <= config.max_file_size_bytes
-            && !is_binary_extension(path)
-        {
-            files.push(DiscoveredFile {
-                absolute_path: path.to_path_buf(),
-                relative_path,
-                size: metadata.len(),
-            });
-            continue;
-        }
-
-        // Open once and stat through the handle, so the size gate and the
-        // binary sniff below observe the same file even if the path is swapped
-        // between opens; a fresh path stat here could bless another inode.
-        let mut file = match root_dir.open(Path::new(&relative_path)) {
-            Ok(file) => file,
-            Err(err) => {
-                warn!("cannot open {}: {err}", path.display());
-                error_skipped += 1;
-                continue;
-            }
-        };
-        let size = match file.metadata() {
-            Ok(metadata) => metadata.len(),
-            Err(err) => {
-                warn!("cannot read metadata for {}: {err}", path.display());
-                error_skipped += 1;
-                continue;
-            }
-        };
-
-        // Skip large files.
-        if size > config.max_file_size_bytes {
-            debug!(
-                "skipping large file: {} ({} bytes > {} max)",
-                path.display(),
-                size,
-                config.max_file_size_bytes
-            );
-            let rel = path
-                .strip_prefix(&root)
-                .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
-            large_skipped_paths.push((rel, size));
-            large_skipped += 1;
-            continue;
-        }
-
-        // Skip empty files.
-        if size == 0 {
-            continue;
-        }
-
-        // Skip binary files by extension.
-        if is_binary_extension(path) {
-            debug!("skipping binary (extension): {}", path.display());
-            binary_skipped += 1;
-            continue;
-        }
-
-        // Skip binary files by content detection (read first 8KB).
-        #[cfg(windows)]
-        let known_text = known_stamps
-            .and_then(|stamps| stamps.get(&relative_path))
-            .is_some_and(|known| {
-                crate::indexing::file_stamp::from_handle(&file)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|stamp| stamp.value() == known)
-            });
-        #[cfg(not(windows))]
-        let known_text = false;
-        #[cfg(not(any(unix, windows)))]
-        let _ = known_stamps;
-        if !known_text {
-            match is_binary_file(&mut file) {
-                Ok(true) => {
-                    debug!("skipping binary (content): {}", path.display());
-                    binary_skipped += 1;
-                    continue;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    warn!(
-                        "cannot read file for binary check: {} — {err}",
-                        path.display()
-                    );
-                    error_skipped += 1;
-                    continue;
-                }
-            }
-        }
-
-        files.push(DiscoveredFile {
-            absolute_path: path.to_path_buf(),
-            relative_path,
-            size,
-        });
     }
-
-    // Sort for deterministic output.
+    // Sort for deterministic output (including lossily decoded path names).
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-
     Ok(DiscoveryResult {
         files,
         binary_skipped,
-        large_skipped,
+        large_skipped: large_skipped_paths.len(),
         large_skipped_paths,
         error_skipped,
         root_dir,
+    })
+}
+
+enum DiscoveryOutcome {
+    File(DiscoveredFile),
+    Binary,
+    Large(String, u64),
+    Error,
+    Skipped,
+}
+
+fn discover_file(
+    path: &Path,
+    root: &Path,
+    root_dir: &Dir,
+    config: &IndexingConfig,
+    known_stamps: Option<&HashMap<String, String>>,
+) -> DiscoveryOutcome {
+    // Sphinx include fragments are inlined into parent RST documents,
+    // so indexing them separately duplicates content by default.
+    if !config.no_default_excludes && is_rst_include_fragment(path) {
+        debug!("skipping rst include fragment: {}", path.display());
+        return DiscoveryOutcome::Skipped;
+    }
+
+    let relative_path = match path.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    };
+
+    #[cfg(unix)]
+    if let Some(known) = known_stamps.and_then(|stamps| stamps.get(&relative_path))
+        && let Ok(metadata) = root_dir.symlink_metadata(Path::new(&relative_path))
+        && let Some(stamp) = crate::indexing::file_stamp::from_metadata(&metadata)
+        && stamp.value() == known
+        && metadata.len() > 0
+        && metadata.len() <= config.max_file_size_bytes
+        && !is_binary_extension(path)
+    {
+        return DiscoveryOutcome::File(DiscoveredFile {
+            absolute_path: path.to_path_buf(),
+            relative_path,
+            size: metadata.len(),
+        });
+    }
+
+    // Open once and stat through the handle, so the size gate and the
+    // binary sniff below observe the same file even if the path is swapped
+    // between opens; a fresh path stat here could bless another inode.
+    let mut file = match root_dir.open(Path::new(&relative_path)) {
+        Ok(file) => file,
+        Err(err) => {
+            warn!("cannot open {}: {err}", path.display());
+            return DiscoveryOutcome::Error;
+        }
+    };
+    let size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(err) => {
+            warn!("cannot read metadata for {}: {err}", path.display());
+            return DiscoveryOutcome::Error;
+        }
+    };
+
+    // Skip large files.
+    if size > config.max_file_size_bytes {
+        debug!(
+            "skipping large file: {} ({} bytes > {} max)",
+            path.display(),
+            size,
+            config.max_file_size_bytes
+        );
+        return DiscoveryOutcome::Large(relative_path, size);
+    }
+
+    // Skip empty files.
+    if size == 0 {
+        return DiscoveryOutcome::Skipped;
+    }
+
+    // Skip binary files by extension.
+    if is_binary_extension(path) {
+        debug!("skipping binary (extension): {}", path.display());
+        return DiscoveryOutcome::Binary;
+    }
+
+    // Skip binary files by content detection (read first 8KB).
+    #[cfg(windows)]
+    let known_text = known_stamps
+        .and_then(|stamps| stamps.get(&relative_path))
+        .is_some_and(|known| {
+            crate::indexing::file_stamp::from_handle(&file)
+                .ok()
+                .flatten()
+                .is_some_and(|stamp| stamp.value() == known)
+        });
+    #[cfg(not(windows))]
+    let known_text = false;
+    #[cfg(not(any(unix, windows)))]
+    let _ = known_stamps;
+    if !known_text {
+        match is_binary_file(&mut file) {
+            Ok(true) => {
+                debug!("skipping binary (content): {}", path.display());
+                return DiscoveryOutcome::Binary;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    "cannot read file for binary check: {} — {err}",
+                    path.display()
+                );
+                return DiscoveryOutcome::Error;
+            }
+        }
+    }
+
+    DiscoveryOutcome::File(DiscoveredFile {
+        absolute_path: path.to_path_buf(),
+        relative_path,
+        size,
     })
 }
 
@@ -1367,6 +1421,69 @@ mod tests {
 
     fn default_config() -> IndexingConfig {
         IndexingConfig::default()
+    }
+
+    #[test]
+    fn nested_gitignores_and_overrides_preserve_sorted_files_and_skip_counts() {
+        let dir = TempDir::new().unwrap();
+        for (relative, content) in [
+            (".gitignore", "*.log\nblocked/\n"),
+            ("main.rs", "fn main() {}\n"),
+            ("ignored.log", "ignored\n"),
+            ("blocked/lib.rs", "ignored\n"),
+            ("src/.gitignore", "*.tmp\n!keep.tmp\nnested/ignored.rs\n"),
+            ("src/keep.tmp", "kept\n"),
+            ("src/ignored.tmp", "ignored\n"),
+            ("src/lib.rs", "fn library() {}\n"),
+            ("src/notes.txt", "kept\n"),
+            ("src/overridden.rs", "excluded\n"),
+            ("src/ignored.cache", "excluded\n"),
+            ("src/nested/.gitignore", "*.txt\n!keep.txt\n"),
+            ("src/nested/keep.txt", "kept\n"),
+            ("src/nested/ignored.txt", "ignored\n"),
+            ("src/nested/ignored.rs", "ignored\n"),
+            ("src/nested/live.rs", "fn nested() {}\n"),
+            ("src/nested/include.rst.inc", "fragment\n"),
+            ("src/nested/binary.rs", "\0binary\n"),
+            ("image.png", "binary extension\n"),
+            ("empty.rs", ""),
+        ] {
+            let path = dir.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        for relative in ["a-big.rs", "src/z-big.rs", "src/nested/a-big.rs"] {
+            fs::write(dir.path().join(relative), [b'a'; 80]).unwrap();
+        }
+        let config = IndexingConfig {
+            extra_excludes: vec!["src/overridden.rs".into(), "*.cache".into()],
+            max_file_size_bytes: 64,
+            ..Default::default()
+        };
+        let result = discover_files(dir.path(), &config).unwrap();
+        let paths: Vec<_> = result
+            .files
+            .iter()
+            .map(|file| file.relative_path.replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ".gitignore",
+                "main.rs",
+                "src/.gitignore",
+                "src/keep.tmp",
+                "src/lib.rs",
+                "src/nested/.gitignore",
+                "src/nested/keep.txt",
+                "src/nested/live.rs",
+                "src/notes.txt",
+            ]
+        );
+        assert_eq!(result.binary_skipped, 2);
+        assert_eq!(result.large_skipped, 3);
+        assert_eq!(result.large_skipped_paths.len(), 3);
+        assert_eq!(result.error_skipped, 0);
     }
 
     /// The matcher exists so the MCP watcher classifies a path the same way
