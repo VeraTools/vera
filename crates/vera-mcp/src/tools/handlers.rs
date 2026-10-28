@@ -1116,7 +1116,11 @@ mod tests {
             let absent = handle_tool_call(tool, &serde_json::json!({}));
             let null = handle_tool_call(tool, &serde_json::json!({"repo": null, "path": null}));
             assert_eq!(null.is_error, absent.is_error);
-            assert_eq!(null.content[0].text, absent.content[0].text);
+            // The server directory may resolve to a live checkout index whose
+            // stats can change between calls; only errors are compared verbatim.
+            if absent.is_error {
+                assert_eq!(null.content[0].text, absent.content[0].text);
+            }
         }
         let result = handle_tool_call(
             "find_references",
