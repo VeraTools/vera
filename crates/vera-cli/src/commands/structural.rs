@@ -1,11 +1,8 @@
 //! `vera structural` — agent-oriented structural search intents.
 
-use std::io::Write;
-use std::time::Instant;
-
 use clap::ValueEnum;
 
-use crate::helpers::{output_results, prepare_indexed_search};
+use crate::helpers::{output_results, prepare_indexed_search, timing};
 use crate::state;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -50,28 +47,28 @@ pub fn run(
 
     let kind = kind_for(intent);
 
-    let started_at = Instant::now();
-    let results = vera_core::retrieval::search_structural(
-        &index_dir,
-        kind,
-        query,
-        limit.unwrap_or(20),
-        &filters,
-    )?;
+    let results = timing::timed("search", || {
+        vera_core::retrieval::search_structural(
+            &index_dir,
+            kind,
+            query,
+            limit.unwrap_or(20),
+            &filters,
+        )
+    })?;
 
-    output_results(
-        &results,
-        json_output,
-        raw,
-        compact,
-        config.retrieval.max_output_chars,
-    );
+    timing::timed("output", || {
+        output_results(
+            &results,
+            json_output,
+            raw,
+            compact,
+            config.retrieval.max_output_chars,
+        )
+    });
 
     if timing {
-        let elapsed = started_at.elapsed();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        let _ = writeln!(err, "[timing] total: {}ms", elapsed.as_millis());
+        timing::print_timings();
     }
 
     Ok(())

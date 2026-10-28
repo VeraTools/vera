@@ -1,9 +1,8 @@
 //! `vera grep <pattern>` — Regex search over indexed files.
 
 use std::io::Write;
-use std::time::Instant;
 
-use crate::helpers::{output_results, prepare_indexed_search};
+use crate::helpers::{output_results, prepare_indexed_search, timing};
 use crate::state;
 
 /// Run the `vera grep <pattern>` command.
@@ -28,23 +27,26 @@ pub fn run(
         prepare_indexed_search(&config.indexing, filters, git_scope.as_ref())?;
 
     let result_limit = limit.unwrap_or(20);
-    let started_at = Instant::now();
-    let results = vera_core::retrieval::search_regex(
-        &index_dir,
-        pattern,
-        result_limit,
-        case_insensitive,
-        context_lines,
-        &filters,
-    )?;
+    let results = timing::timed("search", || {
+        vera_core::retrieval::search_regex(
+            &index_dir,
+            pattern,
+            result_limit,
+            case_insensitive,
+            context_lines,
+            &filters,
+        )
+    })?;
 
-    output_results(
-        &results,
-        json_output,
-        raw,
-        compact,
-        config.retrieval.max_output_chars,
-    );
+    timing::timed("output", || {
+        output_results(
+            &results,
+            json_output,
+            raw,
+            compact,
+            config.retrieval.max_output_chars,
+        )
+    });
 
     if results.is_empty() {
         let stderr = std::io::stderr();
@@ -58,10 +60,7 @@ pub fn run(
     }
 
     if timing {
-        let elapsed = started_at.elapsed();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        let _ = writeln!(err, "[timing] total: {}ms", elapsed.as_millis());
+        timing::print_timings();
     }
 
     Ok(())

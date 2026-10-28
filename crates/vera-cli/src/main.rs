@@ -24,6 +24,7 @@ mod cli;
 use cli::{Cli, Commands};
 
 fn main() {
+    helpers::timing::mark_process_start();
     // Initialize tracing subscriber (logs go to stderr).
     tracing_subscriber::fmt()
         .with_env_filter(

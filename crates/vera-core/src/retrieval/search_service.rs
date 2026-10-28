@@ -30,6 +30,8 @@ pub struct SearchTimings {
     /// Why semantic search was skipped or failed, leaving BM25-only results.
     /// `None` when vector search succeeded or BM25-only search was requested.
     pub semantic_fallback: Option<String>,
+    /// Opening (or revalidating the cached) index stores.
+    pub index_open: Option<Duration>,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -48,6 +50,7 @@ impl SearchTimings {
                 .clone_from(&incoming.semantic_fallback);
         }
         for (target, delta) in [
+            (&mut self.index_open, incoming.index_open),
             (&mut self.embedding, incoming.embedding),
             (&mut self.bm25, incoming.bm25),
             (&mut self.vector, incoming.vector),
@@ -67,6 +70,7 @@ impl From<crate::retrieval::hybrid::HybridTimings> for SearchTimings {
         SearchTimings {
             rerank_outcome: t.rerank_outcome,
             semantic_fallback: t.semantic_fallback,
+            index_open: None,
             embedding: t.embedding,
             bm25: t.bm25,
             vector: t.vector,
@@ -300,6 +304,7 @@ impl SearchContext {
         let has_intent = matches!(vector_query, std::borrow::Cow::Owned(_));
         let fetch_limit = compute_fetch_limit_with_config(query, filters, result_limit, config);
         let stores = self.search_stores(index_dir)?;
+        let index_open = Some(total_start.elapsed());
         // `fallback` says why semantic search was skipped, or is `None` when
         // BM25-only search was requested.
         let bm25_only = |fallback: Option<String>| -> Result<(Vec<SearchResult>, SearchTimings)> {
@@ -316,6 +321,7 @@ impl SearchContext {
                 config,
             )?;
             timings.semantic_fallback = fallback;
+            timings.index_open = index_open;
             Ok((results, timings))
         };
 
@@ -439,6 +445,7 @@ impl SearchContext {
         };
 
         let mut timings = SearchTimings::from(hybrid_timings);
+        timings.index_open = index_open;
         // Like the runtime path, empty or already-small candidate pools do not
         // need reranking even when construction was unavailable.
         if results.len() > result_limit

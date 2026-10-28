@@ -262,6 +262,7 @@ mod tests {
         let incoming = SearchTimings {
             rerank_outcome: super::super::RerankOutcome::Reranked,
             semantic_fallback: Some("vector search failed".to_string()),
+            index_open: Some(Duration::from_millis(5)),
             embedding: Some(Duration::from_millis(10)),
             bm25: Some(Duration::from_millis(20)),
             vector: Some(Duration::from_millis(30)),

@@ -114,26 +114,32 @@ pub fn prepare_indexed_repo(
 ) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
-    let repo_root = resolve_index_root(&cwd)?;
+    let (repo_root, index_dir) = super::timing::timed("index lookup", || check_index_format(&cwd))?;
+    super::timing::timed("freshness", || {
+        warn_if_index_stale(&repo_root, indexing_config);
+    });
+    Ok((repo_root, index_dir))
+}
+
+/// Resolve the index for `cwd` and require the current index format: legacy
+/// suffixed rows would be silently wrong.
+fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let repo_root = resolve_index_root(cwd)?;
     let index_dir = vera_core::indexing::index_dir(&repo_root);
-    // Index format version must match: legacy suffixed rows would be silently wrong.
+    let metadata_path = index_dir.join("metadata.db");
+    if metadata_path.is_file()
+        && let Ok(store) = vera_core::storage::metadata::MetadataStore::open(&metadata_path)
+        && !vera_core::indexing::freshness::index_format_is_current(&store)
     {
-        let metadata_path = index_dir.join("metadata.db");
-        if metadata_path.is_file()
-            && let Ok(store) = vera_core::storage::metadata::MetadataStore::open(&metadata_path)
-            && !vera_core::indexing::freshness::index_format_is_current(&store)
-        {
-            anyhow::bail!(
-                "Index format version mismatch (expected {}, found {:?}). Run `vera index {}` to rebuild the index.",
-                vera_core::indexing::freshness::INDEX_FORMAT_VERSION,
-                store
-                    .get_index_meta(vera_core::indexing::freshness::INDEX_FORMAT_VERSION_KEY)
-                    .unwrap_or(None),
-                repo_root.display()
-            );
-        }
+        anyhow::bail!(
+            "Index format version mismatch (expected {}, found {:?}). Run `vera index {}` to rebuild the index.",
+            vera_core::indexing::freshness::INDEX_FORMAT_VERSION,
+            store
+                .get_index_meta(vera_core::indexing::freshness::INDEX_FORMAT_VERSION_KEY)
+                .unwrap_or(None),
+            repo_root.display()
+        );
     }
-    warn_if_index_stale(&repo_root, indexing_config);
     Ok((repo_root, index_dir))
 }
 

@@ -5,6 +5,7 @@ mod index_progress;
 mod index_root;
 mod output;
 mod runtime;
+pub mod timing;
 
 pub use filters::*;
 pub use index_progress::*;

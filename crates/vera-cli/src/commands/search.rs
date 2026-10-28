@@ -1,14 +1,15 @@
 //! `vera search <query>` — Search the indexed codebase.
 
 use anyhow::bail;
-use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use vera_core::config::{InferenceBackend, VeraConfig};
 use vera_core::retrieval::search_service::{SearchContext, SearchTimings};
 use vera_core::types::{SearchFilters, SearchResult};
 
-use crate::helpers::{output_search_results, prepare_indexed_search, should_offer_auto_index};
+use crate::helpers::{
+    output_search_results, prepare_indexed_search, should_offer_auto_index, timing,
+};
 use crate::state;
 
 /// Run the `vera search <query>` command.
@@ -59,13 +60,16 @@ pub fn run(
 
     let (index_dir, filters) =
         prepare_indexed_search(&config.indexing, filters, git_scope.as_ref())?;
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
-    let search_context = if vera_core::indexing::is_full_text_only(&index_dir)? {
-        SearchContext::bm25_only()
-    } else {
-        rt.block_on(SearchContext::new(&config, backend))
-    };
+    let (rt, search_context) = timing::timed("setup", || -> anyhow::Result<_> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
+        let search_context = if vera_core::indexing::is_full_text_only(&index_dir)? {
+            SearchContext::bm25_only()
+        } else {
+            rt.block_on(SearchContext::new(&config, backend))
+        };
+        Ok((rt, search_context))
+    })?;
 
     let runner = SearchRunner {
         rt: &rt,
@@ -83,26 +87,38 @@ pub fn run(
         runner.execute_multi_query_search(&queries, intent)?
     };
 
-    output_search_results(
-        &results,
-        json_output,
-        raw,
-        compact,
-        config.retrieval.max_output_chars,
-        rerank_status.then(|| {
-            (
-                &timings.rerank_outcome,
-                vera_core::retrieval::reranker_kind(&config, backend),
-            )
-        }),
-    );
+    timing::record_stages(&[
+        ("index open", timings.index_open),
+        ("embedding", timings.embedding),
+        ("bm25", timings.bm25),
+        ("vector", timings.vector),
+        ("fusion", timings.fusion),
+        ("reranking", timings.reranking),
+        ("augmentation", timings.augmentation),
+        ("search", timings.total),
+    ]);
+    timing::timed("output", || {
+        output_search_results(
+            &results,
+            json_output,
+            raw,
+            compact,
+            config.retrieval.max_output_chars,
+            rerank_status.then(|| {
+                (
+                    &timings.rerank_outcome,
+                    vera_core::retrieval::reranker_kind(&config, backend),
+                )
+            }),
+        )
+    });
 
     if results.is_empty() && !json_output {
         print_path_glob_hint(&filters, &index_dir);
     }
 
     if timing {
-        print_timings(&timings);
+        timing::print_timings();
     }
 
     Ok(())
@@ -209,29 +225,4 @@ fn print_path_glob_hint(filters: &SearchFilters, index_dir: &Path) {
         "Hint: '{}' matched no files directly: wildcarded directory patterns do not get prefix matching, but appending '/**' would select everything beneath them.",
         misses.join("', '")
     );
-}
-
-fn print_timings(timings: &SearchTimings) {
-    let stderr = std::io::stderr();
-    let mut err = stderr.lock();
-    let fmt = |d: Option<Duration>| -> String {
-        match d {
-            Some(d) => format!("{:.1}ms", d.as_micros() as f64 / 1000.0),
-            None => "n/a".to_string(),
-        }
-    };
-    let stages: &[(&str, Option<Duration>)] = &[
-        ("embedding", timings.embedding),
-        ("bm25", timings.bm25),
-        ("vector", timings.vector),
-        ("fusion", timings.fusion),
-        ("reranking", timings.reranking),
-        ("augmentation", timings.augmentation),
-        ("total", timings.total),
-    ];
-    for (name, duration) in stages {
-        if duration.is_some() || *name == "total" {
-            let _ = writeln!(err, "[timing] {name}: {}", fmt(*duration));
-        }
-    }
 }
