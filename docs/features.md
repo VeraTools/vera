@@ -11,7 +11,7 @@ vera search "retry failed uploads with exponential backoff"
 vera search "parse_config"
 ```
 
-Each query runs two searches at once: keyword search (BM25), which is good at exact identifiers, paths, and config keys, and embedding search, which finds code that matches the meaning of the query even when the words differ. Vera merges the two result lists, then applies code-aware ranking. [How Vera works](how-it-works.md) explains each step.
+Each query runs two searches at once: keyword search (BM25), which is good at exact identifiers, paths, and config keys, and embedding search, which finds code that matches the meaning of the query even when the words differ. Vera merges the two result lists, then applies code-aware ranking. A keyword-only index (`--full-text-only`) uses BM25 alone. [How Vera works](how-it-works.md) explains each step.
 
 Ranking prefers source files over docs and tests, leaves generated code out unless you pass `--include-generated`, and prefers the definition of a symbol over places that only mention it. Results are returned five at a time by default; change that with `--limit` or `retrieval.default_limit`.
 
@@ -184,7 +184,7 @@ To search your project and other indexed trees in one call, repeat `--also`:
 vera search "retry backoff" --also ~/.cargo/registry/src
 ```
 
-Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. Up to 8 indexes can be searched at once. `--also` never creates an index, cannot be combined with `--changed`, `--since`, or `--base`, and an index that fails to search is reported on stderr while the other results are still shown. With `--deep`, the query is expanded once and reused for every index.
+Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. When only one distinct index ends up searched (for example, `--also` names the current project), output keeps the single-index format. Up to 8 indexes can be searched at once. `--also` never creates an index and cannot be combined with `--changed`, `--since`, or `--base`. A directory that is missing or not indexed stops the search with an error. If an extra index fails during the search, a warning goes to stderr and the other results are still shown. With `--deep`, the query is expanded once and reused for every index.
 
 ### Choosing what gets indexed
 

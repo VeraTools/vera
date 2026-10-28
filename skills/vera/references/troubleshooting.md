@@ -29,7 +29,7 @@ Fix:
 vera update .
 ```
 
-Works from any subdirectory; it refreshes the repository root's index.
+Works from any subdirectory; it refreshes the repository root's index. If it reports no changes but results are still stale, run `vera update . --verify` to hash every file.
 
 ## Local ONNX Inference Fails
 

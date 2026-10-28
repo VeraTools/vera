@@ -32,9 +32,10 @@ Run `vera setup` with no flags in a terminal for a guided setup that picks a bac
 
 - Search by behavior and by name. Every query runs keyword search (BM25) and embedding search together, merges the results, and ranks definitions above passing mentions and source files above tests and docs.
 - Whole functions, not line fragments. Vera indexes functions, classes, methods, and other symbols as separate results, with structural (tree-sitter) parsing for most of its 65 supported languages.
-- Fast on an ordinary CPU. On a Ryzen 7 9800X3D desktop, Vera indexes its own repository (438 files, about 7,900 chunks) in under a second, and a command-line search returns in about 0.13 seconds including process startup. `vera update .` and `vera watch .` re-index only changed files.
+- Fast on an ordinary CPU. On a Ryzen 7 9800X3D desktop, Vera indexes its own repository (447 files, about 8,100 chunks) in under a second, and a command-line search returns in about 0.13 seconds including process startup. A search over a 51,000-file keyword-only index takes about 0.2 seconds. `vera update .` and `vera watch .` re-index only changed files.
 - Measured search quality. On Semble's 1,251-task code search benchmark, with the same embedding model for both tools, Vera scores within 1% of Semble on nDCG@10 and slightly ahead on Recall@5, with an index about a seventh the size. See the [benchmarks](https://github.com/VeraTools/Vera/blob/master/docs/benchmarks.md).
-- Structural questions from the same index: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. Any search can be limited to files changed in your working tree or branch.
+- Dependency search. Index a dependency tree once with `--full-text-only` (keyword-only, no model needed), then search it next to your project with `vera search "retry backoff" --also ~/.cargo/registry/src`.
+- Structural questions from the same index: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. A search can be limited to files changed in your working tree or branch.
 - Agent integration. `vera agent install` adds a Vera skill to more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, and Copilot. An MCP server (`vera mcp`) is included for clients that prefer it; see the [MCP guide](https://github.com/VeraTools/Vera/blob/master/docs/mcp.md).
 
 Results come back as Markdown code blocks labeled with path, line range, and symbol. Add `--json` for machine-readable output.
@@ -63,7 +64,7 @@ The default backend, Potion Code (`minishlab/potion-code-16M-v2`), runs on the C
 
 `vera setup --api` configures hosted models instead. Qwen3 embeddings plus reranking through OpenRouter (paid) scored highest in our model screening, and any OpenAI-compatible endpoint works. See [API mode](https://github.com/VeraTools/Vera/blob/master/docs/models.md#api-mode).
 
-With a local backend, your code and queries stay on your machine. In API mode, or with an API reranker or `--deep` completion endpoint configured, Vera sends chunk text and queries to the endpoints you set. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
+With a local backend, your code and queries stay on your machine. In API mode, or with an API reranker or `--deep` completion endpoint configured, Vera sends chunk text, queries, and (for `--deep`) symbol names and file paths to the endpoints you set. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
 
 ## How this package installs Vera
 

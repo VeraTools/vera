@@ -42,15 +42,17 @@ Run `vera setup` with no flags in a terminal for a guided setup that can also in
 
 ## What Vera does well
 
-**It finds code by behavior and by name.** Every query runs keyword search (BM25) and embedding search side by side, merges the two lists, then applies code-aware ranking that prefers definitions over passing mentions and source files over tests and docs. Searching `parse_config` finds that function; searching "load settings from environment variables" finds it too.
+**It finds code by behavior and by name.** Each query runs keyword search (BM25) and embedding search side by side, merges the two lists, then applies code-aware ranking that prefers definitions over passing mentions and source files over tests and docs. Searching `parse_config` finds that function; searching "load settings from environment variables" finds it too.
 
 **Results are whole functions, not line fragments.** Vera parses files with tree-sitter and indexes functions, classes, methods, structs, and other symbols as separate chunks. 54 of the [65 supported languages](docs/supported-languages.md) get symbol-level chunks; config files, docs, and the rest are split by section, whole file, or line windows. An agent reads the relevant symbol instead of opening the whole file.
 
-**It is fast on an ordinary CPU.** On a desktop CPU (Ryzen 7 9800X3D), Vera indexes its own repository (438 files, about 7,900 chunks) in under a second, and a search from the command line returns in about 0.13 seconds, process startup included. `vera update .` and `vera watch .` re-index only the files that changed.
+**It is fast on an ordinary CPU.** On a desktop CPU (Ryzen 7 9800X3D), Vera indexes its own repository (447 files, about 8,100 chunks) in under a second, and a search from the command line returns in about 0.13 seconds, process startup included. It stays quick on large trees: a search over a 51,000-file keyword-only index of the Cargo registry takes about 0.2 seconds, including the check for changed files. `vera update .` and `vera watch .` re-index only the files that changed.
 
 **Its search quality holds up against the best local tools.** On Semble's 1,251-task code search benchmark, run with the same embedding model, Vera scores within 1% of Semble on nDCG@10 and slightly ahead on Recall@5, with an index about a seventh the size. Details are [below](#benchmarks).
 
-**It does more than search.** The same index answers structural questions: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. You can scope any search to files changed in your working tree or branch.
+**It does more than search.** The same index answers structural questions: where a symbol is defined, who calls it, which routes or environment variables exist, which types implement an interface, and which functions have no callers. You can scope a search to files changed in your working tree or branch.
+
+**It searches your dependencies too.** Index a dependency tree once with `vera index ~/.cargo/registry/src --full-text-only`, a keyword-only index that needs no model and builds quickly. Then search it next to your project with `vera search "retry backoff" --also ~/.cargo/registry/src`. Each tree is ranked on its own and the lists are merged, with a small head start for your project.
 
 **It is built for agents.** `vera agent install` adds a Vera skill to more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, and Copilot. Results come back as compact Markdown code blocks with paths and line ranges, which agents read well. An MCP server is included for clients that prefer it.
 
@@ -131,7 +133,7 @@ See [models and backends](docs/models.md) for measurements and setup details.
 
 ## Privacy
 
-With a local backend, your code and queries stay on your machine; only the first model download needs the network. Code or queries go elsewhere only to endpoints you configure: API mode sends chunk text and queries to the embedding endpoint, an API reranker receives queries and candidate chunks (even with a local backend), and `--deep` with a completion endpoint sends the query to it. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
+With a local backend, your code and queries stay on your machine; only the first model download needs the network. Code or queries go elsewhere only to endpoints you configure: API mode sends chunk text and queries to the embedding endpoint, an API reranker receives queries and candidate chunks (even with a local backend), and `--deep` with a completion endpoint sends it the query plus symbol names and file paths from a quick keyword search. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
 
 ## Benchmarks
 

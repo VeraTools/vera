@@ -118,7 +118,7 @@ After changing `indexing.max_chunk_bytes`, run `vera index .` so every file is c
 
 ## 7. Use it from an MCP client
 
-Configure the client as described in [MCP](mcp.md). The `vera mcp` process must see any environment variables you rely on, such as the completion settings, so set them in your shell profile or in a wrapper script the client launches.
+Configure the client as described in [MCP](mcp.md). The `vera mcp` process must see any embedding or reranker environment variables you rely on, so set them in your shell profile or in a wrapper script the client launches. Completion-backed `--deep` search is available only from the CLI.
 
 ## Troubleshooting
 

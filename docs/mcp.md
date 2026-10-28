@@ -16,7 +16,7 @@ For most coding agents, the CLI plus the skill installed by `vera agent install`
 | `find_references` | Callers or callees from Vera's stored reference data. |
 | `explain_path` | Why a path is or is not indexed: ignore rules, binary detection, size, or default exclusions. |
 
-If the server's working directory has no index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
+If neither the server's working directory nor any parent directory has an index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
 
 A search result can include a second text block with warnings: the index is stale, semantic search was unavailable so results are keyword-only, or the reranker failed so results are not reranked. Each warning names its cause; see [Troubleshooting](troubleshooting.md#keyword-only-results).
 
@@ -36,7 +36,7 @@ A different repository is never auto-indexed or watched. Omitting `repo`, or sel
 {"query":"retry backoff","repos":["/home/user/.cargo/registry/src"]}
 ```
 
-Results are merged by rank with a one-place head start for the main repository, and every result gains a `repo` field naming its repository root; `file_path` stays relative to that root. Entries in `repos` are never auto-indexed, cannot be combined with git scopes, and a repository that fails to search is reported in the warnings block while the other results are still returned.
+Results are merged by rank with a one-place head start for the main repository, and every result gains a `repo` field naming its repository root; `file_path` stays relative to that root. If only one distinct repository ends up searched, results keep the single-repository format. Entries in `repos` are never auto-indexed and cannot be combined with git scopes. An entry that is missing or not indexed returns an error; a repository that fails during the search is reported in the warnings block while the other results are still returned.
 
 ## Client setup
 
