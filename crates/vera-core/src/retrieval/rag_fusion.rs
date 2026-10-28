@@ -35,6 +35,32 @@ pub async fn execute_deep_search_with_context(
     filters: &SearchFilters,
     result_limit: usize,
 ) -> Result<(Vec<SearchResult>, SearchTimings)> {
+    let start = Instant::now();
+    let plan = prepare_deep_search(index_dir, query).await?;
+    let (results, mut timings) = execute_prepared_deep_search(
+        context,
+        index_dir,
+        &plan,
+        intent,
+        config,
+        filters,
+        result_limit,
+    )
+    .await?;
+    timings.total = Some(start.elapsed());
+    Ok((results, timings))
+}
+
+/// Query expansion is independent of the target index after preparation.
+/// `None` selects the existing iterative fallback, which needs no completion API.
+pub struct DeepSearchPlan {
+    query: String,
+    expanded: Option<Vec<String>>,
+}
+
+/// Collect hints from the primary index and make at most one completion call.
+/// Reuse the returned plan for every index in a cross-index search.
+pub async fn prepare_deep_search(index_dir: &Path, query: &str) -> Result<DeepSearchPlan> {
     let completion_client = match tokio::task::spawn_blocking(
         CompletionClient::from_env_if_configured,
     )
@@ -52,47 +78,11 @@ pub async fn execute_deep_search_with_context(
     };
 
     let Some(completion_client) = completion_client else {
-        return super::iterative_search::execute_iterative_search_with_context(
-            context,
-            index_dir,
-            query,
-            intent,
-            config,
-            filters,
-            result_limit,
-            1,
-        )
-        .await;
+        return Ok(DeepSearchPlan {
+            query: query.to_string(),
+            expanded: None,
+        });
     };
-
-    execute_rag_fusion_with_context(
-        context,
-        index_dir,
-        query,
-        intent,
-        config,
-        filters,
-        result_limit,
-        &completion_client,
-    )
-    .await
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "The completion client and search inputs remain explicit for each deep-search invocation."
-)]
-async fn execute_rag_fusion_with_context(
-    context: &SearchContext,
-    index_dir: &Path,
-    query: &str,
-    intent: Option<&str>,
-    config: &VeraConfig,
-    filters: &SearchFilters,
-    result_limit: usize,
-    completion_client: &CompletionClient,
-) -> Result<(Vec<SearchResult>, SearchTimings)> {
-    let overall_start = Instant::now();
 
     // BM25 pre-filter: run a cheap keyword search to gather codebase context
     // (symbol names and file paths) that helps the LLM generate better rewrites.
@@ -127,6 +117,38 @@ async fn execute_rag_fusion_with_context(
         ));
     }
 
+    Ok(DeepSearchPlan {
+        query: query.to_string(),
+        expanded: Some(queries),
+    })
+}
+
+/// Search one index using an already-expanded query, or follow its symbols
+/// iteratively when no completion endpoint was available during preparation.
+pub async fn execute_prepared_deep_search(
+    context: &SearchContext,
+    index_dir: &Path,
+    plan: &DeepSearchPlan,
+    intent: Option<&str>,
+    config: &VeraConfig,
+    filters: &SearchFilters,
+    result_limit: usize,
+) -> Result<(Vec<SearchResult>, SearchTimings)> {
+    let Some(queries) = &plan.expanded else {
+        return super::iterative_search::execute_iterative_search_with_context(
+            context,
+            index_dir,
+            &plan.query,
+            intent,
+            config,
+            filters,
+            result_limit,
+            1,
+        )
+        .await;
+    };
+    let overall_start = Instant::now();
+
     let per_query_limit = multi_query_candidate_limit(result_limit);
 
     let query_count = queries.len();
@@ -158,16 +180,14 @@ async fn execute_rag_fusion_with_context(
         }
     }
 
-    // Remove empty slots (failed queries).
+    // Drop failed subqueries. The original query (idx 0) succeeded or returned
+    // above, so an index with no hits yields an empty list, not an error, and a
+    // cross-index search keeps the other indexes' results.
     let (filled_results, filled_weights): (Vec<_>, Vec<_>) = per_query_results
         .into_iter()
         .zip(per_query_weights)
-        .filter(|(r, _)| !r.is_empty())
+        .filter(|(_, weight)| *weight > 0.0)
         .unzip();
-
-    if filled_results.is_empty() {
-        return Err(anyhow!("deep search failed: all query candidates failed"));
-    }
 
     let slices: Vec<&[SearchResult]> = filled_results.iter().map(Vec::as_slice).collect();
     let fused = fuse_rrf_multi_weighted(
@@ -230,6 +250,69 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[tokio::test]
+    async fn prepared_expansion_is_reused_across_indexes_without_a_completion_client() {
+        let scratch =
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let config = VeraConfig::default();
+        let filters = SearchFilters::default();
+        let mut repos = Vec::new();
+        for name in ["primary_marker", "extra_marker"] {
+            let repo = tempfile::tempdir_in(&scratch).unwrap();
+            std::fs::write(
+                repo.path().join("lib.rs"),
+                format!("pub fn shared_marker() {{ {name}(); }}\n"),
+            )
+            .unwrap();
+            crate::indexing::pipeline::index_repository_with_progress_and_cancellation(
+                repo.path(),
+                None::<&crate::embedding::DynamicProvider>,
+                &config,
+                "",
+                |_| {},
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            repos.push(repo);
+        }
+        // Expansion is prepared outside the per-index loop. The executor accepts
+        // only this reusable plan, not a completion client or expansion callback.
+        let plan = DeepSearchPlan {
+            query: "shared_marker".into(),
+            expanded: Some(dedupe_queries_with_original(
+                "shared_marker",
+                vec!["marker".into()],
+            )),
+        };
+        let context = SearchContext::bm25_only();
+        let dirs: Vec<_> = repos
+            .iter()
+            .map(|repo| crate::indexing::index_dir(repo.path()))
+            .collect();
+        let outcomes = futures::future::join_all(dirs.iter().map(|dir| {
+            execute_prepared_deep_search(&context, dir, &plan, None, &config, &filters, 5)
+        }))
+        .await;
+        for (outcome, marker) in outcomes.into_iter().zip(["primary_marker", "extra_marker"]) {
+            let (results, _) = outcome.unwrap();
+            assert!(results.iter().any(|result| result.content.contains(marker)));
+        }
+        // An index with no hits returns an empty list, so a cross-index search
+        // keeps the other indexes' results instead of failing.
+        let empty = DeepSearchPlan {
+            query: "absent_token".into(),
+            expanded: Some(vec!["absent_token".into(), "missing_token".into()]),
+        };
+        let (results, _) =
+            execute_prepared_deep_search(&context, &dirs[0], &empty, None, &config, &filters, 5)
+                .await
+                .unwrap();
+        assert!(results.is_empty());
+        assert_eq!(plan.expanded.unwrap(), ["shared_marker", "marker"]);
+    }
+
     #[test]
     fn dedupe_preserves_original_first() {
         let queries = dedupe_queries_with_original(
@@ -262,6 +345,7 @@ mod tests {
         let incoming = SearchTimings {
             rerank_outcome: super::super::RerankOutcome::Reranked,
             semantic_fallback: Some("vector search failed".to_string()),
+            index_open: Some(Duration::from_millis(5)),
             embedding: Some(Duration::from_millis(10)),
             bm25: Some(Duration::from_millis(20)),
             vector: Some(Duration::from_millis(30)),

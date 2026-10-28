@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use vera_core::presentation::{CompactResult, truncate_to_budget};
+use vera_core::retrieval::cross_index::{
+    IndexSearch, merge_results, rewrite_absolute_path_filters, search_indexes, search_roots,
+    validate_git_scope,
+};
 
 use crate::protocol::ToolCallResult;
 
@@ -20,6 +24,15 @@ fn compact_results_json(
     results: &[vera_core::types::SearchResult],
     budget: usize,
     signatures_only: bool,
+) -> Result<String, serde_json::Error> {
+    compact_results_json_with_repos(results, budget, signatures_only, None)
+}
+
+fn compact_results_json_with_repos(
+    results: &[vera_core::types::SearchResult],
+    budget: usize,
+    signatures_only: bool,
+    repos: Option<&[&std::path::Path]>,
 ) -> Result<String, serde_json::Error> {
     use vera_core::parsing::signatures::extract_signature_for_path;
 
@@ -46,7 +59,14 @@ fn compact_results_json(
         .collect();
 
     let mut remaining = budget;
-    let mut compact: Vec<CompactResult> = Vec::with_capacity(results.len());
+    #[derive(serde::Serialize)]
+    struct WithRepo<'a> {
+        #[serde(flatten)]
+        result: CompactResult<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        repo: Option<&'a std::path::Path>,
+    }
+    let mut compact = Vec::with_capacity(results.len());
     for (i, r) in results.iter().enumerate() {
         if budget > 0 && remaining == 0 {
             break;
@@ -58,14 +78,17 @@ fn compact_results_json(
         } else {
             std::borrow::Cow::Borrowed(display[i])
         };
-        compact.push(CompactResult {
-            file_path: &r.file_path,
-            line_start: r.line_start,
-            line_end: r.line_end,
-            content,
-            symbol_name: r.symbol_name.as_deref(),
-            symbol_type: r.symbol_type.as_ref(),
-            part_index: r.part_index,
+        compact.push(WithRepo {
+            result: CompactResult {
+                file_path: &r.file_path,
+                line_start: r.line_start,
+                line_end: r.line_end,
+                content,
+                symbol_name: r.symbol_name.as_deref(),
+                symbol_type: r.symbol_type.as_ref(),
+                part_index: r.part_index,
+            },
+            repo: repos.map(|repos| repos[i]),
         });
     }
     serde_json::to_string(&compact)
@@ -205,39 +228,116 @@ fn resolve_repository_or_path(args: &Value) -> Result<Repository, ToolCallResult
 }
 
 /// Resolve a repository without changing the server's process-wide directory.
+///
+/// Both the server's own directory and an explicit `repo` resolve to the
+/// nearest indexed ancestor, as the CLI does, so a server started in (or a
+/// `repo` naming) a subdirectory uses the existing index instead of
+/// creating a nested one. Only the server's directory may lack an index: it is
+/// auto-indexed on first search.
 fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult> {
     let cwd = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
         .map_err(|e| ToolCallResult::error(format!("Failed to get working directory: {e}")))?;
+    resolve_repository_from(&cwd, repo)
+}
+
+/// [`resolve_repository`] for a server whose canonical working directory is `cwd`.
+fn resolve_repository_from(
+    cwd: &std::path::Path,
+    repo: Option<&Value>,
+) -> Result<Repository, ToolCallResult> {
+    let server_root =
+        vera_core::indexing::find_index_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let root = match repo.filter(|value| !value.is_null()) {
         Some(value) => {
             let path = value
                 .as_str()
                 .ok_or_else(|| ToolCallResult::error("Repository path must be a string"))?;
-            cwd.join(path).canonicalize().map_err(|err| {
+            let requested = cwd.join(path).canonicalize().map_err(|err| {
                 ToolCallResult::error(format!("Cannot resolve repository {path}: {err}"))
-            })?
+            })?;
+            if !requested.is_dir() {
+                return Err(ToolCallResult::error(format!(
+                    "Repository is not a directory: {}",
+                    requested.display()
+                )));
+            }
+            match vera_core::indexing::find_index_root(&requested) {
+                Some(root) => root,
+                None if requested == server_root => requested,
+                None => {
+                    return Err(ToolCallResult::error(format!(
+                        "No index found at {} or any parent directory. Run `vera index {}` first.",
+                        requested.display(),
+                        requested.display()
+                    )));
+                }
+            }
         }
-        None => cwd.clone(),
+        None => server_root.clone(),
     };
-    if !root.is_dir() {
-        return Err(ToolCallResult::error(format!(
-            "Repository is not a directory: {}",
-            root.display()
-        )));
-    }
-    let is_server_repo = root == cwd;
-    if !is_server_repo && !vera_core::indexing::index_exists(&root) {
-        return Err(ToolCallResult::error(format!(
-            "No index found at {}. Run `vera index {}` first.",
-            root.display(),
-            root.display()
-        )));
-    }
     Ok(Repository {
+        is_server_repo: root == server_root,
         root,
-        is_server_repo,
     })
+}
+
+fn resolve_search_repositories(args: &Value) -> Result<Vec<Repository>, ToolCallResult> {
+    let extras = match args.get("repos") {
+        None => &[][..],
+        Some(value) => value.as_array().map(Vec::as_slice).ok_or_else(|| {
+            ToolCallResult::error("Parameter 'repos' must be an array of strings")
+        })?,
+    };
+    let git_scope = git_scope_from_args(args).map_err(ToolCallResult::error)?;
+    validate_git_scope(!extras.is_empty(), git_scope.is_some(), "repos")
+        .map_err(|err| ToolCallResult::error(err.to_string()))?;
+    let primary = resolve_repository(args.get("repo"))?;
+    let cwd = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .map_err(|err| ToolCallResult::error(format!("Failed to get working directory: {err}")))?;
+    let mut extra_roots = Vec::with_capacity(extras.len());
+    for value in extras {
+        // Unlike the primary, even the server directory must already be indexed
+        // when explicitly listed in repos. It never starts an indexer/watcher.
+        if !value.is_string() {
+            return Err(ToolCallResult::error(
+                "Parameter 'repos' must be an array of strings",
+            ));
+        }
+        let repo = resolve_repository_from(&cwd, Some(value))?;
+        if vera_core::indexing::find_index_root(&repo.root).is_none() {
+            return Err(ToolCallResult::error(format!(
+                "No index found at {} or any parent directory. Run `vera index {}` first.",
+                repo.root.display(),
+                repo.root.display()
+            )));
+        }
+        extra_roots.push(repo.root);
+    }
+    let roots = search_roots(&primary.root, extra_roots)
+        .map_err(|err| ToolCallResult::error(err.to_string()))?;
+    Ok(roots
+        .into_iter()
+        .enumerate()
+        .map(|(i, root)| Repository {
+            root,
+            is_server_repo: i == 0 && primary.is_server_repo,
+        })
+        .collect())
+}
+
+fn secondary_search_index(repo: &Repository) -> anyhow::Result<std::path::PathBuf> {
+    let index_dir = vera_core::indexing::index_dir(&repo.root);
+    let store =
+        vera_core::storage::metadata::MetadataStore::open_existing(&index_dir.join("metadata.db"))?;
+    if !vera_core::indexing::freshness::index_format_is_current(&store) {
+        anyhow::bail!(
+            "Index format version mismatch. Run `vera index {}` to rebuild the index.",
+            repo.root.display()
+        );
+    }
+    Ok(index_dir)
 }
 
 fn exact_paths_from_args(
@@ -371,89 +471,123 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
     config.adjust_for_backend(backend);
     let result_limit = limit.unwrap_or(config.retrieval.default_limit);
 
-    let repo = match resolve_repository(args.get("repo")) {
-        Ok(repo) => repo,
+    let repos = match resolve_search_repositories(args) {
+        Ok(repos) => repos,
         Err(err) => return err,
     };
-    if let Err(err) = apply_git_scope_filters(args, &repo.root, &mut filters) {
+    if let Err(err) = apply_git_scope_filters(args, &repos[0].root, &mut filters) {
         return err;
     }
-    let index_dir = match repo.search_index_dir() {
-        Ok(index_dir) => index_dir,
-        Err(err) => return err,
-    };
+    let mut notices = Vec::new();
+    let mut prepared = Vec::with_capacity(repos.len());
+    for (i, repo) in repos.iter().enumerate() {
+        let index_dir = if i == 0 {
+            match repo.search_index_dir() {
+                Ok(index_dir) => index_dir,
+                Err(err) => return err,
+            }
+        } else {
+            match secondary_search_index(repo) {
+                Ok(index_dir) => index_dir,
+                Err(err) => {
+                    notices.push(format!("warning: skipped {}: {err}", repo.root.display()));
+                    continue;
+                }
+            }
+        };
+        let mut repo_filters = filters.clone();
+        rewrite_absolute_path_filters(&repo.root, &mut repo_filters.path_glob);
+        // Preserve single-index fallback on a mode read error; search reports it.
+        let keyword_only = matches!(vera_core::indexing::is_full_text_only(&index_dir), Ok(true));
+        prepared.push((repo, index_dir, repo_filters, keyword_only));
+    }
     let rt = match search_runtime() {
         Ok(rt) => rt,
         Err(err) => return err,
     };
     // A mode read error falls through to the embedded path, which degrades to BM25 itself.
-    let search_context = if matches!(vera_core::indexing::is_full_text_only(&index_dir), Ok(true)) {
-        keyword_search_context()
-    } else {
+    let embedded = if prepared.iter().any(|(_, _, _, keyword_only)| !keyword_only) {
         match cached_search_context(rt, &config, backend) {
-            Ok(context) => context,
+            Ok(context) => Some(context),
             Err(err) => return err,
         }
-    };
-
-    // Run each query. A multi-query search over-fetches per query so fusion has
-    // candidates to merge; a single query is already at its final width.
-    let per_query_limit = if queries.len() > 1 {
-        vera_core::retrieval::multi_query_candidate_limit(result_limit)
     } else {
-        result_limit
+        None
     };
-
-    let mut result_sets: Vec<Vec<vera_core::types::SearchResult>> =
-        Vec::with_capacity(queries.len());
-    let mut timings = vera_core::retrieval::search_service::SearchTimings::default();
-    for query in &queries {
-        // Pass the raw query plus the optional intent. Core applies the intent
-        // only to the semantic (embedding/rerank) side; BM25 gets the raw query
-        // so Tantivy does not parse `intent:` as a field. See issue #20.
-        match rt.block_on(search_context.search(
-            &index_dir,
-            query,
-            intent,
-            &config,
-            &filters,
-            per_query_limit,
-        )) {
-            Ok((results, query_timings)) => {
-                timings.merge(&query_timings);
-                result_sets.push(results);
+    let keyword = keyword_search_context();
+    let indexes: Vec<_> = prepared
+        .iter()
+        .map(|(_, index_dir, filters, keyword_only)| IndexSearch {
+            context: if *keyword_only {
+                keyword.as_ref()
+            } else {
+                embedded
+                    .as_ref()
+                    .expect("semantic context initialized")
+                    .as_ref()
+            },
+            index_dir,
+            filters,
+        })
+        .collect();
+    let outcomes = match rt.block_on(search_indexes(
+        &indexes,
+        &queries,
+        intent,
+        &config,
+        result_limit,
+        false,
+    )) {
+        Ok(outcomes) => outcomes,
+        Err(err) => return ToolCallResult::error(format!("Search failed: {err}")),
+    };
+    let mut lists = Vec::with_capacity(outcomes.len());
+    let mut searched = Vec::new();
+    for (i, outcome) in outcomes.into_iter().enumerate() {
+        let root = &prepared[i].0.root;
+        match outcome {
+            Ok((results, timings)) => {
+                let degraded = degraded_search_notices(&timings, queries.len() > 1);
+                notices.extend(degraded.into_iter().map(|notice| {
+                    if prepared.len() > 1 {
+                        format!("{}: {notice}", root.display())
+                    } else {
+                        notice
+                    }
+                }));
+                searched.push(i);
+                lists.push(results);
             }
-            Err(e) => return ToolCallResult::error(format!("Search failed: {e}")),
+            Err(err) if i == 0 => return ToolCallResult::error(format!("Search failed: {err}")),
+            Err(err) => {
+                notices.push(format!("warning: skipped {}: {err}", root.display()));
+                lists.push(Vec::new());
+            }
         }
     }
-
-    let all_results = if result_sets.len() == 1 {
-        result_sets.remove(0)
-    } else {
-        match fuse_multi_query_results(
-            &index_dir,
-            &queries,
-            &result_sets,
-            &filters,
-            config.retrieval.rrf_k,
-            result_limit,
-        ) {
-            Ok(results) => results,
-            Err(e) => return ToolCallResult::error(format!("Search failed: {e}")),
-        }
-    };
+    let cross_mode = searched.len() > 1;
+    let (repo_indexes, all_results): (Vec<_>, Vec<_>) =
+        merge_results(lists, result_limit).into_iter().unzip();
+    let result_repos: Vec<_> = repo_indexes
+        .iter()
+        .map(|i| prepared[*i].0.root.as_path())
+        .collect();
+    for i in searched.into_iter().filter(|i| *i != 0) {
+        notices.extend(crate::staleness::notice_for_repo(&prepared[i].0.root));
+    }
 
     let signatures_only = args
         .get("compact")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    match compact_results_json(&all_results, MCP_OUTPUT_BUDGET, signatures_only) {
-        Ok(json) => results_with_notices(
-            &repo.root,
-            json,
-            degraded_search_notices(&timings, queries.len() > 1),
-        ),
+    match compact_results_json_with_repos(
+        &all_results,
+        MCP_OUTPUT_BUDGET,
+        signatures_only,
+        cross_mode.then_some(result_repos.as_slice()),
+    ) {
+        Ok(json) => results_with_notices(&repos[0].root, json, notices),
         Err(e) => ToolCallResult::error(format!("Failed to serialize results: {e}")),
     }
 }
@@ -463,6 +597,7 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
 /// Reciprocal rank fusion over the full candidate pool, then exact-match
 /// augmentation, and only then the cut to `result_limit`. Concatenating instead
 /// would hand the whole window to the first query and drop the rest.
+#[cfg(test)]
 fn fuse_multi_query_results(
     index_dir: &std::path::Path,
     queries: &[String],
@@ -785,6 +920,140 @@ mod tests {
     }
 
     #[test]
+    fn repos_merge_relative_results_with_provenance_and_deduplicate_roots() {
+        let primary = keyword_repo();
+        let extra = keyword_repo();
+        let result = handle_search_code(&serde_json::json!({
+            "repo": primary.path(), "repos": [primary.path(), extra.path(), extra.path().join("src")],
+            "queries": ["dependency_marker", "dependency_caller"], "limit": 10,
+        }));
+        assert!(!result.is_error, "{:?}", result.content);
+        let hits: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hits = hits.as_array().unwrap();
+        assert!(
+            hits.iter()
+                .any(|hit| hit["repo"] == serde_json::json!(primary.path()))
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit["repo"] == serde_json::json!(extra.path()))
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit["file_path"] == "src/dependency.rs")
+        );
+        let keys: std::collections::HashSet<_> = hits
+            .iter()
+            .map(|hit| {
+                (
+                    hit["repo"].as_str().unwrap(),
+                    hit["file_path"].as_str().unwrap(),
+                    hit["line_start"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(keys.len(), hits.len());
+        assert_eq!(result.content.len(), 1, "{:?}", result.content);
+
+        let single = handle_search_code(&serde_json::json!({
+            "repo": primary.path(), "repos": [primary.path().join("src")], "query": "dependency_marker",
+        }));
+        let legacy = handle_search_code(
+            &serde_json::json!({"repo": primary.path(), "query": "dependency_marker"}),
+        );
+        assert_eq!(single.content[0].text, legacy.content[0].text);
+        assert!(!single.content[0].text.contains("\"repo\""));
+
+        let filtered = handle_search_code(&serde_json::json!({
+            "repo": primary.path(), "repos": [extra.path()], "query": "dependency_marker",
+            "path": extra.path().join("src"),
+        }));
+        assert!(!filtered.is_error, "{:?}", filtered.content);
+        let hits: Value = serde_json::from_str(&filtered.content[0].text).unwrap();
+        assert!(!hits.as_array().unwrap().is_empty());
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["repo"] == serde_json::json!(extra.path()))
+        );
+    }
+
+    #[test]
+    fn repos_require_existing_indexes_and_reject_git_scopes_and_excess_roots() {
+        let primary = keyword_repo();
+        let missing = temporary_repo();
+        let args = serde_json::json!({"repo": primary.path(), "repos": [missing.path()], "query": "marker"});
+        let result = handle_search_code(&args);
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("No index found at"));
+        assert!(!missing.path().join(".vera").exists());
+        for (key, value) in [
+            ("changed", serde_json::json!(true)),
+            ("since", serde_json::json!("HEAD")),
+            ("base", serde_json::json!("HEAD")),
+        ] {
+            let mut args = args.clone();
+            args[key] = value;
+            let result = handle_search_code(&args);
+            assert!(result.is_error);
+            assert!(
+                result.content[0]
+                    .text
+                    .contains("git scopes are per repository")
+            );
+        }
+        let extras: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = temporary_repo();
+                std::fs::create_dir(dir.path().join(".vera")).unwrap();
+                std::fs::write(dir.path().join(".vera/metadata.db"), []).unwrap();
+                dir
+            })
+            .collect();
+        let paths: Vec<_> = extras.iter().map(|dir| dir.path()).collect();
+        let result = handle_search_code(
+            &serde_json::json!({"repo": primary.path(), "repos": paths, "query": "marker"}),
+        );
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("At most 8 search indexes"));
+    }
+
+    #[test]
+    fn secondary_format_failure_returns_primary_results_and_notice() {
+        let primary = keyword_repo();
+        let extra = keyword_repo();
+        let store = vera_core::storage::metadata::MetadataStore::open(
+            &extra.path().join(".vera/metadata.db"),
+        )
+        .unwrap();
+        store
+            .set_index_meta(
+                vera_core::indexing::freshness::INDEX_FORMAT_VERSION_KEY,
+                "old",
+            )
+            .unwrap();
+        drop(store);
+        let result = handle_search_code(&serde_json::json!({
+            "repo": primary.path(), "repos": [extra.path()], "query": "dependency_marker",
+        }));
+        assert!(!result.is_error, "{:?}", result.content);
+        let hits: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(!hits.as_array().unwrap().is_empty());
+        assert_eq!(result.content.len(), 2);
+        assert!(
+            result.content[1]
+                .text
+                .contains(&format!("warning: skipped {}:", extra.path().display()))
+        );
+        assert!(
+            result.content[1]
+                .text
+                .contains("Index format version mismatch")
+        );
+    }
+
+    #[test]
     fn search_tools_query_a_secondary_keyword_index() {
         let dir = keyword_repo();
         for (tool, mut args) in [
@@ -847,7 +1116,11 @@ mod tests {
             let absent = handle_tool_call(tool, &serde_json::json!({}));
             let null = handle_tool_call(tool, &serde_json::json!({"repo": null, "path": null}));
             assert_eq!(null.is_error, absent.is_error);
-            assert_eq!(null.content[0].text, absent.content[0].text);
+            // The server directory may resolve to a live checkout index whose
+            // stats can change between calls; only errors are compared verbatim.
+            if absent.is_error {
+                assert_eq!(null.content[0].text, absent.content[0].text);
+            }
         }
         let result = handle_tool_call(
             "find_references",
@@ -887,7 +1160,7 @@ mod tests {
                 assert_eq!(
                     result.content[0].text,
                     format!(
-                        "No index found at {}. Run `vera index {}` first.",
+                        "No index found at {} or any parent directory. Run `vera index {}` first.",
                         root.display(),
                         root.display()
                     ),
@@ -912,6 +1185,8 @@ mod tests {
     #[test]
     fn repository_resolution_recognizes_the_server_root() {
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        // A checkout with its own index resolves the test directory to it.
+        let server_root = vera_core::indexing::find_index_root(&cwd).unwrap_or_else(|| cwd.clone());
         for value in [
             None,
             Some(Value::Null),
@@ -920,8 +1195,68 @@ mod tests {
         ] {
             let repo = resolve_repository(value.as_ref()).unwrap();
             assert!(repo.is_server_repo);
-            assert_eq!(repo.root, cwd);
+            assert_eq!(repo.root, server_root);
         }
+    }
+
+    #[test]
+    fn repository_resolution_uses_the_index_above_a_subdirectory() {
+        let dir = keyword_repo();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = resolve_repository(Some(&serde_json::json!(root.join("src")))).unwrap();
+        assert_eq!(repo.root, root);
+        assert!(!repo.is_server_repo);
+        assert!(!root.join("src/.vera").exists());
+
+        let result = handle_tool_call(
+            "search_code",
+            &serde_json::json!({"repo": root.join("src"), "query": "dependency_marker"}),
+        );
+        assert!(!result.is_error, "{:?}", result.content);
+        assert!(result.content[0].text.contains("src/dependency.rs"));
+    }
+
+    #[test]
+    fn server_started_in_a_subdirectory_uses_the_ancestor_index() {
+        let dir = keyword_repo();
+        let root = dir.path().canonicalize().unwrap();
+        let subdir = root.join("src");
+        for value in [
+            None,
+            Some(serde_json::json!(".")),
+            Some(serde_json::json!(root)),
+        ] {
+            let repo = resolve_repository_from(&subdir, value.as_ref()).unwrap();
+            assert_eq!(repo.root, root);
+            assert!(repo.is_server_repo);
+        }
+        let index_dir = super::super::runtime::ensure_index_and_watcher(&root).unwrap();
+        assert_eq!(index_dir, root.join(".vera"));
+        assert!(!subdir.join(".vera").exists());
+    }
+
+    #[test]
+    fn auto_indexing_refuses_broad_roots() {
+        for root in [Some(std::path::PathBuf::from("/")), dirs_home()]
+            .into_iter()
+            .flatten()
+        {
+            if vera_core::indexing::index_exists(&root) {
+                continue;
+            }
+            let error = super::super::runtime::ensure_index_and_watcher(&root).unwrap_err();
+            assert!(error.is_error);
+            assert!(
+                error.content[0].text.contains("Refusing to auto-index"),
+                "{:?}",
+                error.content
+            );
+            assert!(!vera_core::indexing::index_exists(&root));
+        }
+    }
+
+    fn dirs_home() -> Option<std::path::PathBuf> {
+        std::env::var_os("HOME").map(std::path::PathBuf::from)
     }
 
     #[test]
@@ -1043,13 +1378,19 @@ mod tests {
 
     #[test]
     fn search_code_accepts_queries_array() {
-        // No index and no embedding config, should get past parameter validation.
+        // An unindexed secondary repository fails only after the queries
+        // passed parameter validation.
+        let dir = temporary_repo();
         let result = handle_tool_call(
             "search_code",
-            &serde_json::json!({"queries": ["foo", "bar"]}),
+            &serde_json::json!({"queries": ["foo", "bar"], "repo": dir.path()}),
         );
-        // Should fail (either auto-index fails or embedding provider fails).
         assert!(result.is_error);
+        assert!(
+            result.content[0].text.contains("No index found"),
+            "{:?}",
+            result.content
+        );
     }
 
     fn stub_result(name: &str) -> vera_core::types::SearchResult {

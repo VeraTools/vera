@@ -31,7 +31,7 @@ tree-sitter = "0.26"
 
 # Storage
 rusqlite = { version = "0.39", features = ["bundled"] }
-tantivy = "0.26"
+tantivy = "0.27"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

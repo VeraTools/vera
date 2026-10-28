@@ -24,6 +24,7 @@ mod cli;
 use cli::{Cli, Commands};
 
 fn main() {
+    helpers::timing::mark_process_start();
     // Initialize tracing subscriber (logs go to stderr).
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -232,6 +233,7 @@ fn main() {
         }
         Commands::Search {
             queries,
+            also,
             intent,
             filters,
             limit,
@@ -244,6 +246,7 @@ fn main() {
             tracing::info!(queries = ?queries, deep, "searching");
             commands::search::run(
                 &queries,
+                &also,
                 intent.as_deref(),
                 limit,
                 &filters.to_filters(),
@@ -286,6 +289,7 @@ fn main() {
             no_default_excludes,
             no_progress,
             max_files,
+            verify,
         } => {
             tracing::info!(path = %path, "updating");
             commands::update::run(
@@ -298,6 +302,7 @@ fn main() {
                     no_default_excludes,
                     no_progress,
                     max_files: max_files.map(std::num::NonZeroUsize::get),
+                    verify,
                 },
             )
         }
@@ -760,6 +765,18 @@ mod tests {
                 max_files: Some(max_files),
                 ..
             } if max_files.get() == 250
+        ));
+    }
+
+    #[test]
+    fn cli_parses_update_verify_flag() {
+        assert!(matches!(
+            parse(&["vera", "update", ".", "--verify"]),
+            Commands::Update { verify: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["vera", "update", "."]),
+            Commands::Update { verify: false, .. }
         ));
     }
 

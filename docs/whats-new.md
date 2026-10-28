@@ -2,6 +2,16 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.3.0
+
+- `vera search "query" --also <dir>` searches your project and other indexed trees in one call. Repeat `--also` for up to 8 indexes. Results are merged by rank with a small head start for the current project; results from other trees show absolute paths, and `--json` adds a `repo` field. MCP `search_code` takes a matching `repos` array. Neither ever creates an index. See [querying another index](features.md#querying-another-index).
+- Searches and `vera update` start faster on large repositories. Vera now records each file's size, timestamps, and file identity, and skips reading files whose recorded metadata still matches. Files changed in the last few seconds and reStructuredText files are still hashed every time. On a 51,000-file tree, a warm search went from 483 ms to 197 ms, a no-op `vera update` from 756 ms to 130 ms (and from 660 MB to 77 MB of memory), and an update after 1,000 file changes from 11.9 s to 6.5 s. Existing indexes pick this up without a rebuild: the first search after upgrading hashes the files once and records their metadata.
+- `vera update --verify` hashes every file instead of trusting recorded metadata, for filesystems with unreliable timestamps.
+- File discovery walks directories in parallel.
+- Tantivy is updated to 0.27, which moves zstd to 0.14.3 for RUSTSEC-2026-0391 and related zstd advisories. Tantivy 0.27 ships an updated English stemmer that stems about 0.1% of words differently ("added" now stems to "add", "internal" stays "internal"). Existing indexes keep working; run `vera index .` to rebuild if keyword search misses one of those words.
+- `--timing` now covers the whole command, from index lookup and the freshness check through output, plus the end-to-end total, for `search`, `grep`, and `structural`. See [output](features.md#output).
+- An MCP server started in a subdirectory of an indexed repository uses that repository's index instead of creating a nested one, and the `repo` argument accepts any directory inside an indexed repository. The server refuses to auto-index the filesystem root or your home directory.
+
 ## v2.2.0
 
 - `vera index <path> --full-text-only` builds a keyword (BM25) index without embeddings, so large trees such as a dependency cache index quickly with no model or API calls. Search, grep, structural queries, and the MCP tools all work on it. See [keyword-only index](features.md#keyword-only-index).

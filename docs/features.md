@@ -11,7 +11,7 @@ vera search "retry failed uploads with exponential backoff"
 vera search "parse_config"
 ```
 
-Each query runs two searches at once: keyword search (BM25), which is good at exact identifiers, paths, and config keys, and embedding search, which finds code that matches the meaning of the query even when the words differ. Vera merges the two result lists, then applies code-aware ranking. [How Vera works](how-it-works.md) explains each step.
+Each query runs two searches at once: keyword search (BM25), which is good at exact identifiers, paths, and config keys, and embedding search, which finds code that matches the meaning of the query even when the words differ. Vera merges the two result lists, then applies code-aware ranking. A keyword-only index (`--full-text-only`) uses BM25 alone. [How Vera works](how-it-works.md) explains each step.
 
 Ranking prefers source files over docs and tests, leaves generated code out unless you pass `--include-generated`, and prefers the definition of a symbol over places that only mention it. Results are returned five at a time by default; change that with `--limit` or `retrieval.default_limit`.
 
@@ -163,7 +163,7 @@ vera update . --max-files 250    # cap the work in one run
 vera watch .                     # update automatically as files change
 ```
 
-`vera update` compares content hashes and re-parses only the files that changed, re-embedding them unless the index is keyword-only. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
+`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
 
 Search warns when the index is behind the working tree and tells you how many files changed.
 
@@ -177,6 +177,14 @@ vera -C ~/.cargo/registry/src search "retry backoff"
 ```
 
 Each tree keeps its own `.vera/` index. With MCP, use the optional [`repo` argument](mcp.md#querying-another-index) instead.
+
+To search your project and other indexed trees in one call, repeat `--also`:
+
+```bash
+vera search "retry backoff" --also ~/.cargo/registry/src
+```
+
+Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. When only one distinct index ends up searched (for example, `--also` names the current project), output keeps the single-index format. Up to 8 indexes can be searched at once. `--also` never creates an index for the extra trees (the current project keeps the usual first-run prompt) and cannot be combined with `--changed`, `--since`, or `--base`. A directory that is missing or not indexed stops the search with an error. If an extra index fails during the search, a warning goes to stderr and the other results are still shown. With `--deep` and a completion endpoint, the query is expanded once and reused for every index; without one, each index follows symbols on its own.
 
 ### Choosing what gets indexed
 
@@ -208,7 +216,7 @@ Indexing shows a progress display in a terminal. In CI or agent runs, it prints 
 | `--compact` | Signatures only |
 | `--json` | Compact JSON |
 | `--raw` | Verbose, human-readable output with every field |
-| `--timing` | Timings on stderr: per stage for `search`, total time for `grep` and `structural` |
+| `--timing` | Timings on stderr. `search` reports index lookup, freshness check, setup, each search stage, output, and the end-to-end total; `grep` and `structural` report index lookup, freshness check, search, output, and total |
 
 `--json`, `--raw`, and `--timing` can go before or after the subcommand. `vera search --json --rerank-status` also reports whether results were reranked and, if not, why.
 

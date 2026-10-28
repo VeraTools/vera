@@ -13,6 +13,7 @@ Vera works best when you describe what the code does. This page covers how to ph
 | An exact string or regex | `vera grep "SESSION_TTL"` |
 | What a codebase looks like overall | `vera overview` |
 | Something in the docs | `vera search "deploying behind a proxy" --scope docs` |
+| Code in your project and an indexed dependency tree | `vera search "retry backoff" --also ~/.cargo/registry/src` |
 
 ## Write queries that describe behavior
 

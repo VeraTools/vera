@@ -86,7 +86,9 @@ vera update .
 
 This works from any subdirectory. To keep the index current while you edit, run `vera watch .`.
 
-Vera prints the stale-index warning at most once every 10 minutes per index. Set `VERA_STALE_WARNING_ALWAYS=1` to see it on every run.
+Vera shows an identical stale-index warning at most once every 10 minutes per index; a changed file count warns right away. Set `VERA_STALE_WARNING_ALWAYS=1` to see it on every run.
+
+If `vera update .` reports no changes but results are still stale, run `vera update . --verify`. It ignores recorded file metadata and hashes every file, which helps on filesystems with unreliable timestamps.
 
 ### A file is missing from results
 
@@ -217,4 +219,4 @@ See [MCP](mcp.md) for client configuration.
 
 ## Privacy
 
-With a local backend, and no API reranker or completion endpoint configured, no code leaves your machine. API mode sends queries and chunk text to the configured embedding endpoint. An API reranker receives queries and candidate chunks, and `--deep` with a completion endpoint sends the query to it. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.
+With a local backend, and no API reranker or completion endpoint configured, no code leaves your machine. API mode sends queries and chunk text to the configured embedding endpoint. An API reranker receives queries and candidate chunks. With `--deep` and a completion endpoint, Vera sends the query plus symbol names and file paths from a quick keyword search to that endpoint. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.

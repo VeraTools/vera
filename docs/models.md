@@ -45,7 +45,7 @@ Reference points, each on a different corpus:
 | Backend | Hardware | Corpus | Index time |
 |---|---|---|---|
 | Potion Code | AMD Ryzen 7 9800X3D, CPU | Flask, 227 files, 1,873 chunks | 0.3 s |
-| Potion Code | AMD Ryzen 7 9800X3D, CPU | Vera repository, 438 files, 7,895 chunks | 0.9 s |
+| Potion Code | AMD Ryzen 7 9800X3D, CPU | Vera repository, 447 files, 8,109 chunks | 0.9 s |
 | Potion Code | AMD Ryzen 7 9800X3D, CPU | Semble suite, 63 repositories | 89 s |
 | Jina ONNX, CUDA | NVIDIA RTX 4080 | commons-lang, 11,429 chunks | about 16 s |
 | Jina ONNX, CPU | AMD Ryzen 5 7600X3D, 6 cores | Vera repository at the time, 239 files, about 3,100 chunks | about 6 min |

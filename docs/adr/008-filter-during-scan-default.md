@@ -38,7 +38,7 @@ Shipped full-suite nDCG is about 0.0011 below the issue-opening state (0.844852 
 
 - Exactness: differential tests in `crates/vera-core/src/retrieval/filter_scan_tests.rs` prove flag-on equals flag-off output (17 tests, including the 5-case byte-identity matrix on the 4,427-chunk overcap fixture).
 - Staleness: the eligibility map is per store plus generation, revalidated against the metadata and vector-store stamps on every use; generation-change, tombstone, update-invalidation, and corrupted-map fallback tests (val_001, val_013, val_014, val_015) cover it, along with the watch/incremental suites.
-- Memory: at most 4 indexed repositories stay resident (LRU-4 cap in `search_service.rs`), each holding one eligibility map with two arrays sized to max_rowid (path-ids and languages) plus one distinct-path table; maps are stamp-invalidated, never accumulated.
+- Memory: at most 8 indexed repositories stay resident (LRU cap in `search_service.rs`, raised from 4 to the cross-index search limit in v2.3.0), each holding one eligibility map with two arrays sized to max_rowid (path-ids and languages) plus one distinct-path table; maps are stamp-invalidated, never accumulated.
 
 ## Consequences
 

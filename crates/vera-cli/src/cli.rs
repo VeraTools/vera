@@ -414,6 +414,11 @@ pub enum Commands {
         #[arg(required = true, num_args = 1..)]
         queries: Vec<String>,
 
+        /// Also search another indexed repository (repeatable). Results from it show
+        /// absolute paths; JSON adds a repo field. The directory must already be indexed.
+        #[arg(long, value_name = "DIR")]
+        also: Vec<std::path::PathBuf>,
+
         /// Higher-level goal used to disambiguate the query before reranking.
         #[arg(long)]
         intent: Option<String>,
@@ -449,15 +454,18 @@ pub enum Commands {
 
     /// Incrementally update the index for changed files.
     #[command(long_about = "Incrementally update the index for changed files.\n\n\
-                      Uses content hashing to detect files that have been added, modified, \
-                      or deleted since the last index/update. Only changed files are \
-                      re-processed, making updates much faster than a full re-index.\n\n\
+                      Compares recorded file metadata (size, timestamps, file identity) and \
+                      hashes the content of any file whose metadata changed, to detect files \
+                      that have been added, modified, or deleted since the last index/update. \
+                      Only changed files are re-processed, making updates much faster than \
+                      a full re-index.\n\n\
                       Uses the saved Vera mode from `vera setup`, or the current shell \
                       environment if you are configuring providers manually.\n\n\
                       Examples:\n  \
                       vera update .                  # Update current directory\n  \
                       vera update /path/to/repo      # Update a specific repo\n  \
                       vera update . --max-files 250  # Bound work for this run\n  \
+                      vera update . --verify         # Hash every file, ignoring metadata\n  \
                       vera update . --json           # Output summary as JSON")]
     Update {
         /// Path to the directory to update.
@@ -479,6 +487,9 @@ pub enum Commands {
         /// Maximum added or modified files to process in this run.
         #[arg(long, value_name = "N")]
         max_files: Option<std::num::NonZeroUsize>,
+        /// Re-read and hash every file instead of trusting recorded file metadata.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Show architecture overview of the indexed project.

@@ -16,13 +16,13 @@ For most coding agents, the CLI plus the skill installed by `vera agent install`
 | `find_references` | Callers or callees from Vera's stored reference data. |
 | `explain_path` | Why a path is or is not indexed: ignore rules, binary detection, size, or default exclusions. |
 
-If the server's working directory has no index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
+If neither the server's working directory nor any parent directory has an index, the first call to `search_code`, `structural_search`, or `find_references` builds one and starts a file watcher. Search, references, and overview also accept git scopes that limit results to changed files.
 
 A search result can include a second text block with warnings: the index is stale, semantic search was unavailable so results are keyword-only, or the reranker failed so results are not reranked. Each warning names its cause; see [Troubleshooting](troubleshooting.md#keyword-only-results).
 
 ### Querying another index
 
-All seven tools accept an optional `repo` string: an existing repository root, absolute or relative to the server's working directory. Build its index first with `vera index <repo>`. For example, pass these arguments to `search_code`:
+All seven tools accept an optional `repo` string: an indexed repository root or any directory inside one, absolute or relative to the server's working directory. Build its index first with `vera index <repo>`. For example, pass these arguments to `search_code`:
 
 ```json
 {"repo":"/home/user/.cargo/registry/src","query":"retry backoff"}
@@ -30,11 +30,19 @@ All seven tools accept an optional `repo` string: an existing repository root, a
 
 A different repository is never auto-indexed or watched. Omitting `repo`, or selecting the server's working directory, keeps the normal auto-index and watcher behavior. Filters, relative file paths, and staleness checks use the selected repository. The existing project `path` argument on `get_stats` and `get_overview` remains supported; `repo` takes precedence.
 
+`search_code` also accepts `repos`, an array of additional indexed repositories to search alongside `repo` (up to 8 indexes in total):
+
+```json
+{"query":"retry backoff","repos":["/home/user/.cargo/registry/src"]}
+```
+
+Results are merged by rank with a one-place head start for the main repository, and every result gains a `repo` field naming its repository root; `file_path` stays relative to that root. If only one distinct repository ends up searched, results keep the single-repository format. Entries in `repos` are never auto-indexed and cannot be combined with git scopes. An entry that is missing or not indexed returns an error; a repository that fails during the search is reported in the warnings block while the other results are still returned.
+
 ## Client setup
 
 The server uses the backend saved by `vera setup`, unless `VERA_BACKEND` is set (the Docker images set it). Configure a backend first.
 
-By default, the server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory.
+By default, the server works on the project in its working directory. Most clients start MCP servers in the open project's root; if yours starts them elsewhere, set the client's working-directory option (often `cwd`) to the project root, or the first search will index the wrong directory. A server started inside an indexed repository uses that repository's index rather than creating a nested one. The server refuses to auto-index the filesystem root or your home directory; run `vera index <dir>` to index one deliberately.
 
 ### Claude Code
 

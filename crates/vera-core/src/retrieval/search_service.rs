@@ -30,6 +30,8 @@ pub struct SearchTimings {
     /// Why semantic search was skipped or failed, leaving BM25-only results.
     /// `None` when vector search succeeded or BM25-only search was requested.
     pub semantic_fallback: Option<String>,
+    /// Opening (or revalidating the cached) index stores.
+    pub index_open: Option<Duration>,
     pub embedding: Option<Duration>,
     pub bm25: Option<Duration>,
     pub vector: Option<Duration>,
@@ -48,6 +50,7 @@ impl SearchTimings {
                 .clone_from(&incoming.semantic_fallback);
         }
         for (target, delta) in [
+            (&mut self.index_open, incoming.index_open),
             (&mut self.embedding, incoming.embedding),
             (&mut self.bm25, incoming.bm25),
             (&mut self.vector, incoming.vector),
@@ -67,6 +70,7 @@ impl From<crate::retrieval::hybrid::HybridTimings> for SearchTimings {
         SearchTimings {
             rerank_outcome: t.rerank_outcome,
             semantic_fallback: t.semantic_fallback,
+            index_open: None,
             embedding: t.embedding,
             bm25: t.bm25,
             vector: t.vector,
@@ -88,10 +92,11 @@ impl From<crate::retrieval::hybrid::HybridTimings> for SearchTimings {
 /// Each entry holds an `Arc<SearchStores>` (BM25 reader, metadata handles,
 /// mmap vector store). Profiling (`docs/adr/009-filter-scan-profiling.md`): cross-repo agent
 /// sessions that round-robin 4 repos paid ~5–10 ms per switch from reopen
-/// cost; a bounded LRU of 4 keeps hot repos resident while capping memory
-/// (4× BM25 readers + mmap handles). LRU eviction guarantees bounded
-/// resident state across arbitrary repo sets.
-const SEARCH_STORES_LRU_CAPACITY: usize = 4;
+/// cost. The LRU holds every index one cross-index search may visit, so a
+/// session repeating the same `--also`/`repos` set never evicts its own stores,
+/// while capping resident BM25 readers and mmap handles. LRU eviction
+/// guarantees bounded resident state across arbitrary repo sets.
+const SEARCH_STORES_LRU_CAPACITY: usize = super::cross_index::MAX_SEARCH_INDEXES;
 
 pub struct SearchContext {
     provider: Option<CachedEmbeddingProvider<DynamicProvider>>,
@@ -299,7 +304,9 @@ impl SearchContext {
         // True when an intent prefix was actually applied (non-empty intent).
         let has_intent = matches!(vector_query, std::borrow::Cow::Owned(_));
         let fetch_limit = compute_fetch_limit_with_config(query, filters, result_limit, config);
+        let open_start = Instant::now();
         let stores = self.search_stores(index_dir)?;
+        let index_open = Some(open_start.elapsed());
         // `fallback` says why semantic search was skipped, or is `None` when
         // BM25-only search was requested.
         let bm25_only = |fallback: Option<String>| -> Result<(Vec<SearchResult>, SearchTimings)> {
@@ -316,6 +323,7 @@ impl SearchContext {
                 config,
             )?;
             timings.semantic_fallback = fallback;
+            timings.index_open = index_open;
             Ok((results, timings))
         };
 
@@ -439,6 +447,7 @@ impl SearchContext {
         };
 
         let mut timings = SearchTimings::from(hybrid_timings);
+        timings.index_open = index_open;
         // Like the runtime path, empty or already-small candidate pools do not
         // need reranking even when construction was unavailable.
         if results.len() > result_limit
@@ -1817,14 +1826,15 @@ mod tests {
     #[test]
     fn memory_bounded_across_multiple_indexed_repos_with_recorded_envelope() {
         // Profiling: docs/adr/009-filter-scan-profiling.md — cross-repo resident store can grow
-        // unbounded with single-slot toggle behavior; LRU of 4 caps memory.
+        // unbounded with single-slot toggle behavior; a bounded LRU caps memory.
         use crate::indexing::{index_dir, index_repository};
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = crate::config::VeraConfig::default();
         let provider = crate::embedding::test_helpers::MockProvider::new(8);
 
-        // Build 5 distinct indexed repos (capacity is 4)
-        let tmps: Vec<tempfile::TempDir> = (0..5).map(|_| tempdir().unwrap()).collect();
+        // Build one more distinct indexed repo than the cache holds.
+        let capacity = super::SEARCH_STORES_LRU_CAPACITY;
+        let tmps: Vec<tempfile::TempDir> = (0..=capacity).map(|_| tempdir().unwrap()).collect();
         let repos: Vec<std::path::PathBuf> = tmps
             .iter()
             .enumerate()
@@ -1864,22 +1874,22 @@ mod tests {
         let envelope_len = ctx.search_stores_cache_len();
         let envelope_contains = |idx: usize| ctx.search_stores_cache_contains(&index_dirs[idx]);
 
-        // Recorded envelope: must be bounded at capacity 4
+        // Recorded envelope: must be bounded at capacity
         assert_eq!(
             envelope_len,
-            4,
+            capacity,
             "cache must be bounded at {} (recorded envelope len={})",
             super::SEARCH_STORES_LRU_CAPACITY,
             envelope_len
         );
-        // LRU: first repo should have been evicted (oldest), last 4 retained
+        // LRU: first repo should have been evicted (oldest), the rest retained
         assert!(
             !envelope_contains(0),
             "LRU must have evicted oldest repo (0); envelope: len={} contains0={}",
             envelope_len,
             envelope_contains(0)
         );
-        for i in 1..5 {
+        for i in 1..=capacity {
             assert!(
                 envelope_contains(i),
                 "LRU must retain recent repo {i}; envelope len={envelope_len}"
@@ -1899,7 +1909,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ctx.search_stores_cache_len(),
-            4,
+            capacity,
             "after re-query evicted repo, cache must remain bounded"
         );
         assert!(
@@ -1908,7 +1918,7 @@ mod tests {
         );
         // Envelope logging for PR notes (not a file, but printed in test output with --nocapture)
         println!(
-            "memory envelope: capacity={}, len={}, retained=[1..4 initially, then 0 after requery], eviction=LRU",
+            "memory envelope: capacity={}, len={}, retained=[1..=capacity initially, then 0 after requery], eviction=LRU",
             super::SEARCH_STORES_LRU_CAPACITY,
             ctx.search_stores_cache_len()
         );

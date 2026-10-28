@@ -20,6 +20,43 @@ fn default_config() -> VeraConfig {
     VeraConfig::default()
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn full_index_publishes_stamps_for_stable_reads_but_not_rst_dependencies() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("lib.rs"), "fn stable() {}\n").unwrap();
+    fs::write(
+        root.path().join("guide.rst"),
+        "Guide\n=====\n\n.. include:: fragment.rst.inc\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("fragment.rst.inc"),
+        "Before include edit\n",
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(3100));
+    let config = default_config();
+    index_repository(root.path(), &MockProvider::new(8), &config, "mock-model")
+        .await
+        .unwrap();
+    let metadata = MetadataStore::open(&index_dir(root.path()).join("metadata.db")).unwrap();
+    let files = metadata.file_fingerprints().unwrap();
+    assert!(files["lib.rs"].file_stamp.is_some());
+    assert!(files["guide.rst"].file_stamp.is_none());
+    assert_eq!(
+        files["lib.rs"].content_hash,
+        content_hash("fn stable() {}\n")
+    );
+    fs::write(root.path().join("fragment.rst.inc"), "After include edit\n").unwrap();
+    assert_eq!(
+        crate::indexing::detect_staleness(root.path(), &config.indexing)
+            .unwrap()
+            .files_modified,
+        1
+    );
+}
+
 #[derive(Clone)]
 struct BlockingProvider {
     started: Arc<tokio::sync::Notify>,

@@ -39,6 +39,8 @@ Data flow: file, then grammar lookup, then tree-sitter parse (with diagnostics),
 
 Deep search (`--deep`): `rag_fusion.rs` runs a quick BM25 search to collect symbol names and file paths, then passes them as hints to the LLM (`completion_client.rs`), which splits the query into targeted sub-queries (2 by default). Sub-queries reuse the active `SearchContext`, and the results merge with weighted RRF, with the original query weighted 2x. Without a completion endpoint, deep search follows symbols iteratively instead (`iterative_search.rs`).
 
+Cross-index search (`--also`, MCP `repos`): `cross_index.rs` searches existing indexes concurrently, each with its own `SearchContext` mode and filters, then merges the per-index rankings by rank (user-facing rules in [querying another index](features.md#querying-another-index)). With a completion endpoint, deep-search expansion is prepared once from the primary index and reused; without one, each index follows symbols on its own. `SearchResult.file_path` stays relative to its repository; the CLI and MCP output layers add provenance.
+
 Structural search:
 - `references.rs`: exact caller lookups from the stored call graph, returned as search-style snippets
 - `structural.rs`: structural queries for definitions, environment variable reads, routes, SQL, and implementations
@@ -66,6 +68,7 @@ Everything is stored in `.vera/` at the project root.
 
 - `pipeline.rs`: full build. Discovers, parses, chunks, embeds, and stores files in bounded windows, writes to `.vera.build` and swaps it in, keeps `.vera.old` for crash recovery, and stores parse diagnostics.
 - `update.rs`: incremental update. Detects changes by content hash, reprocesses only changed files, and refreshes per-file index state.
+- `file_stamp.rs`: per-file metadata stamps (size, modification and change times, file identity) captured around each read. `freshness.rs` and `update.rs` share one classifier that trusts a matching stamp and hashes everything else; stamps are stored next to each content hash and never written for files changed within the last 3 seconds, files that changed during the read, or RST files.
 
 ### Other modules
 

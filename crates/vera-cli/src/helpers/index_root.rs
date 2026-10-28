@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use vera_core::indexing::missing_index_message;
+pub use vera_core::indexing::{find_index_root, missing_index_message};
 
 static DIRECTORY_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
@@ -13,9 +13,21 @@ pub fn set_directory_override(enabled: bool) {
 }
 
 pub fn warn_if_index_stale(repo_path: &Path, indexing_config: &vera_core::config::IndexingConfig) {
+    warn_if_index_stale_at(
+        repo_path,
+        indexing_config,
+        DIRECTORY_OVERRIDE.load(Ordering::Relaxed),
+    );
+}
+
+pub fn warn_if_index_stale_at(
+    repo_path: &Path,
+    indexing_config: &vera_core::config::IndexingConfig,
+    explicit_root: bool,
+) {
     match vera_core::indexing::detect_staleness(repo_path, indexing_config) {
         Ok(freshness) => {
-            let command = if DIRECTORY_OVERRIDE.load(Ordering::Relaxed) {
+            let command = if explicit_root {
                 vera_core::indexing::freshness::vera_command_for_repo(repo_path)
             } else {
                 "vera".to_string()
@@ -99,23 +111,6 @@ fn print_stale_warning(index_dir: &Path, summary: &str, warning: &str) {
     }
 }
 
-/// Walk up from `start` and return the nearest directory containing a `.vera/`
-/// index. Indexed paths are stored relative to that root, so commands run in a
-/// subdirectory must resolve the ancestor, not the cwd. A bare `.vera/`
-/// directory is not an index: the legacy Vera home (`~/.vera`) and stray or
-/// partially created directories must not match, or read commands would
-/// fabricate an empty metadata store inside them.
-pub fn find_index_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(candidate) = dir {
-        if vera_core::indexing::index_exists(candidate) {
-            return Some(candidate.to_path_buf());
-        }
-        dir = candidate.parent();
-    }
-    None
-}
-
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
 /// `note: using index at <root>` line once when the root is an ancestor.
 pub fn resolve_index_root(cwd: &Path) -> anyhow::Result<PathBuf> {
@@ -131,27 +126,62 @@ pub fn prepare_indexed_repo(
 ) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
-    let repo_root = resolve_index_root(&cwd)?;
-    let index_dir = vera_core::indexing::index_dir(&repo_root);
-    // Index format version must match: legacy suffixed rows would be silently wrong.
-    {
-        let metadata_path = index_dir.join("metadata.db");
-        if metadata_path.is_file()
-            && let Ok(store) = vera_core::storage::metadata::MetadataStore::open(&metadata_path)
-            && !vera_core::indexing::freshness::index_format_is_current(&store)
-        {
-            anyhow::bail!(
-                "Index format version mismatch (expected {}, found {:?}). Run `vera index {}` to rebuild the index.",
-                vera_core::indexing::freshness::INDEX_FORMAT_VERSION,
-                store
-                    .get_index_meta(vera_core::indexing::freshness::INDEX_FORMAT_VERSION_KEY)
-                    .unwrap_or(None),
-                repo_root.display()
-            );
-        }
-    }
-    warn_if_index_stale(&repo_root, indexing_config);
+    let (repo_root, index_dir) = super::timing::timed("index lookup", || check_index_format(&cwd))?;
+    super::timing::timed("freshness", || {
+        warn_if_index_stale(&repo_root, indexing_config);
+    });
     Ok((repo_root, index_dir))
+}
+
+/// Resolve the index for `cwd` and require the current index format: legacy
+/// suffixed rows would be silently wrong.
+pub fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let repo_root = resolve_index_root(cwd)?;
+    let index_dir = vera_core::indexing::index_dir(&repo_root);
+    let metadata_path = index_dir.join("metadata.db");
+    if metadata_path.is_file()
+        && let Ok(store) =
+            vera_core::storage::metadata::MetadataStore::open_existing(&metadata_path)
+        && !vera_core::indexing::freshness::index_format_is_current(&store)
+    {
+        anyhow::bail!(
+            "Index format version mismatch (expected {}, found {:?}). Run `vera index {}` to rebuild the index.",
+            vera_core::indexing::freshness::INDEX_FORMAT_VERSION,
+            store
+                .get_index_meta(vera_core::indexing::freshness::INDEX_FORMAT_VERSION_KEY)
+                .unwrap_or(None),
+            repo_root.display()
+        );
+    }
+    Ok((repo_root, index_dir))
+}
+
+/// Additional repositories must already be indexed; unlike the primary they
+/// never offer auto-indexing. Resolve ancestors before deduplicating roots.
+pub fn resolve_additional_roots(
+    primary: &Path,
+    extras: &[PathBuf],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let extras = extras
+        .iter()
+        .map(|path| {
+            use anyhow::Context;
+            let requested = path
+                .canonicalize()
+                .with_context(|| format!("Cannot resolve repository {}", path.display()))?;
+            if !requested.is_dir() {
+                anyhow::bail!("Repository is not a directory: {}", requested.display());
+            }
+            find_index_root(&requested).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No index found at {} or any parent directory. Run `vera index {}` first.",
+                    requested.display(),
+                    requested.display()
+                )
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    vera_core::retrieval::cross_index::search_roots(&primary.canonicalize()?, extras)
 }
 
 pub fn should_offer_auto_index(json_output: bool, is_terminal: bool) -> bool {
@@ -161,6 +191,38 @@ pub fn should_offer_auto_index(json_output: bool, is_terminal: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn additional_roots_require_indexes_and_deduplicate_ancestors() {
+        let scratch = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let primary = tempfile::tempdir_in(&scratch).unwrap();
+        let extra = tempfile::tempdir_in(&scratch).unwrap();
+        let err =
+            resolve_additional_roots(primary.path(), &[extra.path().to_path_buf()]).unwrap_err();
+        assert!(err.to_string().contains("No index found at"));
+        assert!(!extra.path().join(".vera").exists());
+        for root in [primary.path(), extra.path()] {
+            std::fs::create_dir(root.join(".vera")).unwrap();
+            std::fs::write(root.join(".vera/metadata.db"), []).unwrap();
+            std::fs::create_dir(root.join("src")).unwrap();
+        }
+        assert_eq!(
+            resolve_additional_roots(
+                primary.path(),
+                &[
+                    primary.path().join("src"),
+                    extra.path().to_path_buf(),
+                    extra.path().join("src"),
+                ]
+            )
+            .unwrap(),
+            [
+                primary.path().canonicalize().unwrap(),
+                extra.path().canonicalize().unwrap()
+            ]
+        );
+    }
 
     #[test]
     fn index_freshness_summary_formats_nonzero_counts() {
@@ -198,43 +260,6 @@ mod tests {
         let message = missing_index_message(&root.path().join("src/nested"));
         assert!(message.contains("previous indexing run stopped early"));
         assert!(message.contains("`vera index` will resume from its saved embeddings"));
-    }
-
-    #[test]
-    fn find_index_root_walks_up_to_the_nearest_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("repo");
-        let nested = root.join("crates/foo/src");
-        std::fs::create_dir_all(root.join(".vera")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join(".vera").join("metadata.db"), []).unwrap();
-        let other = temp.path().join("noindex/sub");
-        std::fs::create_dir_all(&other).unwrap();
-
-        assert_eq!(find_index_root(&root), Some(root.clone()));
-        assert_eq!(find_index_root(&nested), Some(root));
-        assert_eq!(find_index_root(&other), None);
-    }
-
-    #[test]
-    fn find_index_root_ignores_a_bare_vera_directory_without_an_index() {
-        // The legacy Vera home (`~/.vera`) and stray directories hold models
-        // and config, never a searchable index; they must not match, or read
-        // commands would fabricate an empty metadata store inside them.
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let project = home.join("src/project");
-        std::fs::create_dir_all(home.join(".vera")).unwrap();
-        std::fs::create_dir_all(&project).unwrap();
-
-        // A `.vera` without metadata.db is not an index.
-        assert_eq!(find_index_root(&project), None);
-        assert_eq!(find_index_root(&home), None);
-
-        // With a metadata.db it becomes one.
-        std::fs::write(home.join(".vera").join("metadata.db"), []).unwrap();
-        assert_eq!(find_index_root(&project), Some(home.clone()));
-        assert_eq!(find_index_root(&home), Some(home));
     }
 
     #[test]

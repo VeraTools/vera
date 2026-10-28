@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -286,6 +287,7 @@ fn parallel_results_keep_parse_error_files_in_input_order() {
     let prepared = |path: &str, status| PreparedFile {
         path: path.to_string(),
         hash: format!("hash-{path}"),
+        stamp: None,
         modified: true,
         chunks: Vec::new(),
         references: Vec::new(),
@@ -664,7 +666,10 @@ async fn update_max_files_defers_and_resumes_in_path_order() {
         fs::write(dir.path().join(name), format!("fn {}() {{}}\n", &name[..4])).unwrap();
     }
 
-    let options = UpdateOptions { max_files: Some(2) };
+    let options = UpdateOptions {
+        max_files: Some(2),
+        ..Default::default()
+    };
     let first = update_repository_with_options_and_progress(
         dir.path(),
         &provider,
@@ -713,7 +718,10 @@ async fn update_max_files_prioritizes_modifications_and_always_deletes() {
     fs::remove_file(dir.path().join("deleted.rs")).unwrap();
     fs::write(dir.path().join("added.rs"), "fn added() {}\n").unwrap();
 
-    let options = UpdateOptions { max_files: Some(1) };
+    let options = UpdateOptions {
+        max_files: Some(1),
+        ..Default::default()
+    };
     let summary = update_repository_with_options_and_progress(
         dir.path(),
         &provider,
@@ -741,6 +749,158 @@ async fn update_max_files_prioritizes_modifications_and_always_deletes() {
 }
 
 // ── Update: file modified ───────────────────────────────────────────
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn verify_ignores_forged_matching_stamp() {
+    let (dir, provider, config, _) = indexed_repo(&[("lib.rs", "fn before() {}\n")]).await;
+    fs::write(dir.path().join("lib.rs"), "fn changed() {}\n").unwrap();
+    let root = crate::discovery::open_root_dir(dir.path()).unwrap();
+    let stamp = crate::indexing::file_stamp::at(&root, Path::new("lib.rs"))
+        .unwrap()
+        .unwrap();
+    let metadata = MetadataStore::open(&index_dir(dir.path()).join("metadata.db")).unwrap();
+    metadata
+        .set_file_hashes_with_stamps(&[(
+            "lib.rs",
+            &content_hash("fn before() {}\n"),
+            Some(stamp.value()),
+        )])
+        .unwrap();
+    let normal = update_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(normal.files_modified, 0);
+    assert_eq!(normal.files_unchanged, 1);
+    assert!(
+        !crate::indexing::detect_staleness(dir.path(), &config.indexing)
+            .unwrap()
+            .is_stale()
+    );
+    let verified = update_repository_with_options_and_progress(
+        dir.path(),
+        &provider,
+        &config,
+        "mock-model",
+        &UpdateOptions {
+            verify: true,
+            ..Default::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.files_modified, 1);
+    assert_eq!(
+        metadata.get_file_hash("lib.rs").unwrap().as_deref(),
+        Some(content_hash("fn changed() {}\n").as_str())
+    );
+}
+
+#[tokio::test]
+async fn update_publishes_the_source_reread_after_classification() {
+    let (dir, provider, config, _) = indexed_repo(&[("lib.rs", "fn before() {}\n")]).await;
+    fs::write(dir.path().join("lib.rs"), "fn classified() {}\n").unwrap();
+    let parsed_source = "fn parsed_later() {}\n";
+    let summary = update_repository_with_options_and_progress(
+        dir.path(),
+        &provider,
+        &config,
+        "mock-model",
+        &UpdateOptions::default(),
+        |event| {
+            if matches!(event, UpdateProgress::ClassificationDone { .. }) {
+                fs::write(dir.path().join("lib.rs"), parsed_source).unwrap();
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.files_modified, 1);
+    let metadata = MetadataStore::open(&index_dir(dir.path()).join("metadata.db")).unwrap();
+    let fingerprints = metadata.file_fingerprints().unwrap();
+    assert_eq!(
+        fingerprints["lib.rs"].content_hash,
+        content_hash(parsed_source)
+    );
+    assert!(fingerprints["lib.rs"].file_stamp.is_none());
+    assert!(
+        metadata
+            .get_chunks_by_file("lib.rs")
+            .unwrap()
+            .iter()
+            .any(|chunk| chunk.content.contains("parsed_later"))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unchanged_update_backfills_and_verify_refreshes_stamps_without_reprocessing() {
+    let (dir, provider, config, _) = indexed_repo(&[("lib.rs", "fn before() {}\n")]).await;
+    let metadata = MetadataStore::open(&index_dir(dir.path()).join("metadata.db")).unwrap();
+    assert!(
+        metadata.file_fingerprints().unwrap()["lib.rs"]
+            .file_stamp
+            .is_none()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(3100));
+    let first = update_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(first.files_unchanged, 1);
+    assert_eq!(first.files_modified, 0);
+    assert!(
+        metadata.file_fingerprints().unwrap()["lib.rs"]
+            .file_stamp
+            .is_some()
+    );
+    let root = crate::discovery::open_root_dir(dir.path()).unwrap();
+    let reads = crate::indexing::file_stamp::read_counter(&root, Path::new("lib.rs"), false);
+    update_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(
+        reads,
+        crate::indexing::file_stamp::read_counter(&root, Path::new("lib.rs"), false)
+    );
+    // A bogus stamp with unchanged content must be refreshed by verification,
+    // without parsing or embedding that content again.
+    metadata
+        .set_file_hashes_with_stamps(&[(
+            "lib.rs",
+            &content_hash("fn before() {}\n"),
+            Some("bogus"),
+        )])
+        .unwrap();
+    let verified = update_repository_with_options_and_progress(
+        dir.path(),
+        &provider,
+        &config,
+        "mock-model",
+        &UpdateOptions {
+            verify: true,
+            ..Default::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.files_modified, 0);
+    assert_eq!(verified.files_unchanged, 1);
+    let current = crate::indexing::file_stamp::at(&root, Path::new("lib.rs"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        metadata.file_fingerprints().unwrap()["lib.rs"]
+            .file_stamp
+            .as_deref(),
+        Some(current.value())
+    );
+    assert_eq!(
+        reads + 1,
+        crate::indexing::file_stamp::read_counter(&root, Path::new("lib.rs"), false)
+    );
+}
 
 #[tokio::test]
 async fn update_modified_file() {

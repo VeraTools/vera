@@ -1,7 +1,5 @@
 [advisories]
-# Unsound-advisory checking covers transitive dependencies too, so advisories
-# like RUSTSEC-2026-0253 (lru via tantivy) surface here instead of only in
-# `cargo audit` output.
+# Unsound-advisory checking covers transitive dependencies too.
 unsound = "all"
 ignore = [
     # paste is unmaintained but pulled in transitively by tokenizers: not actionable
@@ -9,14 +7,6 @@ ignore = [
     # number_prefix is unmaintained but pulled in transitively by model2vec-rs via hf-hub/indicatif.
     # Keep this scoped to the Potion backend dependency until upstream removes the edge.
     "RUSTSEC-2025-0119",
-    # lru 0.16.4 via tantivy 0.26.2. The soundness hole needs LruCache::pop()
-    # to unwind through a panicking key/value destructor. Tantivy's only use
-    # is BlockCache (store/reader.rs): LruCache<usize, OwnedBytes>, neither
-    # type has a panicking Drop, and tantivy never calls pop(). Not reachable
-    # through Vera. Removal trigger: upgrade to a tantivy release whose
-    # dependency is lru >= 0.18.2 (tantivy main already has it), then drop
-    # this ignore.
-    "RUSTSEC-2026-0253",
 ]
 
 [licenses]

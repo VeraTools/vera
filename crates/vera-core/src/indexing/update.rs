@@ -84,6 +84,8 @@ pub struct UpdateSummary {
 pub struct UpdateOptions {
     /// Maximum added or modified files to process. Deletions are always applied.
     pub max_files: Option<usize>,
+    /// Re-read and hash every file instead of trusting recorded metadata.
+    pub verify: bool,
 }
 
 /// Progress events emitted during an incremental update.
@@ -116,6 +118,7 @@ pub enum UpdateProgress {
 struct PreparedFile {
     path: String,
     hash: String,
+    stamp: Option<String>,
     modified: bool,
     chunks: Vec<crate::types::Chunk>,
     references: Vec<parsing::references::RawReference>,
@@ -340,9 +343,18 @@ where
 
     // ── 2. Discover current files on disk ────────────────────────
     let discovery_start = Instant::now();
-    let disc =
-        discovery::discover_files_with_cancellation(&repo_root, &config.indexing, cancellation)
-            .context("file discovery failed")?;
+    let metadata_path = idx_dir.join("metadata.db");
+    let metadata_store =
+        MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
+    let stored = metadata_store.file_fingerprints()?;
+    let stamps = (!options.verify).then(|| super::freshness::known_stamps(&stored));
+    let disc = discovery::discover_files_with_stamps(
+        &repo_root,
+        &config.indexing,
+        cancellation,
+        stamps.as_ref(),
+    )
+    .context("file discovery failed")?;
     phase_secs.discovery = rounded_secs(discovery_start.elapsed());
     on_progress(UpdateProgress::DiscoveryDone {
         file_count: disc.files.len(),
@@ -350,9 +362,6 @@ where
 
     // ── 3. Load stored hashes and classify files ─────────────────
     let classification_start = Instant::now();
-    let metadata_path = idx_dir.join("metadata.db");
-    let metadata_store =
-        MetadataStore::open(&metadata_path).context("failed to open metadata store")?;
     let full_text_only = pipeline::store_is_full_text_only(&metadata_store)?;
     let provider = if full_text_only {
         None
@@ -440,101 +449,38 @@ where
     let checkpoint = provider
         .and_then(|provider| EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name));
 
-    let stored_files: HashSet<String> = metadata_store
-        .tracked_files()
-        .context("failed to list tracked files")?
-        .into_iter()
-        .collect();
-
-    // File reads are independent and I/O-bound, so run them under rayon.
-    // Unreadable files stay in `current_paths` below but not `current_files`,
-    // preserving their existing index data instead of treating them as deleted.
-    let read_results: Vec<(String, Option<String>)> = disc
-        .files
-        .par_iter()
-        .map(|file| {
-            cancellation.check()?;
-            let content = match discovery::read_source_lossy_at(
-                &disc.root_dir,
-                Path::new(&file.relative_path),
-            ) {
-                Ok(content) => Some(content),
-                Err(err) => {
-                    warn!(file = %file.relative_path, error = %err, "failed to read file");
-                    None
-                }
-            };
-            Ok((file.relative_path.clone(), content))
-        })
-        .collect::<Result<_>>()?;
-    cancellation.check()?;
-
-    let current_files: HashMap<String, String> = read_results
-        .into_iter()
-        .filter_map(|(path, content)| content.map(|content| (path, content)))
-        .collect();
-
-    let current_paths: HashSet<&str> = disc
-        .files
-        .iter()
-        .map(|file| file.relative_path.as_str())
-        .collect();
-
     let vectorless_files = if full_text_only {
         HashSet::new()
     } else {
         repair_vector_coverage(&metadata_store, &idx_dir.join("vectors.db"), stored_dim)?
     };
 
-    // Classify files.
-    let mut modified = Vec::new();
-    let mut added = Vec::new();
-    let mut deleted = Vec::new();
-    let mut unchanged = 0usize;
-
-    for (rel_path, content) in &current_files {
-        cancellation.check()?;
-        let language = detect_language_for_path(rel_path);
-        let normalized_source = source_for_indexing_hash(
-            content,
-            rel_path,
-            language,
-            &repo_root,
-            config.indexing.max_file_size_bytes,
-        );
-        let hash = content_hash(&normalized_source);
-        let normalized_source = (language == Language::Rst).then(|| normalized_source.into_owned());
-        let stored_hash = metadata_store
-            .get_file_hash(rel_path)
-            .context("failed to get stored hash")?;
-
-        if stored_files.contains(rel_path.as_str()) {
-            // File exists in index.
-            match stored_hash {
-                Some(ref old_hash)
-                    if *old_hash == hash && !vectorless_files.contains(rel_path.as_str()) =>
-                {
-                    unchanged += 1;
-                }
-                _ => {
-                    modified.push((rel_path.clone(), content.clone(), hash, normalized_source));
-                }
-            }
+    let mut classified = super::freshness::classify_files(
+        &disc,
+        &stored,
+        &repo_root,
+        config.indexing.max_file_size_bytes,
+        options.verify,
+        cancellation,
+    )?;
+    // Unreadable discovered files are deliberately not removed or overwritten.
+    let mut modified = classified.modified;
+    classified.unchanged.retain(|path| {
+        if vectorless_files.contains(path) {
+            modified.push(path.clone());
+            false
         } else {
-            // New file (not in index).
-            added.push((rel_path.clone(), content.clone(), hash, normalized_source));
+            true
         }
-    }
-
-    for stored_path in &stored_files {
-        if !current_paths.contains(stored_path.as_str()) {
-            deleted.push(stored_path.clone());
-        }
-    }
-
-    modified.sort_by(|left, right| left.0.cmp(&right.0));
-    added.sort_by(|left, right| left.0.cmp(&right.0));
-    deleted.sort();
+    });
+    classified
+        .backfills
+        .retain(|(path, _, _)| !vectorless_files.contains(path));
+    let mut added = classified.added;
+    let deleted = classified.deleted;
+    let unchanged = classified.unchanged.len();
+    modified.sort();
+    added.sort();
 
     let pending_files = modified.len() + added.len();
     // Repairing an interrupted update must not defer files whose data it removed.
@@ -576,20 +522,11 @@ where
 
     // ── 4. Prepare modifications and additions ───────────────────
     let parse_start = Instant::now();
-    let files_to_index: Vec<(String, String, String, Option<String>, bool)> = modified
+    let files_to_index: Vec<(String, bool)> = modified
         .iter()
         .cloned()
-        .map(|(path, content, hash, normalized_source)| {
-            (path, content, hash, normalized_source, true)
-        })
-        .chain(
-            added
-                .iter()
-                .cloned()
-                .map(|(path, content, hash, normalized_source)| {
-                    (path, content, hash, normalized_source, false)
-                }),
-        )
+        .map(|path| (path, true))
+        .chain(added.iter().cloned().map(|path| (path, false)))
         .collect();
     let mut prepared_files = Vec::new();
     let mut parse_errors = Vec::new();
@@ -600,21 +537,36 @@ where
         // path). Results are still staged in `PreparedFile` and written only
         // after embedding succeeds. Parallelism here must not move any write
         // earlier.
-        let parsed: Vec<(PreparedFile, Option<FileError>)> = files_to_index
+        let parsed: Vec<Option<(PreparedFile, Option<FileError>)>> = files_to_index
             .par_iter()
             .map(
-                |(rel_path, content, hash, normalized_source, is_modified)| {
+                |(rel_path, is_modified)| {
                     cancellation.check()?;
                     let language = detect_language_for_path(rel_path);
+                    // Only selected files are read here. Certify precisely the
+                    // source parsed, not an earlier classification snapshot.
+                    let (content, stamp) = match super::file_stamp::read_source_with_stamp_at(
+                        &disc.root_dir, Path::new(rel_path),
+                    ) {
+                        Ok(read) => read,
+                        Err(error) => {
+                            warn!(file = %rel_path, %error, "failed to read file for update; preserving indexed data");
+                            return Ok(None);
+                        }
+                    };
+                    let normalized_source = source_for_indexing_hash(
+                        &content, rel_path, language, &repo_root, config.indexing.max_file_size_bytes,
+                    );
+                    let hash = content_hash(&normalized_source);
+                    let stamp = stamp.filter(|_| language != Language::Rst);
 
                     // For RST, refs come from raw source; chunks from preprocessed.
                     // For all other languages, parse once for both.
                     let (chunks, refs, file_state, parse_error) = if language == Language::Rst {
-                        let refs = parsing::parse_and_extract_references(content, language);
-                        let src = normalized_source.as_deref().unwrap_or(content);
-                        chunk_file_for_update(src, rel_path, language, config, Some(refs))
+                        let refs = parsing::parse_and_extract_references(&content, language);
+                        chunk_file_for_update(&normalized_source, rel_path, language, config, Some(refs))
                     } else {
-                        chunk_file_for_update(content, rel_path, language, config, None)
+                        chunk_file_for_update(&content, rel_path, language, config, None)
                     };
 
                     let type_relations = parsing::type_relations::extract_type_relations(&chunks);
@@ -627,10 +579,11 @@ where
                         "parsed file"
                     );
 
-                    Ok((
+                    Ok(Some((
                         PreparedFile {
                             path: rel_path.clone(),
-                            hash: hash.clone(),
+                            hash,
+                            stamp,
                             modified: *is_modified,
                             chunks,
                             references: refs,
@@ -638,7 +591,7 @@ where
                             state: file_state,
                         },
                         parse_error,
-                    ))
+                    )))
                 },
             )
             .collect::<Result<_>>()?;
@@ -646,7 +599,8 @@ where
 
         // `files_to_index` order is preserved by `collect`, so the sequential
         // and parallel paths produce identical `prepared_files` ordering.
-        (prepared_files, parse_errors) = collect_prepared_results(parsed);
+        (prepared_files, parse_errors) =
+            collect_prepared_results(parsed.into_iter().flatten().collect());
     }
 
     let all_chunks: Vec<_> = prepared_files
@@ -853,16 +807,25 @@ where
                 .insert_file_states(&file_states)
                 .context("failed to update file index states")?;
         }
-        let file_hashes: Vec<(&str, &str)> = prepared_files
+        let file_hashes: Vec<(&str, &str, Option<&str>)> = prepared_files
             .iter()
-            .map(|file| (file.path.as_str(), file.hash.as_str()))
+            .map(|file| {
+                (
+                    file.path.as_str(),
+                    file.hash.as_str(),
+                    file.stamp.as_deref(),
+                )
+            })
             .collect();
         metadata_store
-            .set_file_hashes_batch_borrowed(&file_hashes)
+            .set_file_hashes_with_stamps(&file_hashes)
             .context("failed to update file hashes")?;
     }
 
     // ── 5. Get final counts ──────────────────────────────────────
+    metadata_store
+        .backfill_file_stamps(&classified.backfills)
+        .context("failed to refresh unchanged file stamps")?;
     let total_chunks = metadata_store
         .chunk_count()
         .context("failed to count chunks")?;
@@ -1218,7 +1181,10 @@ mod checkpoint_tests {
             &CheckpointProvider::new(None),
             &config(),
             "model",
-            &UpdateOptions { max_files: Some(1) },
+            &UpdateOptions {
+                max_files: Some(1),
+                ..Default::default()
+            },
             |_| {},
         )
         .await
@@ -1559,7 +1525,10 @@ mod regression_tests {
             &provider,
             &config,
             "mock-model",
-            &UpdateOptions { max_files: Some(1) },
+            &UpdateOptions {
+                max_files: Some(1),
+                ..Default::default()
+            },
             |_| {},
         )
         .await
@@ -1568,6 +1537,13 @@ mod regression_tests {
 
         let freshness = detect_staleness(dir.path(), &config.indexing).unwrap();
         assert_eq!(freshness.files_modified, 1);
+        let metadata = MetadataStore::open(&index_dir(dir.path()).join("metadata.db")).unwrap();
+        let deferred = &metadata.file_fingerprints().unwrap()["b.rs"];
+        assert_eq!(deferred.content_hash, content_hash("fn b() {}\n"));
+        assert!(
+            deferred.file_stamp.is_none(),
+            "deferred source must not get a fresh stamp"
+        );
     }
 
     #[tokio::test]

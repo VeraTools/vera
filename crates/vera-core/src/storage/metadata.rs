@@ -184,6 +184,15 @@ pub struct MetadataStore {
     pub(crate) hydration_count: std::cell::Cell<usize>,
 }
 
+/// Hash and optional metadata fingerprint describing the same source read.
+#[derive(Debug, Clone)]
+pub(crate) struct FileFingerprint {
+    pub content_hash: String,
+    pub file_stamp: Option<String>,
+}
+
+pub(crate) type StampedFileHash = (String, String, Option<String>);
+
 impl MetadataStore {
     /// Open (or create) a metadata store at the given path.
     pub fn open(db_path: &std::path::Path) -> Result<Self> {
@@ -313,6 +322,8 @@ impl MetadataStore {
                  );",
             )
             .context("failed to create file_hashes table")?;
+
+        self.ensure_file_stamp_column()?;
 
         self.conn
             .execute_batch(
@@ -906,6 +917,17 @@ impl MetadataStore {
     }
 
     pub(crate) fn set_file_hashes_batch_borrowed(&self, hashes: &[(&str, &str)]) -> Result<()> {
+        let stamped: Vec<_> = hashes
+            .iter()
+            .map(|&(path, hash)| (path, hash, None))
+            .collect();
+        self.set_file_hashes_with_stamps(&stamped)
+    }
+
+    pub(crate) fn set_file_hashes_with_stamps(
+        &self,
+        hashes: &[(&str, &str, Option<&str>)],
+    ) -> Result<()> {
         if hashes.is_empty() {
             return Ok(());
         }
@@ -917,17 +939,87 @@ impl MetadataStore {
         {
             let mut stmt = tx
                 .prepare_cached(
-                    "INSERT OR REPLACE INTO file_hashes (file_path, content_hash)
-                     VALUES (?1, ?2)",
+                    "INSERT OR REPLACE INTO file_hashes (file_path, content_hash, file_stamp)
+                     VALUES (?1, ?2, ?3)",
                 )
                 .context("failed to prepare batch file hash insert")?;
-            for (file_path, hash) in hashes {
-                stmt.execute(params![file_path, hash])
+            for (file_path, hash, stamp) in hashes {
+                stmt.execute(params![file_path, hash, stamp])
                     .with_context(|| format!("failed to set file hash: {file_path}"))?;
             }
         }
         tx.commit().context("failed to commit file hash batch")?;
         Ok(())
+    }
+
+    fn ensure_file_stamp_column(&self) -> Result<()> {
+        if !self.column_exists("file_hashes", "file_stamp")? {
+            self.conn
+                .execute_batch("ALTER TABLE file_hashes ADD COLUMN file_stamp TEXT;")
+                .context("failed to add file_stamp column to file_hashes table")?;
+        }
+        Ok(())
+    }
+
+    /// One read for all tracked files; old read-only indexes need no migration.
+    pub(crate) fn file_fingerprints(&self) -> Result<HashMap<String, FileFingerprint>> {
+        let stamp = if self.column_exists("file_hashes", "file_stamp")? {
+            "file_stamp"
+        } else {
+            "NULL"
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT file_path, content_hash, {stamp} FROM file_hashes"
+        ))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                FileFingerprint {
+                    content_hash: row.get(1)?,
+                    file_stamp: row.get(2)?,
+                },
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
+            .context("failed to load file fingerprints")
+    }
+
+    pub(crate) fn backfill_file_stamps(&self, stamps: &[StampedFileHash]) -> Result<()> {
+        if stamps.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE file_hashes SET file_stamp=?3 WHERE file_path=?1 AND content_hash=?2",
+            )?;
+            for (path, hash, stamp) in stamps {
+                stmt.execute(params![path, hash, stamp])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Freshness must never wait for an index writer or require writable metadata.
+    /// A writable index from an older release gains the column here, so plain
+    /// searches start certifying files without a rebuild or `vera update`.
+    pub(crate) fn try_backfill_file_stamps(
+        path: &std::path::Path,
+        stamps: &[StampedFileHash],
+    ) -> Result<()> {
+        if stamps.is_empty() {
+            return Ok(());
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        let store = Self {
+            conn,
+            #[cfg(test)]
+            hydration_count: std::cell::Cell::new(0),
+        };
+        store.ensure_file_stamp_column()?;
+        store.backfill_file_stamps(stamps)
     }
 
     /// Store call-site references and type relations for many files in a
@@ -1691,6 +1783,91 @@ mod tests {
         store.set_file_hashes_batch(&[]).unwrap();
         store.insert_parse_artifacts_batch(&[], &[]).unwrap();
         assert!(store.get_chunks_by_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn old_file_hash_schema_reads_without_migration_and_migrates_on_write_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.db");
+        let store = MetadataStore::open(&path).unwrap();
+        store.set_file_hash("lib.rs", "hash").unwrap();
+        store
+            .conn
+            .execute_batch("ALTER TABLE file_hashes DROP COLUMN file_stamp")
+            .unwrap();
+        drop(store);
+        let reader = MetadataStore::open_existing(&path).unwrap();
+        assert!(!reader.column_exists("file_hashes", "file_stamp").unwrap());
+        let files = reader.file_fingerprints().unwrap();
+        assert_eq!(files["lib.rs"].content_hash, "hash");
+        assert!(files["lib.rs"].file_stamp.is_none());
+        drop(reader);
+        let store = MetadataStore::open(&path).unwrap();
+        assert!(store.column_exists("file_hashes", "file_stamp").unwrap());
+        assert_eq!(
+            store.get_file_hash("lib.rs").unwrap().as_deref(),
+            Some("hash")
+        );
+    }
+
+    #[test]
+    fn best_effort_backfill_adds_the_column_to_an_old_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.db");
+        let store = MetadataStore::open(&path).unwrap();
+        store.set_file_hash("lib.rs", "hash").unwrap();
+        store
+            .conn
+            .execute_batch("ALTER TABLE file_hashes DROP COLUMN file_stamp")
+            .unwrap();
+        drop(store);
+        MetadataStore::try_backfill_file_stamps(
+            &path,
+            &[("lib.rs".into(), "hash".into(), Some("stamp".into()))],
+        )
+        .unwrap();
+        let reader = MetadataStore::open_existing(&path).unwrap();
+        assert_eq!(
+            reader.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .as_deref(),
+            Some("stamp")
+        );
+    }
+
+    #[test]
+    fn hash_writes_clear_stamps_and_backfills_are_conditional() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        store
+            .set_file_hashes_with_stamps(&[("lib.rs", "hash", Some("stamp"))])
+            .unwrap();
+        store
+            .backfill_file_stamps(&[(
+                "lib.rs".into(),
+                "wrong hash".into(),
+                Some("wrong stamp".into()),
+            )])
+            .unwrap();
+        assert_eq!(
+            store.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .as_deref(),
+            Some("stamp")
+        );
+        store.set_file_hash("lib.rs", "").unwrap();
+        assert!(
+            store.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_none()
+        );
+        store
+            .backfill_file_stamps(&[("lib.rs".into(), "hash".into(), Some("stale stamp".into()))])
+            .unwrap();
+        assert!(
+            store.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .is_none()
+        );
     }
 
     #[test]
