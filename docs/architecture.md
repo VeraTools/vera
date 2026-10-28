@@ -39,7 +39,7 @@ Data flow: file, then grammar lookup, then tree-sitter parse (with diagnostics),
 
 Deep search (`--deep`): `rag_fusion.rs` runs a quick BM25 search to collect symbol names and file paths, then passes them as hints to the LLM (`completion_client.rs`), which splits the query into targeted sub-queries (2 by default). Sub-queries reuse the active `SearchContext`, and the results merge with weighted RRF, with the original query weighted 2x. Without a completion endpoint, deep search follows symbols iteratively instead (`iterative_search.rs`).
 
-Cross-index search (`--also`, MCP `repos`): `cross_index.rs` searches up to 8 existing indexes concurrently, each with its own `SearchContext` mode and filters, then merges the per-index rankings by rank with a one-position head start for the primary index. Deep-search expansion is prepared once from the primary index and reused. `SearchResult.file_path` stays relative to its repository; the CLI and MCP output layers add provenance.
+Cross-index search (`--also`, MCP `repos`): `cross_index.rs` searches existing indexes concurrently, each with its own `SearchContext` mode and filters, then merges the per-index rankings by rank (user-facing rules in [querying another index](features.md#querying-another-index)). Deep-search expansion is prepared once from the primary index and reused. `SearchResult.file_path` stays relative to its repository; the CLI and MCP output layers add provenance.
 
 Structural search:
 - `references.rs`: exact caller lookups from the stored call graph, returned as search-style snippets
