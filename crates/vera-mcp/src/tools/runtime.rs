@@ -24,14 +24,18 @@ struct CachedSearchContext {
 }
 
 pub(super) fn ensure_index_and_watcher(
-    cwd: &std::path::Path,
+    root: &std::path::Path,
 ) -> Result<std::path::PathBuf, ToolCallResult> {
-    let index_dir = vera_core::indexing::index_dir(cwd);
-
-    if !index_dir.exists() {
+    if !vera_core::indexing::index_exists(root) {
+        if let Some(reason) = vera_core::indexing::broad_root_reason(root) {
+            return Err(ToolCallResult::error(format!(
+                "Refusing to auto-index {} because {reason}. Start the MCP server in a project directory, or run `vera index <dir>` to index a directory explicitly.",
+                root.display()
+            )));
+        }
         let (rt, provider, idx_config, model_name) = create_runtime_and_provider()?;
         rt.block_on(vera_core::indexing::index_repository(
-            cwd,
+            root,
             &provider,
             &idx_config,
             &model_name,
@@ -39,10 +43,10 @@ pub(super) fn ensure_index_and_watcher(
         .map_err(|e| ToolCallResult::error(format!("Auto-indexing failed: {e}")))?;
     }
 
-    let watcher_path = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let watcher_path = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut guard = watchers().lock().unwrap_or_else(|e| e.into_inner());
     if let Entry::Vacant(entry) = guard.entry(watcher_path) {
-        match crate::watcher::start_watching(cwd) {
+        match crate::watcher::start_watching(root) {
             Ok(handle) => {
                 entry.insert(handle);
             }
@@ -50,7 +54,7 @@ pub(super) fn ensure_index_and_watcher(
         }
     }
 
-    Ok(index_dir)
+    Ok(vera_core::indexing::index_dir(root))
 }
 
 /// Create a tokio runtime, resolve backend config, and build an embedding provider.

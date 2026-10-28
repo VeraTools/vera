@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use vera_core::indexing::missing_index_message;
+pub use vera_core::indexing::{find_index_root, missing_index_message};
 
 static DIRECTORY_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
@@ -99,23 +99,6 @@ fn print_stale_warning(index_dir: &Path, summary: &str, warning: &str) {
     }
 }
 
-/// Walk up from `start` and return the nearest directory containing a `.vera/`
-/// index. Indexed paths are stored relative to that root, so commands run in a
-/// subdirectory must resolve the ancestor, not the cwd. A bare `.vera/`
-/// directory is not an index: the legacy Vera home (`~/.vera`) and stray or
-/// partially created directories must not match, or read commands would
-/// fabricate an empty metadata store inside them.
-pub fn find_index_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(candidate) = dir {
-        if vera_core::indexing::index_exists(candidate) {
-            return Some(candidate.to_path_buf());
-        }
-        dir = candidate.parent();
-    }
-    None
-}
-
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
 /// `note: using index at <root>` line once when the root is an ancestor.
 pub fn resolve_index_root(cwd: &Path) -> anyhow::Result<PathBuf> {
@@ -198,43 +181,6 @@ mod tests {
         let message = missing_index_message(&root.path().join("src/nested"));
         assert!(message.contains("previous indexing run stopped early"));
         assert!(message.contains("`vera index` will resume from its saved embeddings"));
-    }
-
-    #[test]
-    fn find_index_root_walks_up_to_the_nearest_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("repo");
-        let nested = root.join("crates/foo/src");
-        std::fs::create_dir_all(root.join(".vera")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join(".vera").join("metadata.db"), []).unwrap();
-        let other = temp.path().join("noindex/sub");
-        std::fs::create_dir_all(&other).unwrap();
-
-        assert_eq!(find_index_root(&root), Some(root.clone()));
-        assert_eq!(find_index_root(&nested), Some(root));
-        assert_eq!(find_index_root(&other), None);
-    }
-
-    #[test]
-    fn find_index_root_ignores_a_bare_vera_directory_without_an_index() {
-        // The legacy Vera home (`~/.vera`) and stray directories hold models
-        // and config, never a searchable index; they must not match, or read
-        // commands would fabricate an empty metadata store inside them.
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let project = home.join("src/project");
-        std::fs::create_dir_all(home.join(".vera")).unwrap();
-        std::fs::create_dir_all(&project).unwrap();
-
-        // A `.vera` without metadata.db is not an index.
-        assert_eq!(find_index_root(&project), None);
-        assert_eq!(find_index_root(&home), None);
-
-        // With a metadata.db it becomes one.
-        std::fs::write(home.join(".vera").join("metadata.db"), []).unwrap();
-        assert_eq!(find_index_root(&project), Some(home.clone()));
-        assert_eq!(find_index_root(&home), Some(home));
     }
 
     #[test]

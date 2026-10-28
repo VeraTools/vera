@@ -205,38 +205,57 @@ fn resolve_repository_or_path(args: &Value) -> Result<Repository, ToolCallResult
 }
 
 /// Resolve a repository without changing the server's process-wide directory.
+///
+/// Both the server's own directory and an explicit `repo` resolve to the
+/// nearest indexed ancestor, as the CLI does, so a server started in (or a
+/// `repo` naming) a subdirectory uses the existing index instead of
+/// creating a nested one. Only the server's directory may lack an index: it is
+/// auto-indexed on first search.
 fn resolve_repository(repo: Option<&Value>) -> Result<Repository, ToolCallResult> {
     let cwd = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
         .map_err(|e| ToolCallResult::error(format!("Failed to get working directory: {e}")))?;
+    resolve_repository_from(&cwd, repo)
+}
+
+/// [`resolve_repository`] for a server whose canonical working directory is `cwd`.
+fn resolve_repository_from(
+    cwd: &std::path::Path,
+    repo: Option<&Value>,
+) -> Result<Repository, ToolCallResult> {
+    let server_root =
+        vera_core::indexing::find_index_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let root = match repo.filter(|value| !value.is_null()) {
         Some(value) => {
             let path = value
                 .as_str()
                 .ok_or_else(|| ToolCallResult::error("Repository path must be a string"))?;
-            cwd.join(path).canonicalize().map_err(|err| {
+            let requested = cwd.join(path).canonicalize().map_err(|err| {
                 ToolCallResult::error(format!("Cannot resolve repository {path}: {err}"))
-            })?
+            })?;
+            if !requested.is_dir() {
+                return Err(ToolCallResult::error(format!(
+                    "Repository is not a directory: {}",
+                    requested.display()
+                )));
+            }
+            match vera_core::indexing::find_index_root(&requested) {
+                Some(root) => root,
+                None if requested == server_root => requested,
+                None => {
+                    return Err(ToolCallResult::error(format!(
+                        "No index found at {} or any parent directory. Run `vera index {}` first.",
+                        requested.display(),
+                        requested.display()
+                    )));
+                }
+            }
         }
-        None => cwd.clone(),
+        None => server_root.clone(),
     };
-    if !root.is_dir() {
-        return Err(ToolCallResult::error(format!(
-            "Repository is not a directory: {}",
-            root.display()
-        )));
-    }
-    let is_server_repo = root == cwd;
-    if !is_server_repo && !vera_core::indexing::index_exists(&root) {
-        return Err(ToolCallResult::error(format!(
-            "No index found at {}. Run `vera index {}` first.",
-            root.display(),
-            root.display()
-        )));
-    }
     Ok(Repository {
+        is_server_repo: root == server_root,
         root,
-        is_server_repo,
     })
 }
 
@@ -887,7 +906,7 @@ mod tests {
                 assert_eq!(
                     result.content[0].text,
                     format!(
-                        "No index found at {}. Run `vera index {}` first.",
+                        "No index found at {} or any parent directory. Run `vera index {}` first.",
                         root.display(),
                         root.display()
                     ),
@@ -912,6 +931,8 @@ mod tests {
     #[test]
     fn repository_resolution_recognizes_the_server_root() {
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        // A checkout with its own index resolves the test directory to it.
+        let server_root = vera_core::indexing::find_index_root(&cwd).unwrap_or_else(|| cwd.clone());
         for value in [
             None,
             Some(Value::Null),
@@ -920,8 +941,68 @@ mod tests {
         ] {
             let repo = resolve_repository(value.as_ref()).unwrap();
             assert!(repo.is_server_repo);
-            assert_eq!(repo.root, cwd);
+            assert_eq!(repo.root, server_root);
         }
+    }
+
+    #[test]
+    fn repository_resolution_uses_the_index_above_a_subdirectory() {
+        let dir = keyword_repo();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = resolve_repository(Some(&serde_json::json!(root.join("src")))).unwrap();
+        assert_eq!(repo.root, root);
+        assert!(!repo.is_server_repo);
+        assert!(!root.join("src/.vera").exists());
+
+        let result = handle_tool_call(
+            "search_code",
+            &serde_json::json!({"repo": root.join("src"), "query": "dependency_marker"}),
+        );
+        assert!(!result.is_error, "{:?}", result.content);
+        assert!(result.content[0].text.contains("src/dependency.rs"));
+    }
+
+    #[test]
+    fn server_started_in_a_subdirectory_uses_the_ancestor_index() {
+        let dir = keyword_repo();
+        let root = dir.path().canonicalize().unwrap();
+        let subdir = root.join("src");
+        for value in [
+            None,
+            Some(serde_json::json!(".")),
+            Some(serde_json::json!(root)),
+        ] {
+            let repo = resolve_repository_from(&subdir, value.as_ref()).unwrap();
+            assert_eq!(repo.root, root);
+            assert!(repo.is_server_repo);
+        }
+        let index_dir = super::super::runtime::ensure_index_and_watcher(&root).unwrap();
+        assert_eq!(index_dir, root.join(".vera"));
+        assert!(!subdir.join(".vera").exists());
+    }
+
+    #[test]
+    fn auto_indexing_refuses_broad_roots() {
+        for root in [Some(std::path::PathBuf::from("/")), dirs_home()]
+            .into_iter()
+            .flatten()
+        {
+            if vera_core::indexing::index_exists(&root) {
+                continue;
+            }
+            let error = super::super::runtime::ensure_index_and_watcher(&root).unwrap_err();
+            assert!(error.is_error);
+            assert!(
+                error.content[0].text.contains("Refusing to auto-index"),
+                "{:?}",
+                error.content
+            );
+            assert!(!vera_core::indexing::index_exists(&root));
+        }
+    }
+
+    fn dirs_home() -> Option<std::path::PathBuf> {
+        std::env::var_os("HOME").map(std::path::PathBuf::from)
     }
 
     #[test]
@@ -1043,13 +1124,19 @@ mod tests {
 
     #[test]
     fn search_code_accepts_queries_array() {
-        // No index and no embedding config, should get past parameter validation.
+        // An unindexed secondary repository fails only after the queries
+        // passed parameter validation.
+        let dir = temporary_repo();
         let result = handle_tool_call(
             "search_code",
-            &serde_json::json!({"queries": ["foo", "bar"]}),
+            &serde_json::json!({"queries": ["foo", "bar"], "repo": dir.path()}),
         );
-        // Should fail (either auto-index fails or embedding provider fails).
         assert!(result.is_error);
+        assert!(
+            result.content[0].text.contains("No index found"),
+            "{:?}",
+            result.content
+        );
     }
 
     fn stub_result(name: &str) -> vera_core::types::SearchResult {
