@@ -233,6 +233,7 @@ fn main() {
         }
         Commands::Search {
             queries,
+            also,
             intent,
             filters,
             limit,
@@ -245,6 +246,7 @@ fn main() {
             tracing::info!(queries = ?queries, deep, "searching");
             commands::search::run(
                 &queries,
+                &also,
                 intent.as_deref(),
                 limit,
                 &filters.to_filters(),

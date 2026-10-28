@@ -100,6 +100,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "repo": repo_prop(),
+                    "repos": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional indexed repositories to search alongside repo; results carry a repo field. Never auto-indexes."
+                    },
                     "query": {
                         "type": "string",
                         "description": "Search query (keyword or natural language)"

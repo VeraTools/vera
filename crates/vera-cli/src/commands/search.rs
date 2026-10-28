@@ -1,14 +1,19 @@
 //! `vera search <query>` — Search the indexed codebase.
 
 use anyhow::bail;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use vera_core::config::{InferenceBackend, VeraConfig};
+use vera_core::config::InferenceBackend;
+use vera_core::retrieval::cross_index::{
+    IndexSearch, merge_results, search_indexes, validate_git_scope,
+};
 use vera_core::retrieval::search_service::{SearchContext, SearchTimings};
-use vera_core::types::{SearchFilters, SearchResult};
+use vera_core::types::SearchFilters;
 
 use crate::helpers::{
-    output_search_results, prepare_indexed_search, should_offer_auto_index, timing,
+    check_index_format, output_cross_index_search_results, output_search_results,
+    prepare_indexed_search, resolve_additional_roots, rewrite_absolute_path_filters,
+    should_offer_auto_index, timing, warn_if_index_stale_at,
 };
 use crate::state;
 
@@ -19,6 +24,7 @@ use crate::state;
 )]
 pub fn run(
     queries: &[String],
+    also: &[PathBuf],
     intent: Option<&str>,
     limit: Option<usize>,
     filters: &vera_core::types::SearchFilters,
@@ -31,6 +37,7 @@ pub fn run(
     compact: bool,
     backend: InferenceBackend,
 ) -> anyhow::Result<()> {
+    validate_git_scope(!also.is_empty(), git_scope.is_some(), "--also")?;
     let mut config = state::load_runtime_config()?;
     config.adjust_for_backend(backend);
     let result_limit = limit.unwrap_or(config.retrieval.default_limit);
@@ -58,34 +65,96 @@ pub fn run(
         )?;
     }
 
-    let (index_dir, filters) =
+    let (index_dir, primary_filters) =
         prepare_indexed_search(&config.indexing, filters, git_scope.as_ref())?;
-    let (rt, search_context) = timing::timed("setup", || -> anyhow::Result<_> {
+    let primary_root = index_dir
+        .parent()
+        .expect("index directory has a repository parent");
+    let roots = resolve_additional_roots(primary_root, also)?;
+    let mut prepared = vec![(roots[0].clone(), index_dir, primary_filters)];
+    for root in roots.into_iter().skip(1) {
+        match timing::timed("index lookup", || check_index_format(&root)) {
+            Ok((_, index_dir)) => {
+                timing::timed("freshness", || {
+                    warn_if_index_stale_at(&root, &config.indexing, true)
+                });
+                let mut repo_filters = filters.clone();
+                rewrite_absolute_path_filters(&root, &mut repo_filters.path_glob);
+                prepared.push((root, index_dir, repo_filters));
+            }
+            Err(err) => eprintln!("warning: skipped {}: {err}", root.display()),
+        }
+    }
+    let (rt, modes, embedded, prepared) = timing::timed("setup", || -> anyhow::Result<_> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
-        let search_context = if vera_core::indexing::is_full_text_only(&index_dir)? {
-            SearchContext::bm25_only()
+        let mut modes = Vec::new();
+        let mut ready = Vec::new();
+        for (i, (root, index, repo_filters)) in prepared.into_iter().enumerate() {
+            match vera_core::indexing::is_full_text_only(&index) {
+                Ok(mode) => {
+                    modes.push(mode);
+                    ready.push((root, index, repo_filters));
+                }
+                Err(err) if i == 0 => return Err(err),
+                Err(err) => eprintln!("warning: skipped {}: {err}", root.display()),
+            }
+        }
+        let embedded = if modes.contains(&false) {
+            Some(rt.block_on(SearchContext::new(&config, backend)))
         } else {
-            rt.block_on(SearchContext::new(&config, backend))
+            None
         };
-        Ok((rt, search_context))
+        Ok((rt, modes, embedded, ready))
     })?;
-
-    let runner = SearchRunner {
-        rt: &rt,
-        search_context: &search_context,
-        index_dir: &index_dir,
-        config: &config,
-        filters: &filters,
+    let keyword = SearchContext::bm25_only();
+    let indexes: Vec<_> = prepared
+        .iter()
+        .zip(&modes)
+        .map(|((_, index_dir, filters), keyword_only)| IndexSearch {
+            context: if *keyword_only {
+                &keyword
+            } else {
+                embedded
+                    .as_ref()
+                    .expect("embedded context initialized for semantic indexes")
+            },
+            index_dir,
+            filters,
+        })
+        .collect();
+    let search_start = Instant::now();
+    let outcomes = rt.block_on(search_indexes(
+        &indexes,
+        &queries,
+        intent,
+        &config,
         result_limit,
         deep,
-    };
-
-    let (results, timings) = if queries.len() == 1 {
-        runner.execute_query(&queries[0], intent)?
-    } else {
-        runner.execute_multi_query_search(&queries, intent)?
-    };
+    ))?;
+    let mut timings = SearchTimings::default();
+    let mut lists = Vec::with_capacity(outcomes.len());
+    let mut searched = Vec::new();
+    for (i, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            Ok((results, stages)) => {
+                // Stage durations sum work across indexes; total is wall-clock time.
+                timings.merge(&stages);
+                searched.push(i);
+                lists.push(results);
+            }
+            Err(err) if i == 0 => return Err(err),
+            Err(err) => {
+                eprintln!("warning: skipped {}: {err}", prepared[i].0.display());
+                lists.push(Vec::new());
+            }
+        }
+    }
+    timings.total = Some(search_start.elapsed());
+    let cross_mode = searched.len() > 1;
+    let merged = merge_results(lists, result_limit);
+    let roots: Vec<_> = prepared.iter().map(|(root, _, _)| root.clone()).collect();
+    let (repo_indexes, results): (Vec<_>, Vec<_>) = merged.into_iter().unzip();
 
     timing::record_stages(&[
         ("index open", timings.index_open),
@@ -98,23 +167,42 @@ pub fn run(
         ("search", timings.total),
     ]);
     timing::timed("output", || {
-        output_search_results(
-            &results,
-            json_output,
-            raw,
-            compact,
-            config.retrieval.max_output_chars,
-            rerank_status.then(|| {
-                (
-                    &timings.rerank_outcome,
-                    vera_core::retrieval::reranker_kind(&config, backend),
-                )
-            }),
-        )
+        let status = rerank_status.then(|| {
+            (
+                &timings.rerank_outcome,
+                vera_core::retrieval::reranker_kind(&config, backend),
+            )
+        });
+        if cross_mode {
+            output_cross_index_search_results(
+                &results,
+                &repo_indexes,
+                &roots,
+                json_output,
+                raw,
+                compact,
+                config.retrieval.max_output_chars,
+                status,
+            );
+        } else {
+            output_search_results(
+                &results,
+                json_output,
+                raw,
+                compact,
+                config.retrieval.max_output_chars,
+                status,
+            );
+        }
     });
 
     if results.is_empty() && !json_output {
-        print_path_glob_hint(&filters, &index_dir);
+        for i in searched {
+            if cross_mode {
+                eprintln!("note: path filters for {}", roots[i].display());
+            }
+            print_path_glob_hint(&prepared[i].2, &prepared[i].1);
+        }
     }
 
     if timing {
@@ -122,83 +210,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-struct SearchRunner<'a> {
-    rt: &'a tokio::runtime::Runtime,
-    search_context: &'a SearchContext,
-    index_dir: &'a Path,
-    config: &'a VeraConfig,
-    filters: &'a SearchFilters,
-    result_limit: usize,
-    deep: bool,
-}
-
-impl SearchRunner<'_> {
-    fn execute_query(
-        &self,
-        query: &str,
-        intent: Option<&str>,
-    ) -> anyhow::Result<(Vec<SearchResult>, SearchTimings)> {
-        if self.deep {
-            self.rt.block_on(
-                vera_core::retrieval::rag_fusion::execute_deep_search_with_context(
-                    self.search_context,
-                    self.index_dir,
-                    query,
-                    intent,
-                    self.config,
-                    self.filters,
-                    self.result_limit,
-                ),
-            )
-        } else {
-            self.rt.block_on(self.search_context.search(
-                self.index_dir,
-                query,
-                intent,
-                self.config,
-                self.filters,
-                self.result_limit,
-            ))
-        }
-    }
-
-    fn execute_multi_query_search(
-        &self,
-        queries: &[String],
-        intent: Option<&str>,
-    ) -> anyhow::Result<(Vec<SearchResult>, SearchTimings)> {
-        let overall_start = Instant::now();
-        let per_query_limit = vera_core::retrieval::multi_query_candidate_limit(self.result_limit);
-        let mut timings = SearchTimings::default();
-        let mut result_sets = Vec::with_capacity(queries.len());
-
-        for query in queries {
-            let query_runner = SearchRunner {
-                result_limit: per_query_limit,
-                ..*self
-            };
-            let (results, query_timings) = query_runner.execute_query(query, intent)?;
-            timings.merge(&query_timings);
-            result_sets.push(results);
-        }
-
-        let fused = vera_core::retrieval::fuse_and_augment_multi_query(
-            self.index_dir,
-            queries,
-            &result_sets,
-            self.filters,
-            self.config.retrieval.rrf_k,
-            // Augment before truncating (issue #121): pass the wider candidate
-            // limit so exact/concept matches displace fused entries on score,
-            // not by exhausting a pre-truncated window.
-            vera_core::retrieval::multi_query_candidate_limit(self.result_limit),
-            self.result_limit,
-        )?;
-        timings.total = Some(overall_start.elapsed());
-        Ok((fused, timings))
-    }
 }
 
 /// Issue #215: a wildcarded `--path` pattern that names only directories
@@ -225,4 +236,42 @@ fn print_path_glob_hint(filters: &SearchFilters, index_dir: &Path) {
         "Hint: '{}' matched no files directly: wildcarded directory patterns do not get prefix matching, but appending '/**' would select everything beneath them.",
         misses.join("', '")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn also_is_repeatable_and_rejects_git_scopes_before_index_lookup() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "vera", "search", "marker", "--also", "one", "--also", "two",
+        ])
+        .unwrap();
+        let crate::cli::Commands::Search { also, .. } = cli.command else {
+            panic!("expected search")
+        };
+        assert_eq!(also, [PathBuf::from("one"), PathBuf::from("two")]);
+        let err = run(
+            &["marker".into()],
+            &also,
+            None,
+            None,
+            &SearchFilters::default(),
+            true,
+            false,
+            false,
+            false,
+            false,
+            Some(vera_core::git_scope::GitScope::Changed),
+            false,
+            InferenceBackend::Api,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--changed/--since/--base cannot be combined with --also")
+        );
+    }
 }

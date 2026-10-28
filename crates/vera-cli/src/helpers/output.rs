@@ -185,6 +185,78 @@ pub fn output_search_results(
     budget: usize,
     rerank_status: Option<(&vera_core::retrieval::RerankOutcome, Option<&str>)>,
 ) {
+    render_search_results(
+        results,
+        json_output,
+        raw,
+        compact,
+        budget,
+        rerank_status,
+        None,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Provenance accompanies the existing search output options"
+)]
+pub fn output_cross_index_search_results(
+    results: &[vera_core::types::SearchResult],
+    repo_indexes: &[usize],
+    roots: &[std::path::PathBuf],
+    json_output: bool,
+    raw: bool,
+    compact: bool,
+    budget: usize,
+    rerank_status: Option<(&vera_core::retrieval::RerankOutcome, Option<&str>)>,
+) {
+    if json_output {
+        let repos: Vec<_> = repo_indexes.iter().map(|i| roots[*i].as_path()).collect();
+        render_search_results(
+            results,
+            true,
+            raw,
+            compact,
+            budget,
+            rerank_status,
+            Some(&repos),
+        );
+    } else {
+        let displayed = cross_index_display_results(results, repo_indexes, roots);
+        output_search_results(&displayed, false, raw, compact, budget, rerank_status);
+    }
+}
+
+fn cross_index_display_results(
+    results: &[vera_core::types::SearchResult],
+    repo_indexes: &[usize],
+    roots: &[std::path::PathBuf],
+) -> Vec<vera_core::types::SearchResult> {
+    results
+        .iter()
+        .zip(repo_indexes)
+        .map(|(result, repo)| {
+            let mut result = result.clone();
+            if *repo != 0 {
+                result.file_path = roots[*repo]
+                    .join(&result.file_path)
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            result
+        })
+        .collect()
+}
+
+fn render_search_results(
+    results: &[vera_core::types::SearchResult],
+    json_output: bool,
+    raw: bool,
+    compact: bool,
+    budget: usize,
+    rerank_status: Option<(&vera_core::retrieval::RerankOutcome, Option<&str>)>,
+    repos: Option<&[&std::path::Path]>,
+) {
     use vera_core::parsing::signatures::extract_signature_for_path;
 
     // When compact mode is on, pre-compute signature-only content for each result.
@@ -209,7 +281,10 @@ pub fn output_search_results(
         .collect();
 
     if json_output {
-        let json = json_within_budget(results, &contents, budget);
+        let json = match repos {
+            Some(repos) => json_within_budget_and_repos(results, &contents, budget, Some(repos)),
+            None => json_within_budget(results, &contents, budget),
+        };
         if let Some((outcome, kind)) = rerank_status {
             println!("{}", json_with_rerank_status(&json, outcome, kind));
         } else {
@@ -284,13 +359,32 @@ fn budget_slice<'a>(
 }
 
 fn json_results_string(results: &[vera_core::types::SearchResult], contents: &[&str]) -> String {
-    let json_results: Vec<CompactResult> = results
+    json_results_with_repos(results, contents, None)
+}
+
+fn json_results_with_repos(
+    results: &[vera_core::types::SearchResult],
+    contents: &[&str],
+    repos: Option<&[&std::path::Path]>,
+) -> String {
+    #[derive(serde::Serialize)]
+    struct WithRepo<'a> {
+        #[serde(flatten)]
+        result: CompactResult<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        repo: Option<&'a std::path::Path>,
+    }
+    let json_results: Vec<_> = results
         .iter()
         .zip(contents)
-        .map(|(r, content)| {
+        .enumerate()
+        .map(|(i, (r, content))| {
             let mut cr = CompactResult::from_search_result(r);
             cr.content = std::borrow::Cow::Borrowed(content);
-            cr
+            WithRepo {
+                result: cr,
+                repo: repos.map(|repos| repos[i]),
+            }
         })
         .collect();
     serde_json::to_string(&json_results)
@@ -308,12 +402,24 @@ fn json_within_budget(
     contents: &[&str],
     budget: usize,
 ) -> String {
-    let json = json_results_string(results, contents);
+    json_within_budget_and_repos(results, contents, budget, None)
+}
+
+fn json_within_budget_and_repos(
+    results: &[vera_core::types::SearchResult],
+    contents: &[&str],
+    budget: usize,
+    repos: Option<&[&std::path::Path]>,
+) -> String {
+    let json = match repos {
+        Some(repos) => json_results_with_repos(results, contents, Some(repos)),
+        None => json_results_string(results, contents),
+    };
     if budget == 0 || json.len() <= budget || results.is_empty() {
         return json;
     }
     for count in (1..results.len()).rev() {
-        let shorter = json_results_string(&results[..count], &contents[..count]);
+        let shorter = json_results_with_repos(&results[..count], &contents[..count], repos);
         if shorter.len() <= budget {
             return shorter;
         }
@@ -324,7 +430,8 @@ fn json_within_budget(
     let head = &results[..1];
     let render = |allowed: usize| {
         let trimmed = truncate_to_budget(contents[0], allowed);
-        Some(json_results_string(head, &[trimmed.as_ref()])).filter(|json| json.len() <= budget)
+        Some(json_results_with_repos(head, &[trimmed.as_ref()], repos))
+            .filter(|json| json.len() <= budget)
     };
     let Some(mut best) = render(0) else {
         // Metadata alone exceeds the budget.
@@ -552,6 +659,59 @@ pub fn print_human_summary(
 mod tests {
     use super::*;
     use vera_core::types::Language;
+
+    #[test]
+    fn single_repo_json_is_byte_identical_to_compact_results() {
+        let results = two_results();
+        let contents: Vec<_> = results.iter().map(|r| r.content.as_str()).collect();
+        let original: Vec<_> = results
+            .iter()
+            .map(CompactResult::from_search_result)
+            .collect();
+        assert_eq!(
+            json_within_budget(&results, &contents, 0),
+            serde_json::to_string(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn cross_index_json_keeps_relative_paths_and_budgets_provenance() {
+        let mut results = two_results();
+        results[1].file_path = results[0].file_path.clone();
+        let contents: Vec<_> = results.iter().map(|r| r.content.as_str()).collect();
+        let repos = [
+            std::path::Path::new("/primary"),
+            std::path::Path::new("/extra"),
+        ];
+        let full = json_within_budget_and_repos(&results, &contents, 0, Some(&repos));
+        let parsed: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        for (i, repo) in repos.iter().enumerate() {
+            assert_eq!(parsed[i]["repo"], repo.to_str().unwrap());
+            assert_eq!(parsed[i]["file_path"], "src/a.rs");
+        }
+        let short = json_within_budget_and_repos(&results, &contents, 300, Some(&repos));
+        assert!(short.len() <= 300);
+        let parsed: serde_json::Value = serde_json::from_str(&short).unwrap();
+        assert_eq!(parsed[0]["repo"], "/primary");
+    }
+
+    #[test]
+    fn cross_index_markdown_and_raw_use_absolute_extra_paths_only() {
+        let results = two_results();
+        let displayed =
+            cross_index_display_results(&results, &[0, 1], &["/primary".into(), "/extra".into()]);
+        assert_eq!(result_info_line(&displayed[0]), "src/a.rs:1-3");
+        let extra_path = std::path::Path::new("/extra").join("src/b.rs");
+        assert_eq!(
+            result_info_line(&displayed[1]),
+            format!("{}:10-12", extra_path.display())
+        );
+        let contents: Vec<_> = displayed.iter().map(|r| r.content.as_str()).collect();
+        let raw = format_raw_results(&displayed, &contents, 0);
+        assert!(raw.contains("1. src/a.rs"));
+        assert!(raw.contains(&format!("2. {}", extra_path.display())));
+    }
 
     #[test]
     fn rerank_envelope_preserves_the_exact_results_json() {
