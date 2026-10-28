@@ -35,6 +35,32 @@ pub async fn execute_deep_search_with_context(
     filters: &SearchFilters,
     result_limit: usize,
 ) -> Result<(Vec<SearchResult>, SearchTimings)> {
+    let start = Instant::now();
+    let plan = prepare_deep_search(index_dir, query).await?;
+    let (results, mut timings) = execute_prepared_deep_search(
+        context,
+        index_dir,
+        &plan,
+        intent,
+        config,
+        filters,
+        result_limit,
+    )
+    .await?;
+    timings.total = Some(start.elapsed());
+    Ok((results, timings))
+}
+
+/// Query expansion is independent of the target index after preparation.
+/// `None` selects the existing iterative fallback, which needs no completion API.
+pub struct DeepSearchPlan {
+    query: String,
+    expanded: Option<Vec<String>>,
+}
+
+/// Collect hints from the primary index and make at most one completion call.
+/// Reuse the returned plan for every index in a cross-index search.
+pub async fn prepare_deep_search(index_dir: &Path, query: &str) -> Result<DeepSearchPlan> {
     let completion_client = match tokio::task::spawn_blocking(
         CompletionClient::from_env_if_configured,
     )
@@ -52,47 +78,11 @@ pub async fn execute_deep_search_with_context(
     };
 
     let Some(completion_client) = completion_client else {
-        return super::iterative_search::execute_iterative_search_with_context(
-            context,
-            index_dir,
-            query,
-            intent,
-            config,
-            filters,
-            result_limit,
-            1,
-        )
-        .await;
+        return Ok(DeepSearchPlan {
+            query: query.to_string(),
+            expanded: None,
+        });
     };
-
-    execute_rag_fusion_with_context(
-        context,
-        index_dir,
-        query,
-        intent,
-        config,
-        filters,
-        result_limit,
-        &completion_client,
-    )
-    .await
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "The completion client and search inputs remain explicit for each deep-search invocation."
-)]
-async fn execute_rag_fusion_with_context(
-    context: &SearchContext,
-    index_dir: &Path,
-    query: &str,
-    intent: Option<&str>,
-    config: &VeraConfig,
-    filters: &SearchFilters,
-    result_limit: usize,
-    completion_client: &CompletionClient,
-) -> Result<(Vec<SearchResult>, SearchTimings)> {
-    let overall_start = Instant::now();
 
     // BM25 pre-filter: run a cheap keyword search to gather codebase context
     // (symbol names and file paths) that helps the LLM generate better rewrites.
@@ -126,6 +116,38 @@ async fn execute_rag_fusion_with_context(
              check completion model output"
         ));
     }
+
+    Ok(DeepSearchPlan {
+        query: query.to_string(),
+        expanded: Some(queries),
+    })
+}
+
+/// Search one index using an already-expanded query, or follow its symbols
+/// iteratively when no completion endpoint was available during preparation.
+pub async fn execute_prepared_deep_search(
+    context: &SearchContext,
+    index_dir: &Path,
+    plan: &DeepSearchPlan,
+    intent: Option<&str>,
+    config: &VeraConfig,
+    filters: &SearchFilters,
+    result_limit: usize,
+) -> Result<(Vec<SearchResult>, SearchTimings)> {
+    let Some(queries) = &plan.expanded else {
+        return super::iterative_search::execute_iterative_search_with_context(
+            context,
+            index_dir,
+            &plan.query,
+            intent,
+            config,
+            filters,
+            result_limit,
+            1,
+        )
+        .await;
+    };
+    let overall_start = Instant::now();
 
     let per_query_limit = multi_query_candidate_limit(result_limit);
 
@@ -229,6 +251,58 @@ fn bm25_context_hints(index_dir: &Path, query: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn prepared_expansion_is_reused_across_indexes_without_a_completion_client() {
+        let scratch =
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let config = VeraConfig::default();
+        let filters = SearchFilters::default();
+        let mut repos = Vec::new();
+        for name in ["primary_marker", "extra_marker"] {
+            let repo = tempfile::tempdir_in(&scratch).unwrap();
+            std::fs::write(
+                repo.path().join("lib.rs"),
+                format!("pub fn shared_marker() {{ {name}(); }}\n"),
+            )
+            .unwrap();
+            crate::indexing::pipeline::index_repository_with_progress_and_cancellation(
+                repo.path(),
+                None::<&crate::embedding::DynamicProvider>,
+                &config,
+                "",
+                |_| {},
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            repos.push(repo);
+        }
+        // Expansion is prepared outside the per-index loop. The executor accepts
+        // only this reusable plan, not a completion client or expansion callback.
+        let plan = DeepSearchPlan {
+            query: "shared_marker".into(),
+            expanded: Some(dedupe_queries_with_original(
+                "shared_marker",
+                vec!["marker".into()],
+            )),
+        };
+        let context = SearchContext::bm25_only();
+        let dirs: Vec<_> = repos
+            .iter()
+            .map(|repo| crate::indexing::index_dir(repo.path()))
+            .collect();
+        let outcomes = futures::future::join_all(dirs.iter().map(|dir| {
+            execute_prepared_deep_search(&context, dir, &plan, None, &config, &filters, 5)
+        }))
+        .await;
+        for (outcome, marker) in outcomes.into_iter().zip(["primary_marker", "extra_marker"]) {
+            let (results, _) = outcome.unwrap();
+            assert!(results.iter().any(|result| result.content.contains(marker)));
+        }
+        assert_eq!(plan.expanded.unwrap(), ["shared_marker", "marker"]);
+    }
 
     #[test]
     fn dedupe_preserves_original_first() {

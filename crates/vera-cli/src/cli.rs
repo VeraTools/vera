@@ -414,6 +414,11 @@ pub enum Commands {
         #[arg(required = true, num_args = 1..)]
         queries: Vec<String>,
 
+        /// Also search another indexed repository (repeatable). Results from it show
+        /// absolute paths; JSON adds a repo field. The directory must already be indexed.
+        #[arg(long, value_name = "DIR")]
+        also: Vec<std::path::PathBuf>,
+
         /// Higher-level goal used to disambiguate the query before reranking.
         #[arg(long)]
         intent: Option<String>,

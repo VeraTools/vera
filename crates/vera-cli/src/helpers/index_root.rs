@@ -13,9 +13,21 @@ pub fn set_directory_override(enabled: bool) {
 }
 
 pub fn warn_if_index_stale(repo_path: &Path, indexing_config: &vera_core::config::IndexingConfig) {
+    warn_if_index_stale_at(
+        repo_path,
+        indexing_config,
+        DIRECTORY_OVERRIDE.load(Ordering::Relaxed),
+    );
+}
+
+pub fn warn_if_index_stale_at(
+    repo_path: &Path,
+    indexing_config: &vera_core::config::IndexingConfig,
+    explicit_root: bool,
+) {
     match vera_core::indexing::detect_staleness(repo_path, indexing_config) {
         Ok(freshness) => {
-            let command = if DIRECTORY_OVERRIDE.load(Ordering::Relaxed) {
+            let command = if explicit_root {
                 vera_core::indexing::freshness::vera_command_for_repo(repo_path)
             } else {
                 "vera".to_string()
@@ -123,7 +135,7 @@ pub fn prepare_indexed_repo(
 
 /// Resolve the index for `cwd` and require the current index format: legacy
 /// suffixed rows would be silently wrong.
-fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+pub fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let repo_root = resolve_index_root(cwd)?;
     let index_dir = vera_core::indexing::index_dir(&repo_root);
     let metadata_path = index_dir.join("metadata.db");
@@ -143,6 +155,34 @@ fn check_index_format(cwd: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     Ok((repo_root, index_dir))
 }
 
+/// Additional repositories must already be indexed; unlike the primary they
+/// never offer auto-indexing. Resolve ancestors before deduplicating roots.
+pub fn resolve_additional_roots(
+    primary: &Path,
+    extras: &[PathBuf],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let extras = extras
+        .iter()
+        .map(|path| {
+            use anyhow::Context;
+            let requested = path
+                .canonicalize()
+                .with_context(|| format!("Cannot resolve repository {}", path.display()))?;
+            if !requested.is_dir() {
+                anyhow::bail!("Repository is not a directory: {}", requested.display());
+            }
+            find_index_root(&requested).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No index found at {} or any parent directory. Run `vera index {}` first.",
+                    requested.display(),
+                    requested.display()
+                )
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    vera_core::retrieval::cross_index::search_roots(&primary.canonicalize()?, extras)
+}
+
 pub fn should_offer_auto_index(json_output: bool, is_terminal: bool) -> bool {
     !json_output && is_terminal
 }
@@ -150,6 +190,38 @@ pub fn should_offer_auto_index(json_output: bool, is_terminal: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn additional_roots_require_indexes_and_deduplicate_ancestors() {
+        let scratch = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let primary = tempfile::tempdir_in(&scratch).unwrap();
+        let extra = tempfile::tempdir_in(&scratch).unwrap();
+        let err =
+            resolve_additional_roots(primary.path(), &[extra.path().to_path_buf()]).unwrap_err();
+        assert!(err.to_string().contains("No index found at"));
+        assert!(!extra.path().join(".vera").exists());
+        for root in [primary.path(), extra.path()] {
+            std::fs::create_dir(root.join(".vera")).unwrap();
+            std::fs::write(root.join(".vera/metadata.db"), []).unwrap();
+            std::fs::create_dir(root.join("src")).unwrap();
+        }
+        assert_eq!(
+            resolve_additional_roots(
+                primary.path(),
+                &[
+                    primary.path().join("src"),
+                    extra.path().to_path_buf(),
+                    extra.path().join("src"),
+                ]
+            )
+            .unwrap(),
+            [
+                primary.path().canonicalize().unwrap(),
+                extra.path().canonicalize().unwrap()
+            ]
+        );
+    }
 
     #[test]
     fn index_freshness_summary_formats_nonzero_counts() {
