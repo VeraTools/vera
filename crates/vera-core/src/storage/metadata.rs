@@ -323,11 +323,7 @@ impl MetadataStore {
             )
             .context("failed to create file_hashes table")?;
 
-        if !self.column_exists("file_hashes", "file_stamp")? {
-            self.conn
-                .execute_batch("ALTER TABLE file_hashes ADD COLUMN file_stamp TEXT;")
-                .context("failed to add file_stamp column to file_hashes table")?;
-        }
+        self.ensure_file_stamp_column()?;
 
         self.conn
             .execute_batch(
@@ -956,6 +952,15 @@ impl MetadataStore {
         Ok(())
     }
 
+    fn ensure_file_stamp_column(&self) -> Result<()> {
+        if !self.column_exists("file_hashes", "file_stamp")? {
+            self.conn
+                .execute_batch("ALTER TABLE file_hashes ADD COLUMN file_stamp TEXT;")
+                .context("failed to add file_stamp column to file_hashes table")?;
+        }
+        Ok(())
+    }
+
     /// One read for all tracked files; old read-only indexes need no migration.
     pub(crate) fn file_fingerprints(&self) -> Result<HashMap<String, FileFingerprint>> {
         let stamp = if self.column_exists("file_hashes", "file_stamp")? {
@@ -997,6 +1002,8 @@ impl MetadataStore {
     }
 
     /// Freshness must never wait for an index writer or require writable metadata.
+    /// A writable index from an older release gains the column here, so plain
+    /// searches start certifying files without a rebuild or `vera update`.
     pub(crate) fn try_backfill_file_stamps(
         path: &std::path::Path,
         stamps: &[StampedFileHash],
@@ -1011,6 +1018,7 @@ impl MetadataStore {
             #[cfg(test)]
             hydration_count: std::cell::Cell::new(0),
         };
+        store.ensure_file_stamp_column()?;
         store.backfill_file_stamps(stamps)
     }
 
@@ -1799,6 +1807,31 @@ mod tests {
         assert_eq!(
             store.get_file_hash("lib.rs").unwrap().as_deref(),
             Some("hash")
+        );
+    }
+
+    #[test]
+    fn best_effort_backfill_adds_the_column_to_an_old_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.db");
+        let store = MetadataStore::open(&path).unwrap();
+        store.set_file_hash("lib.rs", "hash").unwrap();
+        store
+            .conn
+            .execute_batch("ALTER TABLE file_hashes DROP COLUMN file_stamp")
+            .unwrap();
+        drop(store);
+        MetadataStore::try_backfill_file_stamps(
+            &path,
+            &[("lib.rs".into(), "hash".into(), Some("stamp".into()))],
+        )
+        .unwrap();
+        let reader = MetadataStore::open_existing(&path).unwrap();
+        assert_eq!(
+            reader.file_fingerprints().unwrap()["lib.rs"]
+                .file_stamp
+                .as_deref(),
+            Some("stamp")
         );
     }
 
