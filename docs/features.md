@@ -178,6 +178,14 @@ vera -C ~/.cargo/registry/src search "retry backoff"
 
 Each tree keeps its own `.vera/` index. With MCP, use the optional [`repo` argument](mcp.md#querying-another-index) instead.
 
+To search your project and other indexed trees in one call, repeat `--also`:
+
+```bash
+vera search "retry backoff" --also ~/.cargo/registry/src
+```
+
+Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. Up to 8 indexes can be searched at once. `--also` never creates an index, cannot be combined with `--changed`, `--since`, or `--base`, and an index that fails to search is reported on stderr while the other results are still shown. With `--deep`, the query is expanded once and reused for every index.
+
 ### Choosing what gets indexed
 
 Vera skips anything in `.gitignore`, plus common build and dependency directories (`node_modules`, `target`, `dist`, `.venv`, and others). For more control, add a `.veraignore` file in gitignore syntax; put `#include .gitignore` on its first line to keep the gitignore rules and add your own on top. One-off options: `--exclude <glob>`, `--no-ignore`, and `--no-default-excludes`.

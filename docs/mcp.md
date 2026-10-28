@@ -30,6 +30,14 @@ All seven tools accept an optional `repo` string: an indexed repository root or 
 
 A different repository is never auto-indexed or watched. Omitting `repo`, or selecting the server's working directory, keeps the normal auto-index and watcher behavior. Filters, relative file paths, and staleness checks use the selected repository. The existing project `path` argument on `get_stats` and `get_overview` remains supported; `repo` takes precedence.
 
+`search_code` also accepts `repos`, an array of additional indexed repositories to search alongside `repo` (up to 8 indexes in total):
+
+```json
+{"query":"retry backoff","repos":["/home/user/.cargo/registry/src"]}
+```
+
+Results are merged by rank with a one-place head start for the main repository, and every result gains a `repo` field naming its repository root; `file_path` stays relative to that root. Entries in `repos` are never auto-indexed, cannot be combined with git scopes, and a repository that fails to search is reported in the warnings block while the other results are still returned.
+
 ## Client setup
 
 The server uses the backend saved by `vera setup`, unless `VERA_BACKEND` is set (the Docker images set it). Configure a backend first.

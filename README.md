@@ -90,6 +90,7 @@ Setup for Codex, VS Code, and other clients is in the [MCP guide](docs/mcp.md).
 | Try several phrasings at once | `vera search "OAuth token refresh" "JWT expiry" "auth middleware"` |
 | Narrow the results | `vera search "error handling" --lang rust --path "src/**" --type function` |
 | Search only files you changed | `vera search "token validation" --changed` (or `--base main`) |
+| Also search another indexed tree | `vera search "retry backoff" --also ~/.cargo/registry/src` |
 | Find a definition | `vera structural definitions parse_config` |
 | Find callers, or what a function calls | `vera references parse_config` / `vera references parse_config --callees` |
 | List routes, env reads, or implementations | `vera structural routes` / `vera structural env` / `vera structural impls Loader` |

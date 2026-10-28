@@ -47,7 +47,7 @@ Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'
 - Hit shows a call but not the caller chain: `vera references <symbol>`.
 - Two searches returned the same region: stop searching and read that code.
 - The code is in a dependency (site-packages, uv or pip caches, vendored trees outside the index): use `rg` there, then return to Vera for repository code.
-- For an indexed dependency tree, use `vera -C <dir> search "query"` (put `-C <dir>` before the subcommand); each tree keeps its own `.vera/`.
+- For an indexed dependency tree, use `vera -C <dir> search "query"` (put `-C <dir>` before the subcommand); each tree keeps its own `.vera/`. To search the project and that tree together, use `vera search "query" --also <dir>`: hits from the other tree show absolute paths, and `--json` adds a `repo` field.
 
 ## Treat hits as leads
 

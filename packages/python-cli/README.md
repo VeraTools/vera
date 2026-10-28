@@ -47,6 +47,7 @@ Results come back as Markdown code blocks labeled with path, line range, and sym
 | Search by behavior | `vera search "retry failed uploads with backoff"` |
 | Narrow the results | `vera search "error handling" --lang rust --path "src/**" --type function` |
 | Search only files you changed | `vera search "token validation" --changed` (or `--base main`) |
+| Also search another indexed tree | `vera search "retry backoff" --also ~/.cargo/registry/src` |
 | Find a definition | `vera structural definitions parse_config` |
 | Find callers, or what a function calls | `vera references parse_config` / `vera references parse_config --callees` |
 | Exact text or regex in indexed files | `vera grep "TODO\|FIXME"` |
