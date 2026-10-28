@@ -14,6 +14,7 @@
 //! - `.ignore` files
 //! - Custom override patterns
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
 use std::path::Component;
@@ -345,6 +346,16 @@ pub fn discover_files_with_cancellation(
     config: &IndexingConfig,
     cancellation: &CancellationToken,
 ) -> Result<DiscoveryResult> {
+    discover_files_with_stamps(root, config, cancellation, None)
+}
+
+/// Known text files with matching fingerprints need no binary-content read.
+pub(crate) fn discover_files_with_stamps(
+    root: &Path,
+    config: &IndexingConfig,
+    cancellation: &CancellationToken,
+    known_stamps: Option<&HashMap<String, String>>,
+) -> Result<DiscoveryResult> {
     cancellation.check()?;
     let root = root
         .canonicalize()
@@ -408,6 +419,23 @@ pub fn discover_files_with_cancellation(
             Err(_) => path.to_string_lossy().to_string(),
         };
 
+        #[cfg(unix)]
+        if let Some(known) = known_stamps.and_then(|stamps| stamps.get(&relative_path))
+            && let Ok(metadata) = root_dir.symlink_metadata(Path::new(&relative_path))
+            && let Some(stamp) = crate::indexing::file_stamp::from_metadata(&metadata)
+            && stamp.value() == known
+            && metadata.len() > 0
+            && metadata.len() <= config.max_file_size_bytes
+            && !is_binary_extension(path)
+        {
+            files.push(DiscoveredFile {
+                absolute_path: path.to_path_buf(),
+                relative_path,
+                size: metadata.len(),
+            });
+            continue;
+        }
+
         // Open once and stat through the handle, so the size gate and the
         // binary sniff below observe the same file even if the path is swapped
         // between opens; a fresh path stat here could bless another inode.
@@ -458,20 +486,35 @@ pub fn discover_files_with_cancellation(
         }
 
         // Skip binary files by content detection (read first 8KB).
-        match is_binary_file(&mut file) {
-            Ok(true) => {
-                debug!("skipping binary (content): {}", path.display());
-                binary_skipped += 1;
-                continue;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                warn!(
-                    "cannot read file for binary check: {} — {err}",
-                    path.display()
-                );
-                error_skipped += 1;
-                continue;
+        #[cfg(windows)]
+        let known_text = known_stamps
+            .and_then(|stamps| stamps.get(&relative_path))
+            .is_some_and(|known| {
+                crate::indexing::file_stamp::from_handle(&file)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|stamp| stamp.value() == known)
+            });
+        #[cfg(not(windows))]
+        let known_text = false;
+        #[cfg(not(any(unix, windows)))]
+        let _ = known_stamps;
+        if !known_text {
+            match is_binary_file(&mut file) {
+                Ok(true) => {
+                    debug!("skipping binary (content): {}", path.display());
+                    binary_skipped += 1;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        "cannot read file for binary check: {} — {err}",
+                        path.display()
+                    );
+                    error_skipped += 1;
+                    continue;
+                }
             }
         }
 
@@ -1238,12 +1281,19 @@ fn read_prefix(reader: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Resu
     Ok(filled)
 }
 
+#[cfg(test)]
+thread_local! {
+    static BINARY_SNIFFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Check whether an already-open file contains binary content in its first 8KB.
 ///
 /// Uses the null-byte heuristic: if any null bytes are found in the sample, the
 /// file is considered binary. Takes the open handle so callers that already hold
 /// the file do not reopen it by path and risk inspecting a different file.
 fn is_binary_file(file: &mut impl std::io::Read) -> Result<bool> {
+    #[cfg(test)]
+    BINARY_SNIFFS.with(|count| count.set(count.get() + 1));
     let mut buf = [0u8; 8192];
     let filled = read_prefix(file, &mut buf)?;
 
@@ -1261,6 +1311,56 @@ fn is_binary_content(path: &Path) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn matching_stamps_skip_sniff_but_changed_and_new_binary_files_do_not() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn before() {}\n").unwrap();
+        let root = open_root_dir(dir.path()).unwrap();
+        let stamp = crate::indexing::file_stamp::at(&root, Path::new("lib.rs"))
+            .unwrap()
+            .unwrap();
+        let known = HashMap::from([("lib.rs".into(), stamp.value().to_string())]);
+        let config = IndexingConfig::default();
+        let cancellation = CancellationToken::new();
+        let before = BINARY_SNIFFS.with(|count| count.get());
+        let result =
+            discover_files_with_stamps(dir.path(), &config, &cancellation, Some(&known)).unwrap();
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(before, BINARY_SNIFFS.with(|count| count.get()));
+        std::fs::write(dir.path().join("lib.rs"), [0; 20]).unwrap();
+        std::fs::write(dir.path().join("new.rs"), [0; 20]).unwrap();
+        let result =
+            discover_files_with_stamps(dir.path(), &config, &cancellation, Some(&known)).unwrap();
+        assert!(result.files.is_empty());
+        assert_eq!(result.binary_skipped, 2);
+        assert_eq!(before + 2, BINARY_SNIFFS.with(|count| count.get()));
+        // Matching metadata never bypasses the size/empty/exclusion policies.
+        std::fs::write(dir.path().join("lib.rs"), "fn accepted_text() {}\n").unwrap();
+        let stamp = crate::indexing::file_stamp::at(&root, Path::new("lib.rs"))
+            .unwrap()
+            .unwrap();
+        let known = HashMap::from([("lib.rs".into(), stamp.value().to_string())]);
+        let limited = IndexingConfig {
+            max_file_size_bytes: 1,
+            ..Default::default()
+        };
+        let result =
+            discover_files_with_stamps(dir.path(), &limited, &cancellation, Some(&known)).unwrap();
+        assert!(result.files.is_empty());
+        assert_eq!(result.large_skipped, 2);
+        let excluded = IndexingConfig {
+            extra_excludes: vec!["lib.rs".into(), "new.rs".into()],
+            ..Default::default()
+        };
+        assert!(
+            discover_files_with_stamps(dir.path(), &excluded, &cancellation, Some(&known))
+                .unwrap()
+                .files
+                .is_empty()
+        );
+    }
     use super::*;
     use std::fs;
     use tempfile::TempDir;

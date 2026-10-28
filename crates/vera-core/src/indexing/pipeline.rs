@@ -603,7 +603,7 @@ where
 struct ParsedWindow {
     chunks: Vec<Chunk>,
     parse_errors: Vec<FileError>,
-    file_hashes: Vec<(String, String)>,
+    file_hashes: Vec<crate::storage::metadata::StampedFileHash>,
     refs: Vec<(String, Vec<RawReference>)>,
     type_relations: Vec<(String, Vec<RawTypeRelation>)>,
     file_states: Vec<FileIndexState>,
@@ -680,7 +680,7 @@ enum StoreCommand {
         /// Set when the build parsed chunks but no embedding ever produced a
         /// stored dimension, triggering the empty-vector fallback store.
         create_fallback_vector_store: bool,
-        file_hashes: Vec<(String, String)>,
+        file_hashes: Vec<crate::storage::metadata::StampedFileHash>,
         indexing_config: crate::config::IndexingConfig,
     },
 }
@@ -723,7 +723,7 @@ impl StoreHandle {
     async fn finish(
         mut self,
         create_fallback_vector_store: bool,
-        file_hashes: Vec<(String, String)>,
+        file_hashes: Vec<crate::storage::metadata::StampedFileHash>,
         indexing_config: crate::config::IndexingConfig,
     ) -> Result<Duration> {
         self.tx
@@ -909,7 +909,7 @@ pub(crate) fn parse_discovered_files_parallel(
 ) -> Result<(
     Vec<Chunk>,
     Vec<FileError>,
-    Vec<(String, String)>,
+    Vec<crate::storage::metadata::StampedFileHash>,
     Vec<(String, Vec<RawReference>)>,
     Vec<(String, Vec<RawTypeRelation>)>,
     Vec<FileIndexState>,
@@ -920,7 +920,7 @@ pub(crate) fn parse_discovered_files_parallel(
     struct ParsedFileResult {
         chunks: Vec<Chunk>,
         parse_error: Option<FileError>,
-        file_hash: Option<(String, String)>,
+        file_hash: Option<crate::storage::metadata::StampedFileHash>,
         refs: Option<(String, Vec<RawReference>)>,
         type_relations: Option<(String, Vec<RawTypeRelation>)>,
         file_state: Option<FileIndexState>,
@@ -940,7 +940,7 @@ pub(crate) fn parse_discovered_files_parallel(
                 };
             }
 
-            let source = match crate::discovery::read_source_lossy_at(
+            let (source, stamp) = match super::file_stamp::read_source_with_stamp_at(
                 &discovery.root_dir,
                 Path::new(&file.relative_path),
             ) {
@@ -966,6 +966,7 @@ pub(crate) fn parse_discovered_files_parallel(
             };
 
             let language = detect_language_for_path(&file.absolute_path);
+            let stamp = stamp.filter(|_| language != Language::Rst);
 
             // RST files need preprocessing before chunking, but refs
             // come from the raw source, so they can't share a single parse.
@@ -1025,7 +1026,7 @@ pub(crate) fn parse_discovered_files_parallel(
                     ParsedFileResult {
                         chunks,
                         parse_error: None,
-                        file_hash: Some((file.relative_path.clone(), hash)),
+                        file_hash: Some((file.relative_path.clone(), hash, stamp)),
                         refs: (!refs.is_empty()).then_some((file.relative_path.clone(), refs)),
                         type_relations: (!type_relations.is_empty())
                             .then_some((file.relative_path.clone(), type_relations)),
@@ -1051,7 +1052,7 @@ pub(crate) fn parse_discovered_files_parallel(
                             file_path: file.relative_path.clone(),
                             error: err.to_string(),
                         }),
-                        file_hash: Some((file.relative_path.clone(), hash)),
+                        file_hash: Some((file.relative_path.clone(), hash, stamp)),
                         refs: None,
                         type_relations: None,
                         file_state: Some(FileIndexState {
@@ -1208,7 +1209,7 @@ fn swap_staging_index(idx_dir: &Path, build_dir: &Path, old_dir: &Path) -> Resul
 
 fn publish_index_certification(
     metadata_store: &MetadataStore,
-    file_hashes: &[(String, String)],
+    file_hashes: &[crate::storage::metadata::StampedFileHash],
     indexing_config: &crate::config::IndexingConfig,
 ) -> Result<()> {
     // Hashes and the freshness stamp certify the index current, so they are
@@ -1216,8 +1217,12 @@ fn publish_index_certification(
     // completed. A failure before this publication leaves the staging build
     // uncertified and the previous live index untouched. The swap happens
     // only after these writes succeed.
+    let borrowed: Vec<_> = file_hashes
+        .iter()
+        .map(|(path, hash, stamp)| (path.as_str(), hash.as_str(), stamp.as_deref()))
+        .collect();
     metadata_store
-        .set_file_hashes_batch(file_hashes)
+        .set_file_hashes_with_stamps(&borrowed)
         .context("failed to store file hashes")?;
     super::freshness::record_index_snapshot(metadata_store, indexing_config)
         .context("failed to store index freshness metadata")?;

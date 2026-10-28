@@ -8,6 +8,7 @@
 
 pub(crate) mod checkpoint;
 pub mod estimate;
+pub(crate) mod file_stamp;
 pub mod freshness;
 mod git_exclude;
 pub mod lock;
