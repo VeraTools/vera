@@ -180,16 +180,14 @@ pub async fn execute_prepared_deep_search(
         }
     }
 
-    // Remove empty slots (failed queries).
+    // Drop failed subqueries. The original query (idx 0) succeeded or returned
+    // above, so an index with no hits yields an empty list, not an error, and a
+    // cross-index search keeps the other indexes' results.
     let (filled_results, filled_weights): (Vec<_>, Vec<_>) = per_query_results
         .into_iter()
         .zip(per_query_weights)
-        .filter(|(r, _)| !r.is_empty())
+        .filter(|(_, weight)| *weight > 0.0)
         .unzip();
-
-    if filled_results.is_empty() {
-        return Err(anyhow!("deep search failed: all query candidates failed"));
-    }
 
     let slices: Vec<&[SearchResult]> = filled_results.iter().map(Vec::as_slice).collect();
     let fused = fuse_rrf_multi_weighted(
@@ -301,6 +299,17 @@ mod tests {
             let (results, _) = outcome.unwrap();
             assert!(results.iter().any(|result| result.content.contains(marker)));
         }
+        // An index with no hits returns an empty list, so a cross-index search
+        // keeps the other indexes' results instead of failing.
+        let empty = DeepSearchPlan {
+            query: "absent_token".into(),
+            expanded: Some(vec!["absent_token".into(), "missing_token".into()]),
+        };
+        let (results, _) =
+            execute_prepared_deep_search(&context, &dirs[0], &empty, None, &config, &filters, 5)
+                .await
+                .unwrap();
+        assert!(results.is_empty());
         assert_eq!(plan.expanded.unwrap(), ["shared_marker", "marker"]);
     }
 

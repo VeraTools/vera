@@ -9,7 +9,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 - `vera update --verify` hashes every file instead of trusting recorded metadata, for filesystems with unreliable timestamps.
 - File discovery walks directories in parallel.
 - Tantivy is updated to 0.27, which moves zstd to 0.14.3 for RUSTSEC-2026-0391 and related zstd advisories. Tantivy 0.27 ships an updated English stemmer that stems about 0.1% of words differently ("added" now stems to "add", "internal" stays "internal"). Existing indexes keep working; run `vera index .` to rebuild if keyword search misses one of those words.
-- `--timing` on `search`, `grep`, and `structural` reports every stage (index lookup, freshness check, setup, search stages, output) and the end-to-end total.
+- `--timing` on `search` reports every stage (index lookup, freshness check, setup, search stages, output) and the end-to-end total. `grep` and `structural` report index lookup, freshness check, search, output, and total.
 - An MCP server started in a subdirectory of an indexed repository uses that repository's index instead of creating a nested one, and the `repo` argument accepts any directory inside an indexed repository. The server refuses to auto-index the filesystem root or your home directory.
 
 ## v2.2.0

@@ -184,7 +184,7 @@ To search your project and other indexed trees in one call, repeat `--also`:
 vera search "retry backoff" --also ~/.cargo/registry/src
 ```
 
-Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. When only one distinct index ends up searched (for example, `--also` names the current project), output keeps the single-index format. Up to 8 indexes can be searched at once. `--also` never creates an index and cannot be combined with `--changed`, `--since`, or `--base`. A directory that is missing or not indexed stops the search with an error. If an extra index fails during the search, a warning goes to stderr and the other results are still shown. With `--deep`, the query is expanded once and reused for every index.
+Each index is searched with its own mode (hybrid or keyword-only) and the same filters; absolute `--path` filters are rewritten for each tree. Scores from different indexes are not comparable, so results are merged by rank, and the current project gets a one-place head start: its first two results come before the other tree's first. Results from another tree show absolute paths, and `--json` adds a `repo` field to every result while `file_path` stays relative to its tree. When only one distinct index ends up searched (for example, `--also` names the current project), output keeps the single-index format. Up to 8 indexes can be searched at once. `--also` never creates an index for the extra trees (the current project keeps the usual first-run prompt) and cannot be combined with `--changed`, `--since`, or `--base`. A directory that is missing or not indexed stops the search with an error. If an extra index fails during the search, a warning goes to stderr and the other results are still shown. With `--deep`, the query is expanded once and reused for every index.
 
 ### Choosing what gets indexed
 
@@ -216,7 +216,7 @@ Indexing shows a progress display in a terminal. In CI or agent runs, it prints 
 | `--compact` | Signatures only |
 | `--json` | Compact JSON |
 | `--raw` | Verbose, human-readable output with every field |
-| `--timing` | Timings on stderr for `search`, `grep`, and `structural`: index lookup, freshness check, setup, each search stage, output, and the end-to-end total |
+| `--timing` | Timings on stderr. `search` reports index lookup, freshness check, setup, each search stage, output, and the end-to-end total; `grep` and `structural` report index lookup, freshness check, search, output, and total |
 
 `--json`, `--raw`, and `--timing` can go before or after the subcommand. `vera search --json --rerank-status` also reports whether results were reranked and, if not, why.
 

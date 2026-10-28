@@ -219,4 +219,4 @@ See [MCP](mcp.md) for client configuration.
 
 ## Privacy
 
-With a local backend, and no API reranker or completion endpoint configured, no code leaves your machine. API mode sends queries and chunk text to the configured embedding endpoint. An API reranker receives queries and candidate chunks, and `--deep` with a completion endpoint sends it the query plus symbol names and file paths from a quick keyword search. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.
+With a local backend, and no API reranker or completion endpoint configured, no code leaves your machine. API mode sends queries and chunk text to the configured embedding endpoint. An API reranker receives queries and candidate chunks. With `--deep` and a completion endpoint, Vera sends the query plus symbol names and file paths from a quick keyword search to that endpoint. The update check contacts GitHub once a day; disable it with `VERA_NO_UPDATE_CHECK=1`.

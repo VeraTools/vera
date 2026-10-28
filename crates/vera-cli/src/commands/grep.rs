@@ -45,19 +45,18 @@ pub fn run(
             raw,
             compact,
             config.retrieval.max_output_chars,
-        )
+        );
+        if results.is_empty() {
+            let stderr = std::io::stderr();
+            let mut err = stderr.lock();
+            if let Some(hint) = alternation_hint(pattern) {
+                let _ = writeln!(err, "{hint}");
+            }
+            if let Some(hint) = crate::helpers::path_filter_hint(&index_dir, &filters) {
+                let _ = writeln!(err, "{hint}");
+            }
+        }
     });
-
-    if results.is_empty() {
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        if let Some(hint) = alternation_hint(pattern) {
-            let _ = writeln!(err, "{hint}");
-        }
-        if let Some(hint) = crate::helpers::path_filter_hint(&index_dir, &filters) {
-            let _ = writeln!(err, "{hint}");
-        }
-    }
 
     if timing {
         timing::print_timings();

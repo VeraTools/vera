@@ -42,7 +42,7 @@ Run `vera setup` with no flags in a terminal for a guided setup that can also in
 
 ## What Vera does well
 
-**It finds code by behavior and by name.** Each query runs keyword search (BM25) and embedding search side by side, merges the two lists, then applies code-aware ranking that prefers definitions over passing mentions and source files over tests and docs. Searching `parse_config` finds that function; searching "load settings from environment variables" finds it too.
+**It finds code by behavior and by name.** Each query runs keyword search (BM25) and embedding search side by side, merges the two lists, then applies code-aware ranking that prefers definitions over passing mentions and source files over tests and docs. A keyword-only index (`--full-text-only`) uses BM25 alone. Searching `parse_config` finds that function; searching "load settings from environment variables" finds it too.
 
 **Results are whole functions, not line fragments.** Vera parses files with tree-sitter and indexes functions, classes, methods, structs, and other symbols as separate chunks. 54 of the [65 supported languages](docs/supported-languages.md) get symbol-level chunks; config files, docs, and the rest are split by section, whole file, or line windows. An agent reads the relevant symbol instead of opening the whole file.
 
@@ -133,7 +133,7 @@ See [models and backends](docs/models.md) for measurements and setup details.
 
 ## Privacy
 
-With a local backend, your code and queries stay on your machine; only the first model download needs the network. Code or queries go elsewhere only to endpoints you configure: API mode sends chunk text and queries to the embedding endpoint, an API reranker receives queries and candidate chunks (even with a local backend), and `--deep` with a completion endpoint sends it the query plus symbol names and file paths from a quick keyword search. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
+With a local backend, your code and queries stay on your machine; only the first model download needs the network. Code or queries go elsewhere only to endpoints you configure: API mode sends chunk text and queries to the embedding endpoint, an API reranker receives queries and candidate chunks (even with a local backend), and with `--deep`, a completion endpoint receives the query plus symbol names and file paths from a quick keyword search. Vera checks GitHub for a new release once a day; set `VERA_NO_UPDATE_CHECK=1` to turn that off.
 
 ## Benchmarks
 
