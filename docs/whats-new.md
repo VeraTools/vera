@@ -4,7 +4,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 
 ## v2.3.1
 
-- Reranking now defaults to 20 candidates (`retrieval.rerank_candidates`, was 50) of up to 2,000 characters each (`retrieval.reranker_max_doc_chars`, was 4,800). On the benchmark subset this uses 68% fewer reranker tokens and one reranker request per search instead of three, for a 0.001 nDCG@10 difference; see the [reranker budget sweep](benchmarks-history.md#reranker-budget-sweep-2026-11-03). Existing installs keep their saved values; run `vera config set retrieval.rerank_candidates 20` and `vera config set retrieval.reranker_max_doc_chars 2000` to switch.
+- Reranking now defaults to 20 candidates (`retrieval.rerank_candidates`, was 50) of up to 2,000 characters each (`retrieval.reranker_max_doc_chars`, was 4,800). This cuts reranker tokens by about two thirds, and at the default result limit each search makes one reranker request; quality was unchanged within noise. See the [reranker budget sweep](benchmarks-history.md#reranker-budget-sweep-2026-11-03). Installs keep saved values, except that configs written before `reranker_max_doc_chars` existed now get 2,000. To switch, run `vera config set retrieval.rerank_candidates 20` and `vera config set retrieval.reranker_max_doc_chars 2000`.
 
 ## v2.3.0
 
