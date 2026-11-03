@@ -84,7 +84,7 @@ pub struct RetrievalConfig {
     /// supported, otherwise the instruction is omitted.
     #[serde(default)]
     pub reranker_task_field: Option<String>,
-    /// Per-document character budget for reranker input. 4800 default,
+    /// Per-document character budget for reranker input. 2000 default,
     /// newline-safe truncation; 0 means unlimited (no truncation).
     #[serde(default = "default_reranker_max_doc_chars")]
     pub reranker_max_doc_chars: usize,
@@ -181,7 +181,7 @@ fn default_max_rerank_batch() -> usize {
 }
 
 fn default_reranker_max_doc_chars() -> usize {
-    4800
+    2000
 }
 
 fn default_reranker_timeout_secs() -> u64 {
@@ -249,7 +249,7 @@ impl Default for RetrievalConfig {
         Self {
             default_limit: 5,
             rrf_k: DEFAULT_RRF_K,
-            rerank_candidates: 50,
+            rerank_candidates: 20,
             reranking_enabled: false,
             max_rerank_batch: default_max_rerank_batch(),
             max_output_chars: default_max_output_chars(),
@@ -392,7 +392,7 @@ mod tests {
         }"#;
         let cfg: RetrievalConfig = serde_json::from_str(legacy).unwrap();
         assert_eq!(cfg.max_rerank_batch, 20);
-        assert_eq!(cfg.reranker_max_doc_chars, 4800);
+        assert_eq!(cfg.reranker_max_doc_chars, 2000);
         assert_eq!(cfg.reranker_timeout_secs, 30);
         assert_eq!(cfg.reranker_max_retries, 2);
         assert_eq!(cfg.reranker_rate_limit_wait_secs, None);
@@ -405,7 +405,7 @@ mod tests {
         // VeraConfig wrapper also tolerates missing `core_config.reranker_*`
         let vera_legacy = r#"{"indexing":{"max_chunk_lines":200,"default_excludes":[],"max_file_size_bytes":1000000,"max_chunk_bytes":24576},"retrieval":{"default_limit":5,"rrf_k":60.0,"rerank_candidates":50,"reranking_enabled":false,"max_rerank_batch":20,"max_output_chars":0},"embedding":{"batch_size":128,"max_concurrent_requests":8,"timeout_secs":60,"max_retries":3,"max_stored_dim":1024}}"#;
         let vera: VeraConfig = serde_json::from_str(vera_legacy).unwrap();
-        assert_eq!(vera.retrieval.reranker_max_doc_chars, 4800);
+        assert_eq!(vera.retrieval.reranker_max_doc_chars, 2000);
         assert_eq!(vera.retrieval.reranker_protocol, None);
     }
 
@@ -436,7 +436,7 @@ mod tests {
     #[ignore = "driven by reranker_doc_budget_env_precedence_matrix"]
     fn reranker_doc_budget_env_precedence_matrix_probe() {
         // env-only: no config key, env present => env value observed
-        assert_eq!(default_reranker_max_doc_chars(), 4800);
+        assert_eq!(default_reranker_max_doc_chars(), 2000);
         let cfg = runtime_retrieval(RetrievalConfig::default());
         assert_eq!(cfg.reranker_max_doc_chars, 9999);
     }
@@ -454,8 +454,8 @@ mod tests {
     #[ignore = "driven by reranker_doc_budget_env_precedence_matrix"]
     fn reranker_doc_budget_unset_defaults_probe() {
         assert!(std::env::var("VERA_MAX_RERANK_DOC_CHARS").is_err());
-        assert_eq!(default_reranker_max_doc_chars(), 4800);
-        assert_eq!(RetrievalConfig::default().reranker_max_doc_chars, 4800);
+        assert_eq!(default_reranker_max_doc_chars(), 2000);
+        assert_eq!(RetrievalConfig::default().reranker_max_doc_chars, 2000);
     }
 
     #[test]

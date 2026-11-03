@@ -1204,10 +1204,10 @@ mod protocol_wire_tests {
 
     #[tokio::test]
     async fn document_budget_newline_safe_and_unlimited() {
-        // Default 4800
+        // Default 2000
         let retrieval =
             make_retrieval_with(None, None, None, None, None, None, None, None, None, None);
-        assert_eq!(retrieval.reranker_max_doc_chars, 4800);
+        assert_eq!(retrieval.reranker_max_doc_chars, 2000);
         // 1200 explicit
         let retrieval2 = make_retrieval_with(
             None,

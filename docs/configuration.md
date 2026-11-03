@@ -73,7 +73,7 @@ The backend adjusts some embedding settings at runtime, so the effective values 
 |---|---:|---|
 | `retrieval.default_limit` | 5 | Number of results returned by default. |
 | `retrieval.rrf_k` | 60.0 | Reciprocal Rank Fusion constant. |
-| `retrieval.rerank_candidates` | 50 | Candidates passed to the reranker. |
+| `retrieval.rerank_candidates` | 20 | Candidates passed to the reranker. |
 | `retrieval.reranking_enabled` | `false` | Enables reranking. Uses the API reranker when `RERANKER_MODEL_*` is configured; otherwise local backends download and run the bundled local reranker, and the API backend warns that no reranker is configured. |
 | `retrieval.max_output_chars` | 0 | Total search-output character budget; `0` is unlimited. |
 | `retrieval.max_rerank_batch` | 20 | Documents per reranker request; `0` disables batching. |
@@ -81,7 +81,7 @@ The backend adjusts some embedding settings at runtime, so the effective values 
 | `retrieval.reranker_endpoint_path` (`rerank_endpoint_path`, `endpoint_path`) | auto | Overrides the reranker endpoint path. |
 | `retrieval.reranker_task_instruction` (`rerank_task_instruction`, `task_instruction`) | `null` | Adds reranker scoring guidance. |
 | `retrieval.reranker_task_field` (`rerank_task_field`, `task_field`) | `null` | Names the wire field for the task instruction. |
-| `retrieval.reranker_max_doc_chars` (`rerank_max_doc_chars`, `max_rerank_doc_chars`) | 4800 | Character budget per reranker document; `0` is unlimited. |
+| `retrieval.reranker_max_doc_chars` (`rerank_max_doc_chars`, `max_rerank_doc_chars`) | 2000 | Character budget per reranker document; `0` is unlimited. |
 | `retrieval.reranker_timeout_secs` (`rerank_timeout_secs`, `timeout_secs`) | 30 | Reranker request timeout. |
 | `retrieval.reranker_max_retries` (`rerank_max_retries`) | 2 | Retries transient reranker errors. |
 | `retrieval.reranker_rate_limit_wait_secs` (`rerank_rate_limit_wait_secs`, `rate_limit_wait_secs`) | `null` | Positive values cap waits for a reported 429 quota reset; `null` or `0` uses short generic retries, then unreranked results. |
@@ -99,7 +99,7 @@ The backend adjusts some embedding settings at runtime, so the effective values 
 |---|---:|---|
 | `VERA_MAX_OUTPUT_CHARS` | 0 | Sets the search-output character budget. |
 | `VERA_MAX_RERANK_BATCH` | 20 | Sets the reranker batch size. |
-| `VERA_MAX_RERANK_DOC_CHARS` | 4800 | Sets the reranker document character budget. |
+| `VERA_MAX_RERANK_DOC_CHARS` | 2000 | Sets the reranker document character budget. |
 | `VERA_RERANK_TIMEOUT_SECS` | 30 | Sets the reranker timeout. |
 | `VERA_RERANK_MAX_RETRIES` | 2 | Sets reranker retries. |
 | `VERA_RERANK_RATE_LIMIT_WAIT_SECS` | unset | Positive seconds enable capped quota-reset waits; `0` keeps short generic retries. |

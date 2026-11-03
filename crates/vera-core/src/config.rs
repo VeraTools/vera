@@ -139,7 +139,7 @@ mod tests {
     const OVERRIDES: &[(&str, &str, &str, &str)] = &[
         ("retrieval.max_output_chars", "0", "111", "777"),
         ("retrieval.max_rerank_batch", "20", "8", "7"),
-        ("retrieval.reranker_max_doc_chars", "4800", "1200", "9999"),
+        ("retrieval.reranker_max_doc_chars", "2000", "1200", "9999"),
         ("retrieval.reranker_timeout_secs", "30", "42", "9"),
         ("retrieval.reranker_max_retries", "2", "5", "3"),
         (
