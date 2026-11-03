@@ -10,6 +10,24 @@ A few terms used below:
 
 Unless a section says otherwise, scores use Vera's graded scoring described in [benchmark methodology](benchmarks.md#provenance), and "full suite" means the 1,251-task Semble v0.5.5 task set across 63 repositories.
 
+## Reranker budget sweep (2026-11-03)
+
+This run checked how many fused candidates the reranker needs and how much of each one it has to read. It used the 320-task subset (16 repositories) at v2.3.0 with API models, `qwen/qwen3-embedding-8b` embeddings and the `Qwen/Qwen3-Reranker-8B` reranker, and reused one index for every lane. Reranking ran on 249 of the 320 tasks; the skip heuristics leave short identifier and path queries unreranked. Tokens are the reranker's billed input tokens per reranked query.
+
+| Candidates / chars per candidate | nDCG@10 | R@1 | R@5 | R@10 | MRR | Tokens per query |
+|---|---|---|---|---|---|---|
+| no reranker | 0.8523 | 0.6693 | 0.9313 | 0.9563 | 0.8378 | 0 |
+| 50 / 4800 (old default) | 0.8600 | 0.6849 | 0.9255 | 0.9609 | 0.8468 | 19,265 |
+| 30 / 4800 | 0.8568 | 0.6771 | 0.9286 | 0.9594 | 0.8425 | 12,021 |
+| 20 / 4800 | 0.8554 | 0.6724 | 0.9286 | 0.9578 | 0.8410 | 8,361 |
+| 50 / 2000 | 0.8611 | 0.6880 | 0.9271 | 0.9594 | 0.8478 | 14,797 |
+| 30 / 2000 | 0.8582 | 0.6818 | 0.9302 | 0.9563 | 0.8454 | 9,101 |
+| 20 / 2000 (new default) | 0.8590 | 0.6786 | 0.9286 | 0.9609 | 0.8441 | 6,225 |
+| 15 / 2000 | 0.8570 | 0.6724 | 0.9271 | 0.9609 | 0.8421 | 4,746 |
+| 10 / 2000 | 0.8550 | 0.6724 | 0.9255 | 0.9578 | 0.8401 | 3,241 |
+
+A repeat of the 50 / 4800 lane moved nDCG@10 by 0.0006. Reranking adds less than 0.01 over no reranker, and every budget lands within 0.005 of the old default. The defaults moved to 20 candidates of up to 2,000 characters: 68% fewer reranker tokens for 0.001 nDCG@10, and one reranker request per search instead of three at the default result limit (searches that ask for more than 20 results still rerank that many). Fewer candidates gave up most of the gain on hard queries (tasks scoring below 0.5 without the reranker): at 10, as many of them got worse as got better. Per task, 20 / 2000 improved 22 tasks and worsened 11 compared with no reranker; the worst regressions moved the answer from first to second place, and no repository lost more than 0.02 on average. Installs keep their saved values; run `vera config set retrieval.rerank_candidates 20` and `vera config set retrieval.reranker_max_doc_chars 2000` to switch.
+
 ## RRF constant sweep (2026-10-14)
 
 This run checked whether the rank-fusion constant k, which controls how keyword and vector rankings are merged, should change from its default of 60. It used the full suite with v2.1.0 defaults (local potion-code-16M-v2, no reranker) and reused one index build for every value of k. Before this run, ordinary search ignored `retrieval.rrf_k` and always used k=60.

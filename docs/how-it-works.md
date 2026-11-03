@@ -46,7 +46,7 @@ Each rule was measured on the benchmark before it shipped, and proposed rules th
 
 ## Optional reranking
 
-A reranker is a cross-encoder: instead of comparing precomputed embeddings, it reads the query and each candidate together and scores how well they match. When enabled, Vera sends the top fused candidates (50 by default) through it and reorders them before code-aware ranking runs.
+A reranker is a cross-encoder: instead of comparing precomputed embeddings, it reads the query and each candidate together and scores how well they match. When enabled, Vera sends the top fused candidates (20 by default, or the requested result count if larger) through it and reorders them before code-aware ranking runs.
 
 Reranking is off by default. In screening, the tested local rerankers did not beat the code-aware ranking above, and they add latency. The Qwen API reranker did improve results when paired with Qwen embeddings. Obvious filename and path queries skip reranking because keyword evidence already settles them. If the reranker fails, Vera returns the unreranked results and says so. See [models](models.md#reranking).
 

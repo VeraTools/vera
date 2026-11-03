@@ -2,6 +2,10 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.3.1
+
+- Reranking now defaults to 20 candidates (`retrieval.rerank_candidates`, was 50) of up to 2,000 characters each (`retrieval.reranker_max_doc_chars`, was 4,800). This cuts reranker tokens by about two thirds, and at the default result limit each search makes one reranker request; quality was unchanged within noise. See the [reranker budget sweep](benchmarks-history.md#reranker-budget-sweep-2026-11-03). Installs keep saved values, except that configs written before `reranker_max_doc_chars` existed now get 2,000. To switch, run `vera config set retrieval.rerank_candidates 20` and `vera config set retrieval.reranker_max_doc_chars 2000`.
+
 ## v2.3.0
 
 - `vera search "query" --also <dir>` searches your project and other indexed trees in one call. Repeat `--also` for up to 8 indexes. Results are merged by rank with a small head start for the current project; results from other trees show absolute paths, and `--json` adds a `repo` field. MCP `search_code` takes a matching `repos` array. Neither ever creates an index. See [querying another index](features.md#querying-another-index).
