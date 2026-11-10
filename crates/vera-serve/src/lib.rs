@@ -42,7 +42,7 @@ pub struct AppState {
     pub backend: InferenceBackend,
     /// Human-readable model name reported in /v1/health and embeddings responses.
     pub model_name: String,
-    /// Whether a reranker is available (probed at startup).
+    /// Whether a reranker is configured at startup (loaded on first request).
     pub reranker_available: bool,
     /// The embedding model, cached independently of the reranker.
     pub(crate) embedding: Arc<ModelSlot<DynamicProvider, AcquireError>>,
@@ -52,11 +52,10 @@ pub struct AppState {
 
 /// Start the Vera HTTP server.
 ///
-/// Probes the embedding model and reranker at startup to validate the config,
-/// then listens for connections on `host:port`. The embedding probe is kept and
-/// becomes the first resident model; the reranker is loaded on its first request,
-/// since holding it costs memory a server that only embeds never uses. Each model
-/// is then held as `cache_mode` dictates.
+/// Loads the embedding model at startup to validate the config, then listens
+/// for connections on `host:port`. The embedding model is kept according to
+/// `cache_mode`. The reranker is configured at startup without loading it;
+/// its first request loads it, then `cache_mode` controls how long it stays loaded.
 ///
 /// - `config`     — vera retrieval/embedding config
 /// - `backend`    — compute backend (API, CPU, GPU)

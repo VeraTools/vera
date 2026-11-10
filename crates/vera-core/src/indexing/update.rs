@@ -61,6 +61,9 @@ pub struct UpdateSummary {
     pub parse_errors: Vec<FileError>,
     /// Added or modified files deferred by the per-run file limit.
     pub files_deferred: usize,
+    /// Files that could not be read; their indexed data, if any, was kept as is.
+    #[serde(skip)]
+    pub files_unreadable: usize,
     /// Total chunks after the update.
     pub total_chunks: u64,
     /// Number of vectors reused from a previous failed run.
@@ -315,6 +318,33 @@ where
     P: EmbeddingProvider,
     F: Fn(UpdateProgress) + Send + Sync,
 {
+    update_repository_at_index(
+        (repo_path, None),
+        provider,
+        config,
+        model_name,
+        options,
+        on_progress,
+        cancellation,
+    )
+    .await
+}
+
+/// Use the same update pipeline on an unpublished worktree seed. Staged callers
+/// supply the held destination lock instead of locking/excluding the staging path.
+pub(super) async fn update_repository_at_index<P, F>(
+    (repo_path, staged): (&Path, Option<(&Path, &super::lock::IndexLock)>),
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    options: &UpdateOptions,
+    on_progress: F,
+    cancellation: &CancellationToken,
+) -> Result<UpdateSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(UpdateProgress) + Send + Sync,
+{
     let start = Instant::now();
     let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
@@ -331,13 +361,22 @@ where
         .canonicalize()
         .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
 
-    let idx_dir = pipeline::index_dir(&repo_root);
+    let idx_dir = staged.map_or_else(
+        || pipeline::index_dir(&repo_root),
+        |(path, _)| path.to_path_buf(),
+    );
     if !idx_dir.exists() {
         bail!(super::missing_index_message(&repo_root));
     }
 
-    let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
-        .context("failed to acquire index lock")?;
+    let _index_lock = if staged.is_none() {
+        Some(
+            crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
+                .context("failed to acquire index lock")?,
+        )
+    } else {
+        None
+    };
 
     info!(path = %repo_root.display(), "starting incremental update");
 
@@ -535,6 +574,7 @@ where
         .collect();
     let mut prepared_files = Vec::new();
     let mut parse_errors = Vec::new();
+    let mut files_unreadable = disc.error_skipped + classified.unreadable.len();
 
     if !files_to_index.is_empty() {
         // Parse and chunk new/modified files. Tree-sitter parsing is CPU-bound,
@@ -604,6 +644,7 @@ where
 
         // `files_to_index` order is preserved by `collect`, so the sequential
         // and parallel paths produce identical `prepared_files` ordering.
+        files_unreadable += parsed.iter().filter(|file| file.is_none()).count();
         (prepared_files, parse_errors) =
             collect_prepared_results(parsed.into_iter().flatten().collect());
     }
@@ -852,6 +893,7 @@ where
         files_using_tier0_fallback: pipeline::count_tier0_fallback_files(&file_states),
         parse_errors,
         files_deferred,
+        files_unreadable,
         total_chunks,
         embeddings_reused,
         embedding_requests: stats.requests,

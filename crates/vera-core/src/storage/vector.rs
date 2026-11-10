@@ -692,12 +692,8 @@ fn current_max_rowid(conn: &Connection) -> Result<i64> {
 /// durable database is rewritten atomically; sidecars are published only after
 /// commit. A crash in between leaves an old generation, rebuilt on next open.
 fn compact_rowids_if_needed(tx: &rusqlite::Transaction<'_>) -> Result<bool> {
-    let live: i64 = tx.query_row("SELECT COUNT(*) FROM chunk_id_map", [], |row| row.get(0))?;
-    if current_max_rowid(tx)? - live <= live.max(COMPACTION_DEAD_SLOT_FLOOR) {
-        return Ok(false);
-    }
     // Old interrupted writes can leave mappings with no vector or metadata.
-    // They are not searchable and must not prevent later updates compacting.
+    // Remove them before counting live slots so they cannot suppress compaction.
     tx.execute(
         "DELETE FROM chunk_id_map WHERE NOT EXISTS (
              SELECT 1 FROM vec_chunks v WHERE v.rowid = chunk_id_map.rowid
@@ -705,6 +701,10 @@ fn compact_rowids_if_needed(tx: &rusqlite::Transaction<'_>) -> Result<bool> {
         [],
     )
     .context("failed to remove vectorless mappings before compaction")?;
+    let live: i64 = tx.query_row("SELECT COUNT(*) FROM chunk_id_map", [], |row| row.get(0))?;
+    if current_max_rowid(tx)? - live <= live.max(COMPACTION_DEAD_SLOT_FLOOR) {
+        return Ok(false);
+    }
     let inconsistent: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM vec_chunks v WHERE NOT EXISTS (
              SELECT 1 FROM chunk_id_map m WHERE m.rowid = v.rowid

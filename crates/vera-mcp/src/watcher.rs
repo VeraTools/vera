@@ -543,6 +543,7 @@ fn test_summary() -> UpdateSummary {
         files_using_tier0_fallback: 0,
         parse_errors: Vec::new(),
         files_deferred: 0,
+        files_unreadable: 0,
         total_chunks: 0,
         elapsed_secs: 0.0,
     }
@@ -647,6 +648,7 @@ mod tests {
                 files_using_tier0_fallback: 0,
                 parse_errors: Vec::new(),
                 files_deferred: 0,
+                files_unreadable: 0,
                 total_chunks: 0,
                 elapsed_secs: 0.0,
             })

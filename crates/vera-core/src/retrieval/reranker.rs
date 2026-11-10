@@ -492,6 +492,14 @@ impl ApiReranker {
             .into_iter()
             .filter_map(|r| {
                 let score = r.relevance_score?;
+                if r.index >= body.documents.len() {
+                    warn!(
+                        index = r.index,
+                        candidates = body.documents.len(),
+                        "reranker returned out-of-bounds index, skipping"
+                    );
+                    return None;
+                }
                 Some(RerankScore {
                     index: r.index,
                     relevance_score: score,
@@ -544,14 +552,6 @@ impl ApiReranker {
             let offset = batch_idx * batch_size;
             let scores = self.call_api(query, batch, batch.len(), cancel).await?;
             for s in scores {
-                if s.index >= batch.len() {
-                    warn!(
-                        index = s.index,
-                        candidates = batch.len(),
-                        "reranker returned out-of-bounds index, skipping"
-                    );
-                    continue;
-                }
                 all_scores.push(RerankScore {
                     index: s.index + offset,
                     relevance_score: s.relevance_score,

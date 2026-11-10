@@ -76,7 +76,7 @@ export LOCAL_RERANKER_ONNX_FILE=onnx/model_quantized.onnx
 export LOCAL_RERANKER_TOKENIZER_FILE=tokenizer.json
 ```
 
-Custom ONNX cross-encoders on Hugging Face work if they follow the expected contract: inputs named `input_ids` and `attention_mask`, with the first output returning a 1D or 2D float32 score tensor (`[batch]` or `[batch, dims]`). If you leave `LOCAL_RERANKER_REVISION` unset, Vera defaults to the `main` branch for custom repositories, while the built-in model keeps its pinned revision. A pinned revision is stored under `models/<repo>/revisions/<revision>/`, so different revisions do not overwrite each other.
+Custom ONNX cross-encoders on Hugging Face work if they follow the expected contract: inputs named `input_ids` and `attention_mask`, with the first output returning a 1D or 2D float32 score tensor (`[batch]`, or `[batch, n]` with the score in the first column). If you leave `LOCAL_RERANKER_REVISION` unset, Vera defaults to the `main` branch for custom repositories, while the built-in model keeps its pinned revision. A pinned revision is stored under `models/<repo>/revisions/<revision>/`, so different revisions do not overwrite each other.
 
 ## API mode
 

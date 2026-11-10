@@ -664,6 +664,50 @@ mod protocol_wire_tests {
     }
 
     #[tokio::test]
+    async fn single_response_indices_must_refer_to_submitted_documents() {
+        for batch_size in [0, 2] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, body) = read_http_request(&mut stream).await;
+                assert_eq!(body["documents"].as_array().unwrap().len(), 2);
+                let response = serde_json::json!({"results": [
+                    {"index": 2, "relevance_score": 1.0},
+                    {"index": usize::MAX, "relevance_score": 0.99},
+                    {"index": 1, "relevance_score": 0.75},
+                    {"index": 0, "relevance_score": 0.5}
+                ]})
+                .to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(), response
+                ).as_bytes()).await.unwrap();
+            });
+            let config =
+                RerankerConfig::new(format!("http://{addr}"), "model".into(), "key".into());
+            let retrieval = RetrievalConfig {
+                max_rerank_batch: batch_size,
+                ..Default::default()
+            };
+            let reranker = ApiReranker::from_configs(config, &retrieval).unwrap();
+            let scores = reranker
+                .rerank("query", &["a".into(), "b".into()])
+                .await
+                .unwrap();
+            server.await.unwrap();
+            assert_eq!(
+                scores.iter().map(|s| s.index).collect::<Vec<_>>(),
+                vec![1, 0]
+            );
+            assert_eq!(
+                scores.iter().map(|s| s.relevance_score).collect::<Vec<_>>(),
+                vec![0.75, 0.5]
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn batched_response_indices_cannot_escape_their_batch() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

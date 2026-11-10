@@ -988,12 +988,21 @@ fn determine_ignore_strategy(root: &Path, config: &IndexingConfig) -> Result<Ign
     })
 }
 
+fn default_exclude_pattern(pattern: &str) -> String {
+    // Linked worktrees use a .git pointer file, not a directory.
+    if pattern == ".git" {
+        "!.git".to_string()
+    } else {
+        format!("!{pattern}/")
+    }
+}
+
 fn build_overrides(root: &Path, config: &IndexingConfig) -> Result<Override> {
     let mut overrides = OverrideBuilder::new(root);
     if !config.no_default_excludes {
         for pattern in &config.default_excludes {
             overrides
-                .add(&format!("!{pattern}/"))
+                .add(&default_exclude_pattern(pattern))
                 .with_context(|| format!("invalid exclusion pattern: {pattern}"))?;
         }
         overrides.add("!.veraignore")?;
@@ -1040,7 +1049,7 @@ fn explain_override_match(
         for pattern in &config.default_excludes {
             let mut builder = OverrideBuilder::new(root);
             builder
-                .add(&format!("!{pattern}/"))
+                .add(&default_exclude_pattern(pattern))
                 .with_context(|| format!("invalid exclusion pattern: {pattern}"))?;
             let matcher = builder
                 .build()

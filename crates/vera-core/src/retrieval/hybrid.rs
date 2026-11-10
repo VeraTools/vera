@@ -107,6 +107,9 @@ pub(crate) struct SearchStores {
     pub(crate) bm25: Bm25Index,
     pub(crate) bm25_metadata: Mutex<MetadataStore>,
     pub(crate) vector_metadata: Arc<Mutex<MetadataStore>>,
+    // Kept separate from search/hydration locks: per-query marker reads must
+    // never wait for a long BM25 or vector search.
+    completeness_metadata: Mutex<MetadataStore>,
     vector_path: PathBuf,
     vector: Mutex<Option<CachedVectorStore>>,
     metadata_path: PathBuf,
@@ -208,9 +211,17 @@ fn vector_store_stamp(vector_path: &Path) -> VectorStoreStamp {
 
 impl SearchStores {
     pub(crate) fn open(index_dir: &Path) -> Result<Self> {
+        let metadata_path = index_dir.join("metadata.db");
+        let completeness_metadata = MetadataStore::open_existing(&metadata_path)
+            .context("failed to open index completeness metadata")?;
+        // Preserve the repair hint even if an interrupted update left the
+        // remaining stores unreadable.
+        crate::indexing::freshness::ensure_index_complete_with_store(
+            index_dir,
+            &completeness_metadata,
+        )?;
         let bm25 = Bm25Index::open(&index_dir.join("bm25"))
             .context("failed to open BM25 index for search")?;
-        let metadata_path = index_dir.join("metadata.db");
         let bm25_metadata = super::open_search_metadata(index_dir)?;
         let vector_metadata = MetadataStore::open_existing(&metadata_path)
             .context("failed to open vector metadata store for search")?;
@@ -219,6 +230,7 @@ impl SearchStores {
             bm25,
             bm25_metadata: Mutex::new(bm25_metadata),
             vector_metadata: Arc::new(Mutex::new(vector_metadata)),
+            completeness_metadata: Mutex::new(completeness_metadata),
             vector_path: index_dir.join("vectors.db"),
             vector: Mutex::new(None),
             metadata_path,
@@ -227,6 +239,14 @@ impl SearchStores {
             open_stamp,
             eligibility: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn ensure_complete(&self, index_dir: &Path) -> Result<()> {
+        let metadata = self
+            .completeness_metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index completeness metadata lock poisoned"))?;
+        crate::indexing::freshness::ensure_index_complete_with_store(index_dir, &metadata)
     }
 
     /// Indexed file list, cached against the metadata database stamp.

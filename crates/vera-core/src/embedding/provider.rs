@@ -1599,13 +1599,17 @@ struct EmbeddingResponse {
 
 impl EmbeddingResponse {
     fn into_vectors(mut self, expected: usize) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if self.data.len() != expected {
+            return Err(EmbeddingError::ResponseError {
+                message: format!("expected {expected} embeddings, got {}", self.data.len()),
+            });
+        }
         self.data.sort_by_key(|item| item.index);
-        if self.data.len() != expected
-            || self
-                .data
-                .iter()
-                .enumerate()
-                .any(|(index, item)| item.index != index)
+        if self
+            .data
+            .iter()
+            .enumerate()
+            .any(|(index, item)| item.index != index)
         {
             return Err(EmbeddingError::ResponseError {
                 message: format!("expected embedding indices 0..{expected}, got invalid indices"),
@@ -1722,6 +1726,7 @@ mod tests {
     #[test]
     fn response_requires_exact_input_indices() {
         for indices in [vec![0, 0], vec![0, 2], vec![1, 2], vec![0], vec![0, 1, 2]] {
+            let count = indices.len();
             let response = EmbeddingResponse {
                 data: indices
                     .into_iter()
@@ -1731,10 +1736,17 @@ mod tests {
                     })
                     .collect(),
             };
-            assert!(matches!(
-                response.into_vectors(2),
-                Err(EmbeddingError::ResponseError { .. })
-            ));
+            let Err(EmbeddingError::ResponseError { message }) = response.into_vectors(2) else {
+                panic!("expected invalid response error");
+            };
+            if count != 2 {
+                assert_eq!(message, format!("expected 2 embeddings, got {count}"));
+            } else {
+                assert_eq!(
+                    message,
+                    "expected embedding indices 0..2, got invalid indices"
+                );
+            }
         }
         let response = EmbeddingResponse {
             data: vec![

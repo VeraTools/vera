@@ -137,7 +137,7 @@ With a local backend, your code and queries stay on your machine; only the first
 
 ## Benchmarks
 
-On [Semble](https://github.com/MinishLab/semble)'s 1,251-task code search benchmark, with both tools using the same `potion-code-16M-v2` embedding model, Vera 2.0.1 scored 0.844 nDCG@10 against Semble 0.5.5's 0.851, with an index about a seventh the size (4.7 GB vs 32 GB). Vera scored slightly higher on an independent 180-task set from repositories outside Semble's benchmark (0.767 vs 0.766). In a small agent experiment, agents using Vera needed 27% less context than agents limited to grep and file reads. Methodology, latency numbers, and the full history are on the [benchmarks page](docs/benchmarks.md).
+On [Semble](https://github.com/MinishLab/semble)'s 1,251-task code search benchmark, with both tools using the same `potion-code-16M-v2` embedding model, Vera 2.0.1 scored 0.844 nDCG@10 against Semble 0.5.5's 0.851, with an index about a seventh the size (4.7 GB vs 32 GB). Vera scored slightly higher on an independent 180-task set from repositories outside Semble's benchmark (0.767 vs 0.766). In a small agent experiment (10 questions), agents using Vera with the Qwen API backend needed 48% less context than agents limited to grep and file reads, the only statistically significant difference in that run. Methodology, latency numbers, and the full history are on the [benchmarks page](docs/benchmarks.md).
 
 ## How it works
 

@@ -1256,8 +1256,12 @@ async fn update_compaction_cleans_mapping_only_orphans() {
     let (dir, provider, config, _) = indexed_repo(&[("main.rs", "fn main() {}")]).await;
     let idx = index_dir(&dir.path().canonicalize().unwrap());
     let conn = rusqlite::Connection::open(idx.join("vectors.db")).unwrap();
+    // Enough mapping-only rows to make historical slots appear mostly live
+    // unless cleanup happens before the compaction threshold is evaluated.
     conn.execute(
-        "INSERT INTO chunk_id_map (chunk_id) VALUES ('dangling.rs:0')",
+        "WITH RECURSIVE stale(n) AS (
+             SELECT 0 UNION ALL SELECT n + 1 FROM stale WHERE n < 5999
+         ) INSERT INTO chunk_id_map (chunk_id) SELECT 'dangling.rs:' || n FROM stale",
         [],
     )
     .unwrap();
@@ -1274,7 +1278,7 @@ async fn update_compaction_cleans_mapping_only_orphans() {
     assert_eq!(summary.files_modified, 1);
     let dangling: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM chunk_id_map WHERE chunk_id = 'dangling.rs:0')",
+            "SELECT EXISTS(SELECT 1 FROM chunk_id_map WHERE chunk_id LIKE 'dangling.rs:%')",
             [],
             |row| row.get(0),
         )

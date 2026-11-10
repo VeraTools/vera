@@ -52,6 +52,9 @@ pub fn run(
 
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))?;
+    if crate::helpers::find_index_root(&cwd).is_none() {
+        crate::helpers::seed_worktree_index(&cwd)?;
+    }
     if crate::helpers::find_index_root(&cwd).is_none()
         && should_offer_auto_index(json_output, crate::helpers::prompts_available())
         && cliclack::confirm("No index found. Index the current directory now?")

@@ -245,27 +245,38 @@ impl SearchContext {
     }
 
     fn search_stores(&self, index_dir: &Path) -> Result<Arc<SearchStores>> {
+        let cached_stores = {
+            let mut cached = self
+                .stores
+                .lock()
+                .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?;
+            cached
+                .iter()
+                .position(|(dir, _)| dir == index_dir)
+                .map(|pos| {
+                    let entry = cached.remove(pos);
+                    let stores = Arc::clone(&entry.1);
+                    cached.insert(0, entry);
+                    stores
+                })
+        };
+        // Revalidate outside the LRU lock: a staging swap leaves cached stores
+        // pointing at the old inode. Check the live marker on every cache hit too.
+        if let Some(stores) = cached_stores
+            && stores.is_open_stamp_current()
+        {
+            stores.ensure_complete(index_dir)?;
+            return Ok(stores);
+        }
+
+        // Opening checks completeness before touching the remaining stores and
+        // does not hold the shared cache lock across filesystem/SQLite work.
+        let stores = Arc::new(SearchStores::open(index_dir)?);
         let mut cached = self
             .stores
             .lock()
             .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?;
-        if let Some(pos) = cached.iter().position(|(dir, _)| dir == index_dir) {
-            let entry = cached.remove(pos);
-            // Staleness check: if the live index was rebuilt (staging swap), the
-            // cached SearchStores points at the old .vera.old directory inode.
-            // Its open_stamp will not match the current metadata.db stamp at the
-            // live path, so we must reopen instead of serving stale BM25/metadata.
-            if entry.1.is_open_stamp_current() {
-                let stores = Arc::clone(&entry.1);
-                ensure_stores_complete(index_dir, &stores)?;
-                cached.insert(0, entry);
-                return Ok(stores);
-            }
-            // Stale entry: drop it and fall through to reopen.
-        }
-
-        let stores = Arc::new(SearchStores::open(index_dir)?);
-        ensure_stores_complete(index_dir, &stores)?;
+        cached.retain(|(dir, _)| dir != index_dir);
         cached.insert(0, (index_dir.to_path_buf(), Arc::clone(&stores)));
         if cached.len() > SEARCH_STORES_LRU_CAPACITY {
             cached.truncate(SEARCH_STORES_LRU_CAPACITY);
@@ -619,14 +630,6 @@ fn should_skip_reranking(query: &str, filters: &SearchFilters) -> bool {
         || (matches!(classify_query(query), QueryType::Identifier) && word_count <= 2)
 }
 
-fn ensure_stores_complete(index_dir: &Path, stores: &SearchStores) -> Result<()> {
-    let metadata = stores
-        .bm25_metadata
-        .lock()
-        .map_err(|_| anyhow::anyhow!("BM25 metadata store lock poisoned"))?;
-    crate::indexing::freshness::ensure_index_complete_with_store(index_dir, &metadata)
-}
-
 fn run_bm25_only(
     query: &str,
     filters: &SearchFilters,
@@ -681,7 +684,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn cached_stores_recheck_interrupted_updates() {
+    fn invalidated_stores_recheck_interrupted_updates() {
         use crate::indexing::freshness::INDEX_COMPLETE_KEY;
         let dir = tempdir().unwrap();
         let metadata =
@@ -694,6 +697,7 @@ mod tests {
             &context.search_stores(dir.path()).unwrap()
         ));
         metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        assert!(!stores.is_open_stamp_current());
         assert!(
             context
                 .search_stores(dir.path())
@@ -704,6 +708,79 @@ mod tests {
         );
         metadata.set_index_meta(INDEX_COMPLETE_KEY, "1").unwrap();
         assert!(context.search_stores(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cached_stores_recheck_interrupted_updates_after_writer_unlocks() {
+        use crate::indexing::freshness::INDEX_COMPLETE_KEY;
+        use crate::indexing::lock::IndexLock;
+
+        let dir = tempdir().unwrap();
+        let index_dir = dir.path().join(".vera");
+        std::fs::create_dir(&index_dir).unwrap();
+        let metadata =
+            crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        let _bm25 = Bm25Index::open(&index_dir.join("bm25")).unwrap();
+        let writer = IndexLock::try_acquire_for_index_dir(&index_dir)
+            .unwrap()
+            .unwrap();
+        let context = SearchContext::bm25_only();
+        let stores = context.search_stores(&index_dir).unwrap();
+        assert!(Arc::ptr_eq(
+            &stores,
+            &context.search_stores(&index_dir).unwrap()
+        ));
+
+        // Releasing the writer changes no metadata stamps: the next query must
+        // inspect the marker on the existing cache entry, not reopen the stores.
+        drop(writer);
+        assert!(stores.is_open_stamp_current());
+        let error = context.search_stores(&index_dir).err().unwrap();
+        assert!(error.to_string().contains("incomplete"));
+        assert!(stores.is_open_stamp_current());
+        assert!(Arc::ptr_eq(&stores, &context.stores.lock().unwrap()[0].1));
+    }
+
+    #[test]
+    fn incomplete_index_error_precedes_bm25_open_failure() {
+        use crate::indexing::freshness::INDEX_COMPLETE_KEY;
+        let dir = tempdir().unwrap();
+        let index_dir = dir.path().join(".vera");
+        std::fs::create_dir(&index_dir).unwrap();
+        let metadata =
+            crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        std::fs::write(index_dir.join("bm25"), "not a directory").unwrap();
+
+        let error = SearchContext::bm25_only()
+            .search_stores(&index_dir)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("incomplete"), "{error}");
+        assert!(error.contains("vera update"), "{error}");
+    }
+
+    #[test]
+    fn completeness_check_does_not_wait_for_bm25_work() {
+        let dir = tempdir().unwrap();
+        crate::retrieval::test_metadata_store(&dir.path().join("metadata.db")).unwrap();
+        let _bm25 = Bm25Index::open(&dir.path().join("bm25")).unwrap();
+        let context = Arc::new(SearchContext::bm25_only());
+        let stores = context.search_stores(dir.path()).unwrap();
+        let busy_bm25 = stores.bm25_metadata.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let index_dir = dir.path().to_path_buf();
+        let worker_context = Arc::clone(&context);
+        let worker = std::thread::spawn(move || {
+            send.send(worker_context.search_stores(&index_dir).is_ok())
+                .unwrap();
+        });
+        let checked = receive.recv_timeout(Duration::from_secs(2));
+        drop(busy_bm25);
+        worker.join().unwrap();
+        assert!(checked.expect("completeness check must not wait for BM25 work"));
     }
 
     #[tokio::test]

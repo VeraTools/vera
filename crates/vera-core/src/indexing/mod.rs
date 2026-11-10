@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod progress;
 mod telemetry;
 pub mod update;
+pub mod worktree;
 
 pub use telemetry::PhaseSecs;
 
@@ -43,10 +44,16 @@ pub fn index_exists(root: &std::path::Path) -> bool {
 /// look for (or create) one of its own. A bare `.vera/` is not an index: the
 /// legacy Vera home (`~/.vera`) and stray directories must not match.
 pub fn find_index_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    start
-        .ancestors()
-        .find(|candidate| index_exists(candidate))
-        .map(std::path::Path::to_path_buf)
+    for candidate in start.ancestors() {
+        if index_exists(candidate) {
+            return Some(candidate.to_path_buf());
+        }
+        // An index above a linked worktree describes another checkout's files.
+        if worktree::is_linked_worktree_root(candidate) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Why `root` is too broad to index without an explicit request, if it is:
@@ -72,6 +79,13 @@ pub fn missing_index_message(root: &std::path::Path) -> String {
         .any(|root| root.join(".vera.resume/embeddings.db").is_file())
     {
         message.push_str("\nA previous indexing run stopped early; `vera index` will resume from its saved embeddings.");
+    }
+    if let Some(worktree) = worktree::linked_worktree(root) {
+        message.push_str(&format!(
+            "\nThis is a linked git worktree. No usable main-checkout index could be seeded from {}. Run `vera index .` from {} to create this worktree's own index.",
+            index_dir(&worktree.main).display(),
+            worktree.root.display()
+        ));
     }
     message
 }

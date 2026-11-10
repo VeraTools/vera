@@ -26,6 +26,8 @@ struct CachedSearchContext {
 pub(super) fn ensure_index_and_watcher(
     root: &std::path::Path,
 ) -> Result<std::path::PathBuf, ToolCallResult> {
+    let seeded_root = seed_worktree_index(root)?;
+    let root = seeded_root.as_deref().unwrap_or(root);
     if !vera_core::indexing::index_exists(root) {
         if let Some(reason) = vera_core::indexing::broad_root_reason(root) {
             return Err(ToolCallResult::error(format!(
@@ -55,6 +57,26 @@ pub(super) fn ensure_index_and_watcher(
     }
 
     Ok(vera_core::indexing::index_dir(root))
+}
+
+/// Also used during primary-root resolution so read-only tools and subdirectory
+/// filters see the worktree toplevel before accessing an index.
+pub(super) fn seed_worktree_index(
+    root: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, ToolCallResult> {
+    let Some(seed) = vera_core::indexing::worktree::WorktreeSeed::prepare(root)
+        .map_err(|error| ToolCallResult::error(format!("{error:#}")))?
+    else {
+        return Ok(None);
+    };
+    let backend = vera_core::config::resolve_backend(None);
+    let mut config = crate::saved_config::load_saved_runtime_config();
+    config.adjust_for_backend(backend);
+    let seeded = search_runtime()?
+        .block_on(seed.update_configured(&config, backend))
+        .map_err(|error| ToolCallResult::error(format!("{error:#}")))?;
+    eprintln!("{}", seeded.note());
+    Ok(Some(seeded.root))
 }
 
 /// Create a tokio runtime, resolve backend config, and build an embedding provider.

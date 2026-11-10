@@ -169,6 +169,8 @@ Search warns when the index is behind the working tree and tells you how many fi
 
 ### Querying another index
 
+In a linked git worktree without an index, Vera seeds an independent index from the indexed main checkout, then incrementally updates it before returning results. Added, changed, and deleted files reflect the worktree, not the main checkout, including worktrees created inside the main checkout's directory. Only changed content needs new embeddings, using your active backend. If seeding or updating fails, run `vera index .` from the worktree root.
+
 Index a dependency source tree once, then use `-C <DIR>` (or `--directory <DIR>`) before the subcommand to query it without leaving your project:
 
 ```bash
@@ -244,7 +246,9 @@ Details and measurements: [models and backends](models.md).
 vera serve --port 3000
 ```
 
-`vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
+`vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token.
+
+The embedding model loads at startup. The reranker is configured at startup and loads on its first request; a failed load can be retried by a later request. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
 
 Vera itself can be one of those clients. Opening an index takes milliseconds, but loading a local ONNX model can take seconds, and each CLI call or MCP session loads it again. Running `vera serve --idle-timeout -1` once and pointing Vera at it in API mode keeps one model loaded for every command, session, and index on the machine (`vera serve --help` shows the client setup).
 

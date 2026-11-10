@@ -246,9 +246,22 @@ fn resolve_repository_from(
     cwd: &std::path::Path,
     repo: Option<&Value>,
 ) -> Result<Repository, ToolCallResult> {
-    let server_root =
-        vera_core::indexing::find_index_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let root = match repo.filter(|value| !value.is_null()) {
+    // Seeding the server's own worktree waits until a request needs it, so an
+    // explicit, already-indexed repository never depends on that seed.
+    let server_root = |seed: bool| -> Result<std::path::PathBuf, ToolCallResult> {
+        if let Some(root) = vera_core::indexing::find_index_root(cwd) {
+            return Ok(root);
+        }
+        let seeded = if seed {
+            super::runtime::seed_worktree_index(cwd)?
+        } else {
+            None
+        };
+        Ok(seeded
+            .or_else(|| vera_core::indexing::find_index_root(cwd))
+            .unwrap_or_else(|| cwd.to_path_buf()))
+    };
+    let (root, server_root) = match repo.filter(|value| !value.is_null()) {
         Some(value) => {
             let path = value
                 .as_str()
@@ -262,19 +275,27 @@ fn resolve_repository_from(
                     requested.display()
                 )));
             }
-            match vera_core::indexing::find_index_root(&requested) {
-                Some(root) => root,
-                None if requested == server_root => requested,
-                None => {
-                    return Err(ToolCallResult::error(format!(
-                        "No index found at {} or any parent directory. Run `vera index {}` first.",
-                        requested.display(),
-                        requested.display()
-                    )));
+            if let Some(root) = vera_core::indexing::find_index_root(&requested) {
+                (root, server_root(false)?)
+            } else {
+                let server_root = server_root(true)?;
+                match vera_core::indexing::find_index_root(&requested) {
+                    Some(root) => (root, server_root),
+                    None if requested == server_root => (requested, server_root),
+                    None => {
+                        return Err(ToolCallResult::error(format!(
+                            "No index found at {} or any parent directory. Run `vera index {}` first.",
+                            requested.display(),
+                            requested.display()
+                        )));
+                    }
                 }
             }
         }
-        None => server_root.clone(),
+        None => {
+            let server_root = server_root(true)?;
+            (server_root.clone(), server_root)
+        }
     };
     Ok(Repository {
         is_server_repo: root == server_root,
@@ -1214,6 +1235,88 @@ mod tests {
         let index_dir = super::super::runtime::ensure_index_and_watcher(&root).unwrap();
         assert_eq!(index_dir, root.join(".vera"));
         assert!(!subdir.join(".vera").exists());
+    }
+
+    #[test]
+    fn primary_worktree_lookup_bootstraps_and_resolves_the_toplevel() {
+        use std::process::Command;
+        if !Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            eprintln!("skipping MCP worktree test: git is unavailable");
+            return;
+        }
+        let main = keyword_repo();
+        let scratch = temporary_repo();
+        let worktree = scratch.path().join("lane");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(main.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ]);
+        git(&["worktree", "add", "-qb", "lane", worktree.to_str().unwrap()]);
+        std::fs::write(
+            worktree.join("src/dependency.rs"),
+            "pub fn worktree_marker() {}\n",
+        )
+        .unwrap();
+        let other = keyword_repo();
+        let explicit = resolve_repository_from(
+            &worktree.join("src"),
+            Some(&serde_json::json!(other.path().to_str().unwrap())),
+        )
+        .unwrap();
+        assert!(!explicit.is_server_repo);
+        assert!(
+            !vera_core::indexing::index_exists(&worktree),
+            "an explicit indexed repository must not seed the server worktree"
+        );
+        let repo = resolve_repository_from(&worktree.join("src"), None).unwrap();
+        assert!(repo.is_server_repo);
+        assert_eq!(repo.root, worktree);
+        let index = existing_index_dir(&repo.root).unwrap();
+        let hits = vera_core::retrieval::search_regex(
+            &index,
+            "worktree_marker",
+            10,
+            false,
+            0,
+            &vera_core::types::SearchFilters::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        let old = vera_core::retrieval::search_regex(
+            &index,
+            "dependency_marker",
+            10,
+            false,
+            0,
+            &vera_core::types::SearchFilters::default(),
+        )
+        .unwrap();
+        assert!(old.is_empty());
+        assert!(!worktree.join("src/.vera").exists());
     }
 
     #[test]

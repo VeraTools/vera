@@ -50,6 +50,8 @@ vera index .
 
 Search, grep, structural, references, overview, stats, and update look for the nearest `.vera/` in parent directories, so they also work from subdirectories.
 
+For linked git worktrees, see [automatic worktree indexes](features.md#querying-another-index). If the main checkout is not indexed, create an index in the worktree with `vera index .`. If updating a seed fails, the error names the main index and the cause; no main-checkout results are published as a worktree index.
+
 ### Index is incomplete
 
 ```text
