@@ -12,9 +12,9 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 - API embedding responses with duplicate or out-of-range indices are rejected, and API reranker entries with out-of-range or duplicate indices are dropped, instead of being matched to the wrong chunks.
 - `vera serve` loads the reranker on first use, so a failed load at startup no longer disables reranking until restart.
 - The MCP file watcher ignores events from Vera's own index files earlier, and no longer drops a change that arrives during its final update pass.
-- In a linked git worktree without its own index, Vera seeds one from the main checkout's index and updates it for the worktree's added, changed, and deleted files before answering, so per-lane worktrees work without a full `vera index`. If the update fails, nothing is published and the error names the main index and the command to run. See [querying another index](features.md#querying-another-index).
+- In a linked git worktree without its own index, Vera seeds one from the main checkout's index and updates it for the worktree's added, changed, and deleted files before answering, so per-lane worktrees work without a full `vera index`. If the update fails, nothing is published and the error names the main index and the command to run. See [linked worktrees](features.md#linked-worktrees).
 - The agent skill and the `AGENTS.md` section written by `vera agent install` now say when Vera is the better tool (cross-file and conceptual questions, unfamiliar code, definitions and callers, structural lists) and when rg or a direct read is (known exact strings, counts, file names, find-and-replace, unindexed trees). Run `vera agent install` to refresh installed copies.
-- `vera structural` given more than one query term now explains that it takes one term and shows the working command, instead of clap's bare "unexpected argument" error.
+- `vera structural definitions`, `env`, or `impls` given more than one query term now explains that it takes one term and shows the working command, instead of clap's bare "unexpected argument" error.
 
 ## v2.3.1
 

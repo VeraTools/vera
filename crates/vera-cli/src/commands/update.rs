@@ -62,6 +62,16 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     config.indexing.extra_excludes.extend(exclude);
     config.indexing.no_ignore |= no_ignore;
     config.indexing.no_default_excludes |= no_default_excludes;
+    if max_files.is_some()
+        && vera_core::indexing::find_index_root(&start).is_none()
+        && vera_core::indexing::worktree::linked_worktree(&start)
+            .is_some_and(|worktree| vera_core::indexing::index_exists(&worktree.main))
+    {
+        bail!(
+            "--max-files cannot limit the first index of a linked worktree, which is seeded in full from its main checkout.\n\
+             Hint: run `vera update .` without --max-files to create it, then use --max-files for later updates."
+        );
+    }
     let repo_path = crate::helpers::resolve_index_root_with(&start, Some((&config, backend)))?;
 
     let rt = tokio::runtime::Runtime::new()

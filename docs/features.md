@@ -163,13 +163,15 @@ vera update . --max-files 250    # cap the work in one run
 vera watch .                     # update automatically as files change
 ```
 
-`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
+`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory. The search stops at a [linked worktree](#linked-worktrees) root.
 
 Search warns when the index is behind the working tree and tells you how many files changed.
 
-### Querying another index
+### Linked worktrees
 
-In a linked git worktree without an index, Vera seeds an independent index from the indexed main checkout, then incrementally updates it before returning results. Added, changed, and deleted files reflect the worktree, not the main checkout, including worktrees created inside the main checkout's directory. Only changed content needs new embeddings, using your active backend. If seeding or updating fails, run `vera index .` from the worktree root.
+In a linked git worktree without an index, Vera seeds an independent index from the indexed main checkout, then incrementally updates it before returning results. Added, changed, and deleted files reflect the worktree, not the main checkout, including worktrees created inside the main checkout's directory. Only changed content needs new embeddings, using your active backend. `vera update --max-files` cannot cap this first seed. If seeding or updating fails, run `vera index .` from the worktree root.
+
+### Querying another index
 
 Index a dependency source tree once, then use `-C <DIR>` (or `--directory <DIR>`) before the subcommand to query it without leaving your project:
 

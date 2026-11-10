@@ -51,8 +51,8 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
             "initial",
         ],
     );
-    let vera = |root: &Path, args: &[&str]| -> Output {
-        let output = Command::new(env!("CARGO_BIN_EXE_vera"))
+    let run = |root: &Path, args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_vera"))
             .current_dir(root)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -63,7 +63,10 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
             .env("VERA_NO_UPDATE_CHECK", "1")
             .args(args)
             .output()
-            .unwrap();
+            .unwrap()
+    };
+    let vera = |root: &Path, args: &[&str]| -> Output {
+        let output = run(root, args);
         assert!(
             output.status.success(),
             "{args:?}: {}",
@@ -114,6 +117,10 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
         "pub fn private_only() {}\n",
     )
     .unwrap();
+    let capped = run(&private_lane, &["update", ".", "--max-files", "1"]);
+    assert!(!capped.status.success());
+    assert!(String::from_utf8_lossy(&capped.stderr).contains("--max-files cannot limit"));
+    assert!(!private_lane.join(".vera").exists());
     let output = vera(&private_lane, &["update", ".", "--exclude", "private.rs"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("updated 0 changed files"), "{stderr}");

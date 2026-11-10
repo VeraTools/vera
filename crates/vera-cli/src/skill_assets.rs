@@ -39,7 +39,7 @@ mod tests {
     use super::VERA_SKILL_FILES;
 
     #[test]
-    fn skill_frontmatter_values_are_valid_yaml_scalars() {
+    fn skill_frontmatter_plain_values_have_no_yaml_separators() {
         let frontmatter = VERA_SKILL_FILES[0]
             .contents
             .strip_prefix("---\n")
