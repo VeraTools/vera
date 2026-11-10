@@ -327,19 +327,6 @@ fn resolve_search_repositories(args: &Value) -> Result<Vec<Repository>, ToolCall
         .collect())
 }
 
-fn secondary_search_index(repo: &Repository) -> anyhow::Result<std::path::PathBuf> {
-    let index_dir = vera_core::indexing::index_dir(&repo.root);
-    let store =
-        vera_core::storage::metadata::MetadataStore::open_existing(&index_dir.join("metadata.db"))?;
-    if !vera_core::indexing::freshness::index_format_is_current(&store) {
-        anyhow::bail!(
-            "Index format version mismatch. Run `vera index {}` to rebuild the index.",
-            repo.root.display()
-        );
-    }
-    Ok(index_dir)
-}
-
 fn exact_paths_from_args(
     args: &Value,
     cwd: &std::path::Path,
@@ -487,13 +474,7 @@ fn handle_search_code(args: &Value) -> ToolCallResult {
                 Err(err) => return err,
             }
         } else {
-            match secondary_search_index(repo) {
-                Ok(index_dir) => index_dir,
-                Err(err) => {
-                    notices.push(format!("warning: skipped {}: {err}", repo.root.display()));
-                    continue;
-                }
-            }
+            vera_core::indexing::index_dir(&repo.root)
         };
         let mut repo_filters = filters.clone();
         rewrite_absolute_path_filters(&repo.root, &mut repo_filters.path_glob);

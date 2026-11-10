@@ -211,10 +211,6 @@ pub async fn rerank(
     if let Some(err) = check_auth(&state, &headers) {
         return err.into_response();
     }
-    if !state.reranker_available {
-        return reranker_unavailable().into_response();
-    }
-
     let reranker_opt = match acquire_reranker(&state).await {
         Ok(p) => p,
         Err((status, body)) => return (status, body).into_response(),

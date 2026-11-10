@@ -151,7 +151,7 @@ Run `vera index .` without the flag to rebuild with embeddings.
 
 ### Symbol-aware chunks
 
-Vera parses files with tree-sitter and indexes functions, classes, methods, structs, traits, interfaces, and `impl` blocks as separate chunks, each labeled with its path, line range, and symbol name. Symbols longer than 200 lines are split at natural boundaries and keep their name with a part number. Config files are indexed whole, Markdown and reStructuredText by section, and files in unrecognized formats by line windows. See [supported languages](supported-languages.md).
+For symbol extraction, line limits, and chunk splitting rules, see [How Vera works: Parsing](how-it-works.md#parsing-chunks-that-follow-the-code) and [supported languages](supported-languages.md).
 
 Any chunk larger than `indexing.max_chunk_bytes` (24 KB by default) is split at line boundaries. That budget is separate from the embedding model's input window: local models truncate longer input to their maximum length, and an API provider with a smaller token limit can reject a chunk that fits the budget. If that happens, lower `indexing.max_chunk_bytes` and run `vera index .` again.
 

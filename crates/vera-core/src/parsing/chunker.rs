@@ -78,12 +78,6 @@ pub fn chunks_from_symbols(
     for symbol in symbols {
         let mut sym_start = symbol.start_row as u32;
         let sym_end = symbol.end_row as u32;
-        let has_nested_symbol = language == Language::Bash
-            && symbols.iter().any(|child| {
-                child.start_byte > symbol.start_byte
-                    && child.end_byte <= symbol.end_byte
-                    && child.end_byte > child.start_byte
-            });
 
         // A documentation comment documents the symbol below it; attaching it
         // to the symbol chunk keeps the topical prose, the signature, and the
@@ -127,6 +121,13 @@ pub fn chunks_from_symbols(
         }
 
         // Split large symbols into sub-chunks
+        let has_nested_symbol = sym_lines > config.max_chunk_lines
+            && language == Language::Bash
+            && symbols.iter().any(|child| {
+                child.start_byte > symbol.start_byte
+                    && child.end_byte <= symbol.end_byte
+                    && child.end_byte > child.start_byte
+            });
         if sym_lines > config.max_chunk_lines && !has_nested_symbol {
             let sub_chunks = split_large_symbol(
                 symbol,

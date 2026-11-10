@@ -510,6 +510,26 @@ impl MetadataStore {
         Ok(map)
     }
 
+    /// Paths with stored chunks, without loading chunk IDs or content.
+    pub(crate) fn files_with_chunks(&self) -> Result<Vec<String>> {
+        self.conn
+            .prepare("SELECT DISTINCT file_path FROM chunks")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()
+            .context("failed to query files with chunks")
+    }
+
+    /// Whether a file has any stored chunks, without loading their content.
+    pub fn has_chunks_by_file(&self, file_path: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path = ?1)",
+                [file_path],
+                |row| row.get(0),
+            )
+            .context("failed to query file chunk existence")
+    }
+
     /// Get all chunks for a given file path.
     pub fn get_chunks_by_file(&self, file_path: &str) -> Result<Vec<Chunk>> {
         let mut stmt = self
@@ -731,6 +751,43 @@ impl MetadataStore {
             }
         }
         Ok(count)
+    }
+
+    /// Batch incremental cleanup after dirty hashes are durable. Prepared
+    /// paths retain their dirty hashes until every replacement store succeeds;
+    /// deleted paths can forget theirs once vector and BM25 cleanup succeeds.
+    pub(crate) fn cleanup_files(
+        &self,
+        touched_paths: &[&str],
+        chunk_paths: &[&str],
+        deleted_paths: &[String],
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin metadata cleanup")?;
+        for sql in [
+            "DELETE FROM [references] WHERE file_path = ?1",
+            "DELETE FROM type_relations WHERE file_path = ?1",
+            "DELETE FROM file_index_state WHERE file_path = ?1",
+        ] {
+            let mut stmt = tx.prepare_cached(sql)?;
+            for path in touched_paths {
+                stmt.execute([path])
+                    .with_context(|| format!("failed to clean parse data for {path}"))?;
+            }
+        }
+        {
+            let mut chunks = tx.prepare_cached("DELETE FROM chunks WHERE file_path = ?1")?;
+            for path in chunk_paths {
+                chunks.execute([path])?;
+            }
+            let mut hashes = tx.prepare_cached("DELETE FROM file_hashes WHERE file_path = ?1")?;
+            for path in deleted_paths {
+                hashes.execute([path])?;
+            }
+        }
+        tx.commit().context("failed to commit metadata cleanup")
     }
 
     /// Delete all chunks associated with a file path.
@@ -1969,6 +2026,36 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].id, "src/main.rs:0");
         assert_eq!(chunks[1].id, "src/main.rs:1");
+        assert!(store.has_chunks_by_file("src/main.rs").unwrap());
+        assert!(!store.has_chunks_by_file("missing.rs").unwrap());
+    }
+
+    #[test]
+    fn batched_cleanup_rolls_back_and_retains_prepared_dirty_hashes() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        store.insert_chunks(&sample_chunks()).unwrap();
+        store.set_file_hash("src/main.rs", "").unwrap();
+        store.set_file_hash("src/lib.py", "").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER fail_cleanup BEFORE DELETE ON chunks
+             WHEN OLD.file_path = 'src/lib.py' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        let paths = ["src/main.rs", "src/lib.py"];
+        let deleted = vec!["src/lib.py".to_string()];
+        assert!(store.cleanup_files(&paths, &paths, &deleted).is_err());
+        assert_eq!(store.chunk_count().unwrap(), 3);
+        assert_eq!(store.get_file_hash("src/lib.py").unwrap(), Some("".into()));
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_cleanup")
+            .unwrap();
+        store.cleanup_files(&paths, &paths, &deleted).unwrap();
+        assert_eq!(store.chunk_count().unwrap(), 0);
+        assert_eq!(store.get_file_hash("src/main.rs").unwrap(), Some("".into()));
+        assert_eq!(store.get_file_hash("src/lib.py").unwrap(), None);
     }
 
     #[test]

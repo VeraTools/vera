@@ -28,15 +28,7 @@ The `--onnx-jina-*` flags select the execution provider: `cpu`, `cuda` (NVIDIA),
 
 ### Embedding screening
 
-Measured 2026-08-21 and 2026-08-22 with reranking off, on an older Vera version than the current one, so absolute scores are lower than today's. The 320-task set is a Semble subset; the independent set has 180 tasks from 10 repositories outside Semble.
-
-| Model | nDCG@10 (320 / independent) | Index time (320 / independent) |
-|---|---:|---:|
-| `potion-code-16M-v2` | 0.7930 / 0.7019 | 56 s / 26 s |
-| `jina-embeddings-v5` nano | 0.7956 / 0.7149 | 147 s / 61 s |
-| `CodeRankEmbed` | 0.7949 / 0.7069 | 375 s / 153 s |
-
-The three models land within 0.013 nDCG@10 of each other. Potion Code indexes fastest and runs on every machine, which is why it is the default. Details are in the [benchmark history](benchmarks-history.md).
+In historical model screening across Semble tasks and an independent repository set, `potion-code-16M-v2`, `jina-embeddings-v5` nano, and `CodeRankEmbed` landed within 0.013 nDCG@10 of each other. Potion Code indexed fastest and runs on every machine, which is why it is the default. Detailed measurements are in the [benchmark history](benchmarks-history.md#historical-embedding-model-screening-2026-08-21).
 
 ### Indexing speed
 
@@ -84,7 +76,7 @@ export LOCAL_RERANKER_ONNX_FILE=onnx/model_quantized.onnx
 export LOCAL_RERANKER_TOKENIZER_FILE=tokenizer.json
 ```
 
-Any ONNX cross-encoder on Hugging Face works the same way. If you leave `LOCAL_RERANKER_REVISION` unset, Vera uses the `main` branch. A pinned revision is stored under `models/<repo>/revisions/<revision>/`, so different revisions do not overwrite each other.
+Custom ONNX cross-encoders on Hugging Face work if they follow the expected contract: inputs named `input_ids` and `attention_mask`, with the first output returning a 1D or 2D float32 score tensor (`[batch]` or `[batch, dims]`). If you leave `LOCAL_RERANKER_REVISION` unset, Vera defaults to the `main` branch for custom repositories, while the built-in model keeps its pinned revision. A pinned revision is stored under `models/<repo>/revisions/<revision>/`, so different revisions do not overwrite each other.
 
 ## API mode
 

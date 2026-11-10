@@ -91,24 +91,16 @@ pub async fn run_server(
 
     // The probe already paid for a full load, so hand it to the slot rather than
     // dropping it and making the first request load the same model again. Seeded
-    // here, before the reranker probe, so `PerRequest` — where `seed` is a no-op —
+    // here so `PerRequest` — where `seed` is a no-op —
     // still releases it before anything else is loaded.
     embedding.seed(Arc::new(probe)).await;
 
-    // The reranker probe is deliberately not seeded: it is built here, read for
-    // `reranker_available`, and dropped, so the first /v1/rerank loads it again.
-    // Keeping it would cost ~670 MB resident on a server that only answers
-    // /v1/embeddings and never reranks at all.
-    let reranker_available = vera_core::retrieval::create_dynamic_reranker(&config, backend)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("vera serve: reranker unavailable ({e}), reranking disabled");
-            None
-        })
-        .is_some();
+    // Configuration selects availability without loading the model. The slot loads
+    // on first use and retries failed loads on later requests.
+    let reranker_available = vera_core::retrieval::reranker_kind(&config, backend).is_some();
 
     if reranker_available {
-        eprintln!("vera serve: reranker ready");
+        eprintln!("vera serve: reranker configured (loads on first request)");
     }
 
     let api_key = api_key.filter(|k| !k.is_empty());

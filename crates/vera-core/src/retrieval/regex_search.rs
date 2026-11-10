@@ -187,7 +187,6 @@ fn collect_minified_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::metadata::MetadataStore;
     use crate::types::{Chunk, Language, SymbolType};
 
     #[test]
@@ -222,7 +221,7 @@ mod tests {
         .unwrap();
         std::fs::write(repo_root.join("docs/hotkeys.md"), "keybind docs\n").unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[
                 Chunk {
@@ -278,7 +277,7 @@ mod tests {
         );
         std::fs::write(repo_root.join("dist/app.min.js"), &content).unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[Chunk {
                 id: "dist:0".to_string(),
@@ -321,7 +320,7 @@ mod tests {
         let content = format!("const targetSymbol=1;{}", "a=1;".repeat(400));
         std::fs::write(repo_root.join("app.min.js"), &content).unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[Chunk {
                 id: "app:0".to_string(),
@@ -371,7 +370,7 @@ mod tests {
         .unwrap();
         std::fs::write(repo_root.join("tests/helper.py"), "needle = 'needle'\n").unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[
                 Chunk {
@@ -429,7 +428,7 @@ mod tests {
         let content = "struct TokenConfig {\n    token: String,\n}\n\nfn build_token() {\n    let token = String::new();\n}\n";
         std::fs::write(repo_root.join("src/lib.rs"), content).unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[
                 Chunk {
@@ -502,7 +501,7 @@ mod tests {
         )
         .unwrap();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[
                 Chunk {

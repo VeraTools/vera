@@ -332,7 +332,7 @@ impl ApiReranker {
     async fn call_api(
         &self,
         query: &str,
-        documents: &[String],
+        documents: &[&str],
         top_n: usize,
         cancel: &CancellationToken,
     ) -> Result<Vec<RerankScore>, RerankerError> {
@@ -522,7 +522,7 @@ impl ApiReranker {
         }
 
         // Truncate documents that exceed the reranker's context window.
-        let truncated: Vec<String> = documents
+        let truncated: Vec<&str> = documents
             .iter()
             .map(|d| truncate_document(d, self.max_document_chars))
             .collect();
@@ -544,6 +544,14 @@ impl ApiReranker {
             let offset = batch_idx * batch_size;
             let scores = self.call_api(query, batch, batch.len(), cancel).await?;
             for s in scores {
+                if s.index >= batch.len() {
+                    warn!(
+                        index = s.index,
+                        candidates = batch.len(),
+                        "reranker returned out-of-bounds index, skipping"
+                    );
+                    continue;
+                }
                 all_scores.push(RerankScore {
                     index: s.index + offset,
                     relevance_score: s.relevance_score,
@@ -735,9 +743,9 @@ fn parse_rate_limit_reset(body: &str) -> Option<Duration> {
 /// newline boundary to avoid splitting mid-line. Documents within the limit
 /// are returned as-is (zero-copy path). `max_chars` is a **char** budget
 /// (Unicode scalar count), matching `RetrievalConfig::reranker_max_doc_chars`.
-fn truncate_document(doc: &str, max_chars: usize) -> String {
+fn truncate_document(doc: &str, max_chars: usize) -> &str {
     if max_chars == 0 {
-        return doc.to_string();
+        return doc;
     }
     // Single-pass traversal: capture the byte offset of the truncation
     // boundary and remember the last newline within the budget so we
@@ -755,15 +763,15 @@ fn truncate_document(doc: &str, max_chars: usize) -> String {
     }
     let Some(end) = byte_end else {
         // `char_count == actual char length <= max_chars` — no truncation.
-        return doc.to_string();
+        return doc;
     };
     // `end` is the byte offset of the first char beyond the budget.
     debug_assert!(doc.is_char_boundary(end));
     if let Some(pos) = last_nl {
         // `last_nl` was recorded within the budget, so `pos < end`.
-        doc[..pos].to_string()
+        &doc[..pos]
     } else {
-        doc[..end].to_string()
+        &doc[..end]
     }
 }
 
@@ -772,7 +780,7 @@ fn truncate_document(doc: &str, max_chars: usize) -> String {
 struct RerankRequest<'a> {
     model: &'a str,
     query: &'a str,
-    documents: &'a [String],
+    documents: &'a [&'a str],
     top: TopLimit,
     return_documents: Option<bool>,
     instruction: Option<Instruction<'a>>,

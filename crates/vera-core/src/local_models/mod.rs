@@ -105,7 +105,7 @@ pub fn embedding_execution_provider(
 }
 
 /// ONNX Runtime version to auto-download. Using 1.24.4 for CUDA 13 support.
-/// The `ort` crate (rc.11) uses `load-dynamic` so any ABI-compatible ORT works.
+/// The `ort` crate uses `load-dynamic` with API 23 to support ORT 1.23 and newer.
 pub(super) const ORT_VERSION: &str = "1.24.4";
 pub(super) const DEFAULT_CUDA_MAJOR: u32 = 12;
 pub(super) const CUDA_13_ORT_MIN_MAJOR: u32 = 13;
@@ -118,7 +118,9 @@ pub(super) const CUDA_RUNTIME_LIBRARY_PREFIXES: [&str; 3] =
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(super) const ORT_VERSION_MACOS_X86: &str = "1.23.2";
 
-pub(super) static ORT_INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+pub(super) static ORT_INIT_RESULT: OnceLock<
+    std::result::Result<::ort::environment::Environment, String>,
+> = OnceLock::new();
 pub(super) static MODEL_DOWNLOAD_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn sha256_hex(reader: impl Read) -> Result<String> {

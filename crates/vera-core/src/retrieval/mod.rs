@@ -53,16 +53,78 @@ use crate::config::{DEFAULT_MAX_FILE_SIZE_BYTES, IndexingConfig};
 use crate::storage::metadata::MetadataStore;
 use crate::types::{SearchFilters, SearchResult};
 
-/// Open search metadata only after checking the stored chunking contract.
+/// Open existing search metadata and validate the stored format and chunking contract.
 pub(crate) fn open_search_metadata(index_dir: &std::path::Path) -> anyhow::Result<MetadataStore> {
     use anyhow::Context;
-    let store = MetadataStore::open(&index_dir.join("metadata.db"))
+    let store = MetadataStore::open_existing(&index_dir.join("metadata.db"))
         .context("failed to open metadata store for search")?;
+    if !crate::indexing::freshness::index_format_is_current(&store) {
+        anyhow::bail!(
+            "Index format version mismatch. Run `vera index {}` to rebuild the index.",
+            index_dir.parent().unwrap_or(index_dir).display()
+        );
+    }
     crate::indexing::freshness::ensure_index_chunking_compatible(
         &store,
         index_dir.parent().unwrap_or(index_dir),
     )?;
     Ok(store)
+}
+
+/// Hand-built retrieval fixtures use the same format marker as published indexes.
+#[cfg(test)]
+pub(crate) fn test_metadata_store(path: &std::path::Path) -> anyhow::Result<MetadataStore> {
+    let store = MetadataStore::open(path)?;
+    store.set_index_meta(
+        crate::indexing::freshness::INDEX_FORMAT_VERSION_KEY,
+        crate::indexing::freshness::INDEX_FORMAT_VERSION,
+    )?;
+    Ok(store)
+}
+
+#[cfg(test)]
+mod metadata_open_tests {
+    use super::*;
+
+    #[test]
+    fn search_never_creates_missing_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(open_search_metadata(dir.path()).is_err());
+        assert!(!dir.path().join("metadata.db").exists());
+    }
+
+    #[test]
+    fn search_requires_the_current_format_without_rewriting_metadata() {
+        use crate::indexing::freshness::{INDEX_FORMAT_VERSION, INDEX_FORMAT_VERSION_KEY};
+        let dir = tempfile::tempdir().unwrap();
+        let store = MetadataStore::open(&dir.path().join("metadata.db")).unwrap();
+        assert!(
+            open_search_metadata(dir.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("format version mismatch")
+        );
+        assert_eq!(
+            store.get_index_meta(INDEX_FORMAT_VERSION_KEY).unwrap(),
+            None
+        );
+        store
+            .set_index_meta(INDEX_FORMAT_VERSION_KEY, "old")
+            .unwrap();
+        assert!(open_search_metadata(dir.path()).is_err());
+        assert_eq!(
+            store
+                .get_index_meta(INDEX_FORMAT_VERSION_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        store
+            .set_index_meta(INDEX_FORMAT_VERSION_KEY, INDEX_FORMAT_VERSION)
+            .unwrap();
+        assert!(open_search_metadata(dir.path()).is_ok());
+    }
 }
 
 /// The file-size cap query-time source reads must honor.

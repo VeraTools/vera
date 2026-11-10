@@ -3,6 +3,17 @@ use crate::test_env::run_env_test;
 use crate::types::{Language, SymbolType};
 
 #[test]
+fn document_truncation_borrows_the_original_buffer() {
+    let doc = String::from("αβ\nγδε");
+    for budget in [0, 3, 100] {
+        let truncated = truncate_document(&doc, budget);
+        assert_eq!(truncated.as_ptr(), doc.as_ptr());
+    }
+    assert_eq!(truncate_document(&doc, 3), "αβ");
+    assert_eq!(truncate_document(&doc, 100), doc);
+}
+
+#[test]
 fn rerank_outcome_aggregation_table() {
     use RerankOutcome::{Fallback, NotAttempted, Reranked};
     let outcomes = [NotAttempted, Reranked, Fallback("first".into())];
@@ -497,7 +508,7 @@ fn api_reranker_detects_voyage() {
 
 #[test]
 fn rerank_request_serializes_top_n_for_non_voyage() {
-    let docs = vec!["a".to_string()];
+    let docs = vec!["a"];
     let body = RerankRequest {
         model: "Qwen/Qwen3-Reranker-8B",
         query: "q",
@@ -516,7 +527,7 @@ fn rerank_request_serializes_top_n_for_non_voyage() {
 
 #[test]
 fn rerank_request_serializes_top_k_for_voyage() {
-    let docs = vec!["a".to_string()];
+    let docs = vec!["a"];
     let body = RerankRequest {
         model: "rerank-2",
         query: "q",
@@ -650,6 +661,45 @@ mod protocol_wire_tests {
             cfg.max_rerank_batch = b;
         }
         cfg
+    }
+
+    #[tokio::test]
+    async fn batched_response_indices_cannot_escape_their_batch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for batch_len in [2, 1] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, body) = read_http_request(&mut stream).await;
+                assert_eq!(body["documents"].as_array().unwrap().len(), batch_len);
+                let response = serde_json::json!({"results": [
+                    {"index": batch_len, "relevance_score": 1.0},
+                    {"index": usize::MAX, "relevance_score": 0.99},
+                    {"index": 0, "relevance_score": 0.5}
+                ]})
+                .to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(), response
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let config = RerankerConfig::new(format!("http://{addr}"), "model".into(), "key".into());
+        let retrieval = RetrievalConfig {
+            max_rerank_batch: 2,
+            ..Default::default()
+        };
+        let reranker = ApiReranker::from_configs(config, &retrieval).unwrap();
+        let scores = reranker
+            .rerank("query", &["a".into(), "b".into(), "c".into()])
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            scores.iter().map(|s| s.index).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert!(scores.iter().all(|s| s.relevance_score == 0.5));
     }
 
     #[tokio::test]

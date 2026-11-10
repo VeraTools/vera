@@ -272,6 +272,18 @@ fn start_watching_with_runtime(
                 }
             };
 
+            let events: Vec<_> = events
+                .into_iter()
+                .filter(|e| {
+                    e.kind == DebouncedEventKind::Any
+                        && !vera_core::indexing::pipeline::path_in_index_artifacts(
+                            &index_dir, &e.path,
+                        )
+                })
+                .collect();
+            if events.is_empty() {
+                return;
+            }
             let runtime = match resolve_runtime() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -286,7 +298,7 @@ fn start_watching_with_runtime(
                     return;
                 }
             };
-            let tracked_paths = load_tracked_paths(&index_dir, &repo_clone);
+            let mut tracked_paths = None;
 
             // Ignore the index directory always (including the `.vera.build`
             // and `.vera.old` staging siblings a full index swaps in and
@@ -294,9 +306,11 @@ fn start_watching_with_runtime(
             // (target, node_modules, ...). A build churning target/ used to
             // start a full update cycle per debounce window.
             let has_relevant_changes = events.iter().any(|e| {
-                e.kind == DebouncedEventKind::Any
-                    && !vera_core::indexing::pipeline::path_in_index_artifacts(&index_dir, &e.path)
-                    && is_relevant_change(&e.path, &exclusions, &tracked_paths)
+                is_relevant_change(&e.path, &exclusions, || {
+                    tracked_paths
+                        .get_or_insert_with(|| load_tracked_paths(&index_dir, &repo_clone))
+                        .contains(&e.path)
+                })
             });
 
             if !has_relevant_changes {
@@ -323,9 +337,7 @@ fn start_watching_with_runtime(
             let state = Arc::clone(&update_state_clone);
             let engine = Arc::clone(&engine);
 
-            std::thread::spawn(move || {
-                run_incremental_update(&engine, &repo, &runtime, &state, progress_logs);
-            });
+            spawn_update_worker(engine, repo, runtime, state, progress_logs);
         },
     )
     .map_err(|e| format!("Failed to create file watcher: {e}"))?;
@@ -386,7 +398,7 @@ fn resolve_watch_runtime() -> Result<WatchRuntime, anyhow::Error> {
 
 fn load_tracked_paths(idx_dir: &Path, repo_path: &Path) -> HashSet<std::path::PathBuf> {
     let metadata_path = idx_dir.join("metadata.db");
-    let Ok(metadata) = MetadataStore::open(&metadata_path) else {
+    let Ok(metadata) = MetadataStore::open_existing(&metadata_path) else {
         return HashSet::new();
     };
     metadata
@@ -402,9 +414,9 @@ fn load_tracked_paths(idx_dir: &Path, repo_path: &Path) -> HashSet<std::path::Pa
 fn is_relevant_change(
     path: &Path,
     exclusions: &ExclusionMatcher,
-    tracked_paths: &HashSet<std::path::PathBuf>,
+    is_tracked: impl FnOnce() -> bool,
 ) -> bool {
-    !exclusions.is_excluded(path) || path.is_dir() || tracked_paths.contains(path)
+    !exclusions.is_excluded(path) || path.is_dir() || is_tracked()
 }
 
 /// Describe a failed `watch()` call, with the remedy for the one failure mode
@@ -424,13 +436,28 @@ fn watch_failure_message(repo_path: &Path, error: &notify::Error) -> String {
 
 /// Run an update and any coalesced trailing passes, with a bound so a noisy
 /// filesystem cannot keep one worker alive forever.
+fn spawn_update_worker(
+    engine: Arc<SharedEngine>,
+    repo: std::path::PathBuf,
+    runtime: WatchRuntime,
+    state: UpdateStateHandle,
+    progress_logs: bool,
+) {
+    std::thread::spawn(move || {
+        if run_incremental_update(&engine, &repo, &runtime, &state, progress_logs) {
+            spawn_update_worker(engine, repo, runtime, state, progress_logs);
+        }
+    });
+}
+
+/// Returns whether a new bounded worker must continue the pending update.
 fn run_incremental_update(
     engine: &SharedEngine,
     repo_path: &Path,
     runtime: &WatchRuntime,
     state: &UpdateStateHandle,
     progress_logs: bool,
-) {
+) -> bool {
     for pass in 0..MAX_UPDATE_PASSES {
         debug!(path = %repo_path.display(), pass = pass + 1, "Auto-update triggered by file changes");
 
@@ -472,23 +499,21 @@ fn run_incremental_update(
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.pending {
             state.updating = false;
-            return;
+            return false;
         }
         if pass + 1 == MAX_UPDATE_PASSES {
             warn!(
                 path = %repo_path.display(),
                 limit = MAX_UPDATE_PASSES,
-                "Auto-update reached trailing pass limit; waiting for another file event"
+                "Auto-update reached trailing pass limit; rescheduling pending changes"
             );
-            state.updating = false;
             state.pending = false;
-            return;
+            return true;
         }
         state.pending = false;
     }
 
-    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-    state.updating = false;
+    unreachable!("each bounded worker returns after its final pass")
 }
 
 #[cfg(test)]
@@ -562,9 +587,12 @@ impl IncrementalUpdate for ContinuousEngine {
         _repo_path: &Path,
         _config: &VeraConfig,
     ) -> Result<UpdateSummary, anyhow::Error> {
-        self.updates
+        let pass = self
+            .updates
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        mark_update_pending(&self.state);
+        if pass < MAX_UPDATE_PASSES {
+            mark_update_pending(&self.state);
+        }
         Ok(test_summary())
     }
 }
@@ -747,6 +775,25 @@ mod tests {
     }
 
     #[test]
+    fn tracked_paths_are_only_needed_for_excluded_files() {
+        let repo = repo_fixture();
+        let exclusions = ExclusionMatcher::new(repo.path(), &IndexingConfig::default()).unwrap();
+        assert!(is_relevant_change(
+            &repo.path().join("src/lib.rs"),
+            &exclusions,
+            || panic!("tracked paths must stay unloaded")
+        ));
+        assert!(is_relevant_change(
+            &repo.path().join("target"),
+            &exclusions,
+            || panic!("directories do not need tracked paths")
+        ));
+        let excluded_file = repo.path().join("target/deleted.rs");
+        assert!(is_relevant_change(&excluded_file, &exclusions, || true));
+        assert!(!is_relevant_change(&excluded_file, &exclusions, || false));
+    }
+
+    #[test]
     fn event_during_update_triggers_one_trailing_pass() {
         let updates = Arc::new(AtomicUsize::new(0));
         let first_started = Arc::new(std::sync::Barrier::new(2));
@@ -786,25 +833,29 @@ mod tests {
     }
 
     #[test]
-    fn continuous_events_stop_at_the_trailing_pass_limit() {
+    fn pending_event_at_the_trailing_pass_limit_reschedules_a_worker() {
         let updates = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(Mutex::new(UpdateState::default()));
         let engine: Engine = Arc::new(ContinuousEngine {
             updates: Arc::clone(&updates),
             state: Arc::clone(&state),
         });
-        let shared = shared_test_engine(engine);
+        let shared = Arc::new(shared_test_engine(engine));
         assert!(begin_update(&state));
 
-        run_incremental_update(
-            &shared,
-            Path::new("/tmp/test-repo"),
-            &test_runtime(),
-            &state,
+        spawn_update_worker(
+            shared,
+            std::path::PathBuf::from("test-repo"),
+            test_runtime(),
+            Arc::clone(&state),
             false,
         );
 
-        assert_eq!(updates.load(Ordering::SeqCst), MAX_UPDATE_PASSES);
+        assert!(wait_until(Duration::from_secs(5), || !state
+            .lock()
+            .unwrap()
+            .updating));
+        assert_eq!(updates.load(Ordering::SeqCst), MAX_UPDATE_PASSES + 1);
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!state.updating);
         assert!(!state.pending);

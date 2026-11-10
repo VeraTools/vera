@@ -31,12 +31,12 @@ When a batch exceeds the model context it is split in half until it fits. Halves
 - Index and update JSON summaries add `embedding_requests` (HTTP attempts), `embedding_retries`, `embedding_timeouts`, `embedding_failed_batches`, `embeddings_reused`, and `phase_secs`. Existing fields are unchanged.
 - Progress goes to stderr, throttled, including when stderr is not a terminal. On failure stdout stays empty, the exit code is nonzero, a stats line precedes the error, and the error is the last stderr line.
 - Default `vera search --json` stays a bare array. Reranking state is opt-in through `--rerank-status`. Every reranker fallback still prints `reranker unavailable` on stderr.
-- `vera --version` prints `vera X.Y.Z`. Config values persist under `core_config` in `$VERA_HOME/config.json`; unknown keys fail and `null` clears a key.
+- `vera --version` prints `vera X.Y.Z`. Config values persist under `core_config` in `$VERA_HOME/config.json`; unknown keys fail and `null` clears nullable settings.
 - Error text drops endpoint URLs and redacts tokens and key-value credentials from provider responses.
 
 ### Potion Code batching
 
-The Potion tokenizer pads each batch to its longest text, and model2vec pools the pad tokens, so a chunk's vector depended on its batch neighbors. Each text is now tokenized alone, in parallel. Vectors match single-text query embedding, and indexing the Zig corpus takes about 18 seconds instead of 25 to 27.
+In model2vec-rs 0.1.4, the Potion tokenizer padded each batch to its longest text and model2vec pooled the pad tokens, so a chunk's vector depended on its batch neighbors; tokenizing each text alone in parallel resolved this. model2vec-rs 0.4.0 encodes each text independently, so Vera now passes whole batches (vectors verified bit-identical to the per-text path); the batch-neighbor regression test remains.
 
 ## Evidence
 

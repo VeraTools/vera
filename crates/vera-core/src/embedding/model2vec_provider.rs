@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use model2vec_rs::model::StaticModel;
-use rayon::prelude::*;
 use tokio::task;
 
 use crate::embedding::provider::{EmbeddingError, EmbeddingProvider};
@@ -48,10 +47,7 @@ impl Model2VecProvider {
         }
 
         let model = StaticModel::from_pretrained(model_dir, None, Some(true), None)?;
-        let embeddings = model.encode(&["vera doctor probe".to_string()]);
-        let Some(vector) = embeddings.first() else {
-            anyhow::bail!("potion-code returned no embeddings");
-        };
+        let vector = model.encode_single("vera doctor probe");
         if vector.len() != POTION_CODE_DIM || !vector.iter().all(|value| value.is_finite()) {
             anyhow::bail!(
                 "potion-code returned invalid embedding: dim={}, expected={}",
@@ -71,18 +67,8 @@ impl Model2VecProvider {
 
         let vectors = task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // The tokenizer pads each batch to its longest text and the
-                // pad tokens are pooled, so a vector would depend on its batch
-                // neighbors. One-text batches match how queries are embedded.
-                texts
-                    .par_iter()
-                    .map(|text| {
-                        model
-                            .encode_with_args(std::slice::from_ref(text), Some(max_length), 1)
-                            .pop()
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
+                // model2vec encodes each text independently and in parallel.
+                model.encode_with_args(&texts, Some(max_length), texts.len().max(1))
             }))
             .map_err(|_| EmbeddingError::ResponseError {
                 message: "potion-code tokenization failed".to_string(),

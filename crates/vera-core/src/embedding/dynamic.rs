@@ -161,7 +161,7 @@ pub async fn create_dynamic_provider(
             ))
         }
         InferenceBackend::Api => {
-            let provider_config = EmbeddingProviderConfig::from_env()
+            let provider_config = EmbeddingProviderConfig::from_env_async().await
                 .map_err(|err| anyhow::anyhow!("embedding API not configured: {err}\nHint: set EMBEDDING_MODEL_BASE_URL, EMBEDDING_MODEL_ID, and EMBEDDING_MODEL_API_KEY environment variables, or use --potion-code for local CPU inference."))?;
             let model_name = provider_config.model_id.clone();
             let mut provider_config = provider_config;

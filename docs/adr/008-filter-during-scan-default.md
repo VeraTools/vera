@@ -28,7 +28,7 @@ Absolute latency acceptance (gate c, vs the corrected same-host 072c725 baseline
 
 ## Decision
 
-Flip `retrieval.vector_filter_during_scan` default to `true` (`default_vector_filter_during_scan()` in `crates/vera-core/src/config.rs`). The env var `VERA_VECTOR_FILTER_DURING_SCAN` stays authoritative over both the config-file value and the default, so the off path remains one env var away for rollback or ablation. No production logic changed beyond the default.
+Flip `retrieval.vector_filter_during_scan` default to `true` (`default_vector_filter_during_scan()` in `crates/vera-core/src/config/retrieval.rs`). The env var `VERA_VECTOR_FILTER_DURING_SCAN` stays authoritative over both the config-file value and the default, so the off path remains one env var away for rollback or ablation. No production logic changed beyond the default.
 
 ## Mandatory absolute-delta disclosure
 

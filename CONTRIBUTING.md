@@ -2,7 +2,7 @@
 
 ## Build from source
 
-You need Rust 1.88 or later. The exact minimum is the `rust-version` field in `Cargo.toml`.
+You need Rust 1.92 or later. The exact minimum is the `rust-version` field in `Cargo.toml`.
 
 ```bash
 git clone https://github.com/VeraTools/vera.git
