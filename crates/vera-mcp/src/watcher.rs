@@ -337,7 +337,8 @@ fn start_watching_with_runtime(
             let state = Arc::clone(&update_state_clone);
             let engine = Arc::clone(&engine);
 
-            spawn_update_worker(engine, repo, runtime, state, progress_logs);
+            let resolve = Arc::clone(&resolve_runtime);
+            spawn_update_worker(engine, repo, runtime, resolve, state, progress_logs);
         },
     )
     .map_err(|e| format!("Failed to create file watcher: {e}"))?;
@@ -440,12 +441,18 @@ fn spawn_update_worker(
     engine: Arc<SharedEngine>,
     repo: std::path::PathBuf,
     runtime: WatchRuntime,
+    resolve: RuntimeResolver,
     state: UpdateStateHandle,
     progress_logs: bool,
 ) {
     std::thread::spawn(move || {
         if run_incremental_update(&engine, &repo, &runtime, &state, progress_logs) {
-            spawn_update_worker(engine, repo, runtime, state, progress_logs);
+            // Pick up saved configuration changes made during a long busy period.
+            let runtime = resolve().unwrap_or_else(|error| {
+                warn!(error = %error, "Failed to refresh watcher runtime configuration");
+                runtime
+            });
+            spawn_update_worker(engine, repo, runtime, resolve, state, progress_logs);
         }
     });
 }
@@ -843,12 +850,20 @@ mod tests {
             state: Arc::clone(&state),
         });
         let shared = Arc::new(shared_test_engine(engine));
+        let resolves = Arc::new(AtomicUsize::new(0));
         assert!(begin_update(&state));
 
         spawn_update_worker(
             shared,
             std::path::PathBuf::from("test-repo"),
             test_runtime(),
+            Arc::new({
+                let resolves = Arc::clone(&resolves);
+                move || {
+                    resolves.fetch_add(1, Ordering::SeqCst);
+                    Ok(test_runtime())
+                }
+            }),
             Arc::clone(&state),
             false,
         );
@@ -858,6 +873,11 @@ mod tests {
             .unwrap()
             .updating));
         assert_eq!(updates.load(Ordering::SeqCst), MAX_UPDATE_PASSES + 1);
+        assert_eq!(
+            resolves.load(Ordering::SeqCst),
+            1,
+            "reschedule refreshes the runtime"
+        );
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!state.updating);
         assert!(!state.pending);

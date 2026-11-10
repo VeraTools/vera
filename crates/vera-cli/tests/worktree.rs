@@ -117,6 +117,9 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
         "pub fn private_only() {}\n",
     )
     .unwrap();
+    // Two excluded additions against one excluded inherited file: a seed that
+    // ignored the exclusions would report two changes, not one.
+    std::fs::write(private_lane.join("extra.rs"), "pub fn extra_only() {}\n").unwrap();
     let capped = run(&private_lane, &["update", ".", "--max-files", "1"]);
     assert!(!capped.status.success());
     assert!(String::from_utf8_lossy(&capped.stderr).contains("--max-files cannot limit"));
@@ -130,6 +133,8 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
             "private.rs",
             "--exclude",
             "lib.rs",
+            "--exclude",
+            "extra.rs",
         ],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
