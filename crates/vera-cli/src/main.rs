@@ -410,6 +410,11 @@ fn single_structural_query<'a>(
     query: Option<&'a str>,
     extra_terms: &[String],
 ) -> anyhow::Result<Option<&'a str>> {
+    use commands::structural::StructuralIntent;
+    // Routes and SQL take no term at all; the core error already says so.
+    if matches!(intent, StructuralIntent::Routes | StructuralIntent::Sql) {
+        return Ok(query);
+    }
     let (Some(first), false) = (query, extra_terms.is_empty()) else {
         return Ok(query);
     };
@@ -968,6 +973,16 @@ mod tests {
             "{err}"
         );
         assert_eq!(single_structural_query(intent, None, &[]).unwrap(), None);
+        // Routes defer to the core error, which points to filters instead of a term.
+        assert_eq!(
+            single_structural_query(
+                commands::structural::StructuralIntent::Routes,
+                Some("a"),
+                &["b".to_string()]
+            )
+            .unwrap(),
+            Some("a")
+        );
     }
 
     #[test]

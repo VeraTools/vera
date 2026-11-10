@@ -2247,6 +2247,29 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_git_pointer_file_is_a_default_exclude() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(
+            dir.path().join(".git"),
+            "gitdir: /repo/.git/worktrees/lane\n",
+        )
+        .unwrap();
+
+        let result = discover_files(dir.path(), &default_config()).unwrap();
+        let names: Vec<&str> = result
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        assert_eq!(names, ["main.rs"]);
+        let explanation = explain_path(dir.path(), Path::new(".git"), &default_config()).unwrap();
+        assert_eq!(explanation.decision, PathDecision::Excluded);
+        assert_eq!(explanation.reason, PathReason::DefaultExclude);
+        assert_eq!(explanation.pattern.as_deref(), Some(".git"));
+    }
+
+    #[test]
     fn explain_path_reports_veraignore_override() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("secret.txt"), "sensitive data").unwrap();

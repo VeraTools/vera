@@ -56,16 +56,16 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     // parents instead of the raw CLI path's lexical parents ("." would
     // never walk past the empty path).
     let start = repo_path.canonicalize()?;
-    let repo_path = crate::helpers::resolve_index_root(&start)?;
-
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
 
     let mut config = state::load_runtime_config()?;
     config.adjust_for_backend(backend);
     config.indexing.extra_excludes.extend(exclude);
     config.indexing.no_ignore |= no_ignore;
     config.indexing.no_default_excludes |= no_default_excludes;
+    let repo_path = crate::helpers::resolve_index_root_with(&start, Some((&config, backend)))?;
+
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
 
     let full_text_only =
         vera_core::indexing::is_full_text_only(&vera_core::indexing::index_dir(&repo_path))?;

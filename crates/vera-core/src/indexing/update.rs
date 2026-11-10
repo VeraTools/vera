@@ -61,7 +61,7 @@ pub struct UpdateSummary {
     pub parse_errors: Vec<FileError>,
     /// Added or modified files deferred by the per-run file limit.
     pub files_deferred: usize,
-    /// Files that could not be read; their indexed data, if any, was kept as is.
+    /// Files that could not be read during discovery or parsing.
     #[serde(skip)]
     pub files_unreadable: usize,
     /// Total chunks after the update.

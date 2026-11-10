@@ -262,20 +262,30 @@ impl SearchContext {
         };
         // Revalidate outside the LRU lock: a staging swap leaves cached stores
         // pointing at the old inode. Check the live marker on every cache hit too.
-        if let Some(stores) = cached_stores
-            && stores.is_open_stamp_current()
-        {
-            stores.ensure_complete(index_dir)?;
-            return Ok(stores);
+        if let Some(stores) = cached_stores {
+            if stores.is_open_stamp_current() {
+                stores.ensure_complete(index_dir)?;
+                return Ok(stores);
+            }
+            // Drop stale readers now so a failed reopen does not keep them cached.
+            self.stores
+                .lock()
+                .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?
+                .retain(|(dir, cached)| dir != index_dir || !Arc::ptr_eq(cached, &stores));
         }
 
         // Opening checks completeness before touching the remaining stores and
         // does not hold the shared cache lock across filesystem/SQLite work.
-        let stores = Arc::new(SearchStores::open(index_dir)?);
+        let opened = Arc::new(SearchStores::open(index_dir)?);
         let mut cached = self
             .stores
             .lock()
             .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?;
+        // A concurrent miss may have installed current stores while this one opened.
+        let stores = cached
+            .iter()
+            .find(|(dir, cached)| dir == index_dir && cached.is_open_stamp_current())
+            .map_or(opened, |(_, cached)| Arc::clone(cached));
         cached.retain(|(dir, _)| dir != index_dir);
         cached.insert(0, (index_dir.to_path_buf(), Arc::clone(&stores)));
         if cached.len() > SEARCH_STORES_LRU_CAPACITY {
@@ -706,6 +716,7 @@ mod tests {
                 .to_string()
                 .contains("incomplete")
         );
+        assert!(!context.search_stores_cache_contains(dir.path()));
         metadata.set_index_meta(INDEX_COMPLETE_KEY, "1").unwrap();
         assert!(context.search_stores(dir.path()).is_ok());
     }

@@ -275,13 +275,12 @@ fn resolve_repository_from(
                     requested.display()
                 )));
             }
-            if let Some(root) = vera_core::indexing::find_index_root(&requested) {
-                (root, server_root(false)?)
-            } else {
-                let server_root = server_root(true)?;
-                match vera_core::indexing::find_index_root(&requested) {
-                    Some(root) => (root, server_root),
-                    None if requested == server_root => (requested, server_root),
+            let root = match vera_core::indexing::find_index_root(&requested) {
+                Some(root) => root,
+                // An unindexed linked worktree is seeded from its own main checkout.
+                None => match super::runtime::seed_worktree_index(&requested)? {
+                    Some(root) => root,
+                    None if requested == server_root(false)? => requested,
                     None => {
                         return Err(ToolCallResult::error(format!(
                             "No index found at {} or any parent directory. Run `vera index {}` first.",
@@ -289,8 +288,9 @@ fn resolve_repository_from(
                             requested.display()
                         )));
                     }
-                }
-            }
+                },
+            };
+            (root, server_root(false)?)
         }
         None => {
             let server_root = server_root(true)?;
@@ -320,7 +320,8 @@ fn resolve_search_repositories(args: &Value) -> Result<Vec<Repository>, ToolCall
     let mut extra_roots = Vec::with_capacity(extras.len());
     for value in extras {
         // Unlike the primary, even the server directory must already be indexed
-        // when explicitly listed in repos. It never starts an indexer/watcher.
+        // when explicitly listed in repos (an unindexed linked worktree may be
+        // seeded from its main checkout). It never starts an indexer/watcher.
         if !value.is_string() {
             return Err(ToolCallResult::error(
                 "Parameter 'repos' must be an array of strings",
@@ -1256,6 +1257,11 @@ mod tests {
                 .arg("-C")
                 .arg(main.path())
                 .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_OBJECT_DIRECTORY")
                 .output()
                 .unwrap();
             assert!(

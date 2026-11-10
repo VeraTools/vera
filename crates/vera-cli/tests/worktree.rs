@@ -22,6 +22,11 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
             .arg("-C")
             .arg(root)
             .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .output()
             .unwrap();
         assert!(
@@ -91,4 +96,28 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
         &["structural", "definitions", "lane_version", "--json"],
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("lane_version"));
+
+    // A seed made by `vera update` honors that command's own exclusions.
+    let private_lane = dir.path().join("private-lane");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "private",
+            private_lane.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        private_lane.join("private.rs"),
+        "pub fn private_only() {}\n",
+    )
+    .unwrap();
+    let output = vera(&private_lane, &["update", ".", "--exclude", "private.rs"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("updated 0 changed files"), "{stderr}");
+    let output = vera(&private_lane, &["search", "private_only", "--json"]);
+    let results: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(results, serde_json::json!([]));
 }

@@ -37,7 +37,9 @@ pub fn index_exists(root: &std::path::Path) -> bool {
     index_dir(root).join("metadata.db").is_file()
 }
 
-/// Walk up from `start` and return the nearest directory containing an index.
+/// Walk up from `start` and return the nearest directory containing an index,
+/// stopping at a linked git worktree's root (an index above it belongs to
+/// another checkout).
 ///
 /// Indexed paths are stored relative to that root, so a CLI command or MCP
 /// server started in a subdirectory must use the ancestor's index rather than

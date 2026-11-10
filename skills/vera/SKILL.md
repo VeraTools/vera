@@ -1,6 +1,6 @@
 ---
 name: vera
-description: Code search over an indexed repository. Use it when the answer is not a string you already know: how or where something works, unfamiliar code, definitions and callers, and enumerating routes, env reads, or implementations (`vera overview`, `vera search "<what the code does>"`, `vera structural definitions <symbol>`, `vera references <symbol>`). For known exact strings, counts, file names, find-and-replace, or unindexed trees, rg or a direct read is better. Without an index, use your usual search tools.
+description: 'Code search over an indexed repository. Use it when the answer is not a string you already know: how or where something works, unfamiliar code, definitions and callers, and enumerating routes, env reads, or implementations (`vera overview`, `vera search "<what the code does>"`, `vera structural definitions <symbol>`, `vera references <symbol>`). For known exact strings, counts, file names, find-and-replace, or unindexed trees, rg or a direct read is better. Without an index, use your usual search tools.'
 ---
 
 # Vera
@@ -12,7 +12,7 @@ Ranked code search over an indexed repository. Results are markdown codeblocks: 
 Use the following in indexed repositories. Without an index, follow [Recovery](#recovery); without a shell, use your usual search tools.
 
 1. Unfamiliar repository: `vera overview` (languages, entry points, hotspots) instead of `ls` and README skimming.
-2. A question about behavior across files ("how does X work", "where is Y decided"), a symbol's definition or callers, or a list of every route or env read: start with the matching Vera command below. In a 10-question benchmark of such questions, agents using Vera answered as accurately as agents using grep and file reads, with less context.
+2. A question about behavior across files ("how does X work", "where is Y decided"), a symbol's definition or callers, or a list of every route or env read: start with the matching Vera command below.
 3. A string you already know, a count, a file name, a find-and-replace, or a tree that is not indexed: use rg or read the file. Vera has no advantage there.
 
 ## Pick the tool
@@ -26,7 +26,7 @@ Use the following in indexed repositories. Without an index, follow [Recovery](#
 | Counts, file names, files outside the index | `rg` |
 | Enumerate every route, env read, implementation | `vera structural routes` / `vera structural env` / `vera structural impls <symbol>` |
 | Documentation on a topic | `vera search "deploying behind proxy" --scope docs` |
-| Files changed in this branch | add `--changed`, `--since <rev>`, or `--base <rev>` to any of the above |
+| Files changed in this branch | add `--changed`, `--since <rev>`, or `--base <rev>` to any Vera command above |
 | Edit the same pattern in many files mechanically | `rg` |
 | Read a file you already know the path and lines of | Read it directly |
 
