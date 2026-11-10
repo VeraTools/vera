@@ -6,6 +6,7 @@
 //! metadata store. Finds semantically related code even when query terms
 //! don't appear literally in results (e.g., "memory allocation" finds `alloc`).
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -103,8 +104,8 @@ pub async fn search_vector_with_stores_timed(
 /// held only across the synchronous sqlite-vec search and metadata hydration,
 /// never across the provider await.
 pub(crate) async fn search_vector_with_cached_stores_timed(
-    vector_store: &std::sync::Mutex<VectorStore>,
-    metadata_store: &std::sync::Mutex<MetadataStore>,
+    vector_store: Arc<Mutex<VectorStore>>,
+    metadata_store: Arc<Mutex<MetadataStore>>,
     provider: &impl EmbeddingProvider,
     query: &str,
     limit: usize,
@@ -129,19 +130,26 @@ pub(crate) async fn search_vector_with_cached_stores_timed(
         "generated query embedding"
     );
 
-    let vector_store = vector_store.lock().map_err(|_| {
-        VectorSearchError::StorageError(anyhow::anyhow!("vector store lock poisoned"))
-    })?;
-    let metadata_store = metadata_store.lock().map_err(|_| {
-        VectorSearchError::StorageError(anyhow::anyhow!("metadata store lock poisoned"))
-    })?;
-    let results = search_vector_from_embedding(
-        &vector_store,
-        &metadata_store,
-        query,
-        limit,
-        &query_embedding,
-    )?;
+    let query = query.to_owned();
+    let results = tokio::task::spawn_blocking(move || {
+        let vector_store = vector_store.lock().map_err(|_| {
+            VectorSearchError::StorageError(anyhow::anyhow!("vector store lock poisoned"))
+        })?;
+        let metadata_store = metadata_store.lock().map_err(|_| {
+            VectorSearchError::StorageError(anyhow::anyhow!("metadata store lock poisoned"))
+        })?;
+        search_vector_from_embedding(
+            &vector_store,
+            &metadata_store,
+            &query,
+            limit,
+            &query_embedding,
+        )
+    })
+    .await
+    .map_err(|e| {
+        VectorSearchError::StorageError(anyhow::anyhow!("vector search task panicked: {e}"))
+    })??;
 
     Ok((results, embed_elapsed))
 }
@@ -249,13 +257,13 @@ pub(crate) fn candidate_pool(limit: usize, index_count: usize, is_flat: bool) ->
 }
 
 pub(crate) async fn search_vector_with_cached_stores_filtered_timed(
-    vector_store: &std::sync::Mutex<VectorStore>,
-    metadata_store: &std::sync::Mutex<MetadataStore>,
+    vector_store: Arc<Mutex<VectorStore>>,
+    metadata_store: Arc<Mutex<MetadataStore>>,
     provider: &impl EmbeddingProvider,
     query: &str,
     limit: usize,
-    map: &crate::storage::eligibility::EligibilityMap,
-    query_elig: &crate::storage::eligibility::QueryEligibility,
+    map: Arc<crate::storage::eligibility::EligibilityMap>,
+    query_elig: crate::storage::eligibility::QueryEligibility,
 ) -> Result<(Vec<SearchResult>, Duration), VectorSearchError> {
     if limit == 0 || query_elig.is_empty() {
         #[cfg(test)]
@@ -282,21 +290,28 @@ pub(crate) async fn search_vector_with_cached_stores_filtered_timed(
         dim = query_embedding.len(),
         "generated query embedding (filtered)"
     );
-    let vector_store = vector_store.lock().map_err(|_| {
-        VectorSearchError::StorageError(anyhow::anyhow!("vector store lock poisoned"))
-    })?;
-    let metadata_store = metadata_store.lock().map_err(|_| {
-        VectorSearchError::StorageError(anyhow::anyhow!("metadata store lock poisoned"))
-    })?;
-    let results = search_vector_from_embedding_filtered(
-        &vector_store,
-        &metadata_store,
-        query,
-        limit,
-        &query_embedding,
-        map,
-        query_elig,
-    )?;
+    let query = query.to_owned();
+    let results = tokio::task::spawn_blocking(move || {
+        let vector_store = vector_store.lock().map_err(|_| {
+            VectorSearchError::StorageError(anyhow::anyhow!("vector store lock poisoned"))
+        })?;
+        let metadata_store = metadata_store.lock().map_err(|_| {
+            VectorSearchError::StorageError(anyhow::anyhow!("metadata store lock poisoned"))
+        })?;
+        search_vector_from_embedding_filtered(
+            &vector_store,
+            &metadata_store,
+            &query,
+            limit,
+            &query_embedding,
+            &map,
+            &query_elig,
+        )
+    })
+    .await
+    .map_err(|e| {
+        VectorSearchError::StorageError(anyhow::anyhow!("vector search task panicked: {e}"))
+    })??;
     Ok((results, embed_elapsed))
 }
 

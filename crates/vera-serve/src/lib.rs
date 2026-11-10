@@ -42,7 +42,7 @@ pub struct AppState {
     pub backend: InferenceBackend,
     /// Human-readable model name reported in /v1/health and embeddings responses.
     pub model_name: String,
-    /// Whether a reranker is available (probed at startup).
+    /// Whether a reranker is configured at startup (loaded on first request).
     pub reranker_available: bool,
     /// The embedding model, cached independently of the reranker.
     pub(crate) embedding: Arc<ModelSlot<DynamicProvider, AcquireError>>,
@@ -52,11 +52,10 @@ pub struct AppState {
 
 /// Start the Vera HTTP server.
 ///
-/// Probes the embedding model and reranker at startup to validate the config,
-/// then listens for connections on `host:port`. The embedding probe is kept and
-/// becomes the first resident model; the reranker is loaded on its first request,
-/// since holding it costs memory a server that only embeds never uses. Each model
-/// is then held as `cache_mode` dictates.
+/// Loads the embedding model at startup to validate the config, then listens
+/// for connections on `host:port`. The embedding model is kept according to
+/// `cache_mode`. The reranker is configured at startup without loading it;
+/// its first request loads it, then `cache_mode` controls how long it stays loaded.
 ///
 /// - `config`     — vera retrieval/embedding config
 /// - `backend`    — compute backend (API, CPU, GPU)
@@ -91,24 +90,16 @@ pub async fn run_server(
 
     // The probe already paid for a full load, so hand it to the slot rather than
     // dropping it and making the first request load the same model again. Seeded
-    // here, before the reranker probe, so `PerRequest` — where `seed` is a no-op —
+    // here so `PerRequest` — where `seed` is a no-op —
     // still releases it before anything else is loaded.
     embedding.seed(Arc::new(probe)).await;
 
-    // The reranker probe is deliberately not seeded: it is built here, read for
-    // `reranker_available`, and dropped, so the first /v1/rerank loads it again.
-    // Keeping it would cost ~670 MB resident on a server that only answers
-    // /v1/embeddings and never reranks at all.
-    let reranker_available = vera_core::retrieval::create_dynamic_reranker(&config, backend)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("vera serve: reranker unavailable ({e}), reranking disabled");
-            None
-        })
-        .is_some();
+    // Configuration selects availability without loading the model. The slot loads
+    // on first use and retries failed loads on later requests.
+    let reranker_available = vera_core::retrieval::reranker_kind(&config, backend).is_some();
 
     if reranker_available {
-        eprintln!("vera serve: reranker ready");
+        eprintln!("vera serve: reranker configured (loads on first request)");
     }
 
     let api_key = api_key.filter(|k| !k.is_empty());

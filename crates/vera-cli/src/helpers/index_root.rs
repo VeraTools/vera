@@ -2,11 +2,55 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use vera_core::indexing::{find_index_root, missing_index_message};
 
 static DIRECTORY_OVERRIDE: AtomicBool = AtomicBool::new(false);
+static WORKTREE_OPTIONS: OnceLock<(vera_core::config::InferenceBackend, bool)> = OnceLock::new();
+
+pub fn set_worktree_options(backend: vera_core::config::InferenceBackend, json: bool) {
+    let _ = WORKTREE_OPTIONS.set((backend, json));
+}
+
+pub fn seed_worktree_index(cwd: &Path) -> anyhow::Result<Option<PathBuf>> {
+    seed_worktree_index_with(cwd, None)
+}
+
+/// `config` overrides the saved configuration, so a command's own exclusions
+/// apply to the seed's update too.
+fn seed_worktree_index_with(
+    cwd: &Path,
+    config: Option<(
+        &vera_core::config::VeraConfig,
+        vera_core::config::InferenceBackend,
+    )>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(seed) = vera_core::indexing::worktree::WorktreeSeed::prepare(cwd)? else {
+        return Ok(None);
+    };
+    let (backend, json) = WORKTREE_OPTIONS
+        .get()
+        .copied()
+        .unwrap_or_else(|| (vera_core::config::resolve_backend(None), false));
+    let saved;
+    let (config, backend) = match config {
+        Some(config) => config,
+        None => {
+            let mut config = crate::state::load_runtime_config()?;
+            config.adjust_for_backend(backend);
+            saved = config;
+            (&saved, backend)
+        }
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    let seeded = runtime.block_on(seed.update_configured(config, backend))?;
+    if !json {
+        eprintln!("{}", seeded.note());
+    }
+    Ok(Some(seeded.root))
+}
 
 pub fn set_directory_override(enabled: bool) {
     DIRECTORY_OVERRIDE.store(enabled, Ordering::Relaxed);
@@ -114,7 +158,23 @@ fn print_stale_warning(index_dir: &Path, summary: &str, warning: &str) {
 /// Resolve the index root for `cwd` via [`find_index_root`], printing the
 /// `note: using index at <root>` line once when the root is an ancestor.
 pub fn resolve_index_root(cwd: &Path) -> anyhow::Result<PathBuf> {
-    let root = find_index_root(cwd).ok_or_else(|| anyhow::anyhow!(missing_index_message(cwd)))?;
+    resolve_index_root_with(cwd, None)
+}
+
+/// [`resolve_index_root`] that seeds a linked worktree with the caller's config.
+pub fn resolve_index_root_with(
+    cwd: &Path,
+    config: Option<(
+        &vera_core::config::VeraConfig,
+        vera_core::config::InferenceBackend,
+    )>,
+) -> anyhow::Result<PathBuf> {
+    let root = match find_index_root(cwd) {
+        Some(root) => root,
+        None => seed_worktree_index_with(cwd, config)?
+            .or_else(|| find_index_root(cwd))
+            .ok_or_else(|| anyhow::anyhow!(missing_index_message(cwd)))?,
+    };
     if root != cwd {
         eprintln!("note: using index at {}", root.display());
     }

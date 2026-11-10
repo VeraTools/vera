@@ -78,11 +78,10 @@ pub enum Commands {
                       Loads the embedding model at startup and keeps it (using the \
                       selected backend), then exposes it via HTTP so any unmodified vera \
                       client can use this host for compute.\n\n\
-                      The reranker is built at startup too, to check it works, but that \
-                      copy is discarded rather than kept: a server that only answers \
-                      /v1/embeddings would otherwise hold it for nothing. Startup \
-                      therefore pays for both models, and the first /v1/rerank request \
-                      pays to load the reranker again.\n\n\
+                      The reranker is configured at startup without loading it. The \
+                      first /v1/rerank request loads it; a failed load is retried on \
+                      a later request. Servers that only answer /v1/embeddings never \
+                      load the reranker.\n\n\
                       A loaded model is held in memory and reused across requests. It is \
                       unloaded after --idle-timeout seconds of inactivity and reloaded on \
                       the next request that needs it; see that flag for the values that \
@@ -370,6 +369,9 @@ pub enum Commands {
         intent: crate::commands::structural::StructuralIntent,
         /// Query term. Required for definitions and impls, optional for env, rejected by routes and sql.
         query: Option<String>,
+        /// Extra terms, accepted only to reject them with a usable hint.
+        #[arg(hide = true)]
+        extra_terms: Vec<String>,
         #[command(flatten)]
         filters: crate::helpers::SearchFilterArgs,
         /// Maximum number of results (default: 20).

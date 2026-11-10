@@ -137,18 +137,7 @@ With a local backend, your code and queries stay on your machine; only the first
 
 ## Benchmarks
 
-The main benchmark is [Semble](https://github.com/MinishLab/semble)'s task set: 1,251 code search queries across 63 open-source repositories, each with known correct answers. Semble is a popular local code search tool from MinishLab, the team behind the Potion embedding model. Both tools below used that same `potion-code-16M-v2` model and the same tasks and nDCG@10 formula; see the [benchmark page](docs/benchmarks.md#scoring) for how answers were matched.
-
-| Tool | nDCG@10 | Recall@1 | Recall@5 | Recall@10 | Index size |
-|---|---:|---:|---:|---:|---:|
-| Vera 2.0.1 | 0.844 | 0.671 | **0.920** | 0.950 | **4.7 GB** |
-| Semble 0.5.5 | **0.851** | **0.675** | 0.918 | **0.966** | 32 GB |
-
-Vera also scored slightly higher than Semble on the 320-task tuning subset (0.854 vs 0.849) and on an independent set of 180 tasks from 10 repositories outside Semble's benchmark (0.767 vs 0.766). That second set exists to check that neither tool, nor the shared embedding model, was tuned to Semble's own tasks.
-
-In a small agent experiment (10 code-tracing questions about Flask, each answered by a fresh coding agent), every setup answered every question correctly. Agents with Vera used 27% less context than agents limited to grep and file reads, and 48% less with the Qwen API backend; agents with Semble used 12% less. With only 10 questions, the 48% result is the only one that is statistically significant.
-
-Methodology, hardware, latency numbers, and the full history are on the [benchmarks page](docs/benchmarks.md).
+On [Semble](https://github.com/MinishLab/semble)'s 1,251-task code search benchmark, with both tools using the same `potion-code-16M-v2` embedding model, Vera 2.0.1 scored 0.844 nDCG@10 against Semble 0.5.5's 0.851, with an index about a seventh the size (4.7 GB vs 32 GB). Vera scored slightly higher on an independent 180-task set from repositories outside Semble's benchmark (0.767 vs 0.766). In a small agent experiment (10 questions), agents using Vera with the Qwen API backend needed 48% less context than agents limited to grep and file reads, the only statistically significant difference in that run. Methodology, latency numbers, and the full history are on the [benchmarks page](docs/benchmarks.md).
 
 ## How it works
 

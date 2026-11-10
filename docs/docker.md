@@ -118,7 +118,7 @@ docker build -f docker/Dockerfile.openvino -t vera:openvino .
 The bootstrap script downloads grammar sources that the build needs. On macOS or Windows, run the build inside a Linux container:
 
 ```bash
-docker run --rm --platform linux/amd64 -v "$(pwd):/src" -w /src rust:1.88 \
+docker run --rm --platform linux/amd64 -v "$(pwd):/src" -w /src rust:1.92 \
   bash -c './scripts/bootstrap-vendored-grammars.sh && cargo build --locked --release -p vera-cli && mkdir -p dist && cp target/release/vera dist/'
 ```
 

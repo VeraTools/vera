@@ -18,9 +18,9 @@ vera update .                       # after editing files; works from any subdir
 | How or where something works | `vera search "env file loading decision"` |
 | The question names a function, class, or config key | `vera structural definitions make_config` |
 | Who calls a symbol, or what it calls | `vera references make_config` / `vera references make_config --callees` |
-| Exact text or regex in indexed files | `vera grep "before_request"` |
+| Exact text you already know, counts, or file names | `rg` (or `vera grep "before_request"` for Vera's `--lang`, `--path`, and `--changed` filters) |
 | Every route, env read, or implementation | `vera structural routes` / `vera structural env` / `vera structural impls <symbol>` |
-| Only files you changed | add `--changed` (uncommitted and untracked files), `--base <rev>` (changes since the merge base with a branch), or `--since <rev>` (changes since a revision) |
+| Only files you changed | add to a Vera command: `--changed` (uncommitted and untracked files), `--base <rev>` (changes since the merge base with a branch), or `--since <rev>` (changes since a revision) |
 | Mechanical edits across many files, or code in dependencies outside the index | `rg` |
 
 Describe behavior in search queries ("JWT expiry handling", not "auth"). `--path` is relative to the repository root. Use `--deep` only after a normal search misses.

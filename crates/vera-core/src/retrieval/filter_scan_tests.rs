@@ -44,7 +44,7 @@ fn setup_small_index(dir: &Path, chunks: Vec<Chunk>, dim: usize) -> (MetadataSto
     let metadata_path = dir.join("metadata.db");
     let vector_path = dir.join("vectors.db");
     let bm25_path = dir.join("bm25");
-    let meta = MetadataStore::open(&metadata_path).unwrap();
+    let meta = crate::retrieval::test_metadata_store(&metadata_path).unwrap();
     meta.insert_chunks(&chunks).unwrap();
     // BM25
     let bm25 = Bm25Index::open(&bm25_path).unwrap();

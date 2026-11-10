@@ -23,7 +23,7 @@ Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and
 
 **Prebuilt binaries.** Download an archive from [GitHub Releases](https://github.com/VeraTools/Vera/releases) and put `vera` on your `PATH`. Use the `x86_64-unknown-linux-musl` archive on systems without glibc. To force a target with the package installers, set `VERA_TARGET`, for example `VERA_TARGET=x86_64-unknown-linux-musl npx -y @vera-ai/cli install`.
 
-**Build from source** (Rust 1.88 or newer):
+**Build from source** (Rust 1.92 or newer):
 
 ```bash
 git clone https://github.com/VeraTools/Vera.git && cd Vera
@@ -120,32 +120,7 @@ The interactive picker preselects agents you already have installed. Press Space
 
 In a terminal, the installer (with or without `--client`) also offers to add a short Vera section to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules`. Vera keeps that section up to date between its `<!-- vera:begin -->` and `<!-- vera:end -->` markers and leaves the rest of the file alone.
 
-<details>
-Add the agent instructions by hand
-
-```markdown
-## Code Search
-
-<!-- vera:begin -->
-
-Use Vera before opening many files or running broad text search when you need to find where logic lives or how a feature works.
-
-- `vera search "query"` for semantic code search. Describe behavior: "JWT validation", not "auth". If one phrasing misses, try 2-3 varied queries or add `--intent "goal"`.
-- `vera search ... --changed`, `--since <rev>`, or `--base <rev>` when the task is limited to modified files or a PR diff
-- `vera grep "pattern"` for exact text or regex in indexed files
-- `vera structural definitions <symbol>`, `vera structural env <NAME>`, `vera structural routes`, or `vera structural impls <symbol>` for common structural tasks and explicit type relationships
-- `vera explain-path path/to/file` to explain why a file is or is not indexed
-- `vera references <symbol>` for callers and `vera references <symbol> --callees` for callees
-- `vera overview` for a project summary (languages, entry points, hotspots). Add `--changed`, `--since <rev>`, or `--base <rev>` to scope it to modified files.
-- `vera stats --json` for index health, including tree-sitter error, parse-failure, and Tier 0 fallback counts
-- `vera search --deep "query"` for RAG-fusion query expansion + merged ranking
-- Narrow `vera search` or `vera grep` with `--lang`, `--path`, `--type`, or `--scope docs`
-- `vera watch .` to auto-update the index, or `vera update .` after edits (`vera index .` if `.vera/` is missing)
-- For detailed usage, query patterns, and troubleshooting, read the Vera skill file installed by `vera agent install`
-<!-- vera:end -->
-```
-
-</details>
+To add that section later, run `vera agent install --client <agent>` from the project root in a terminal and accept the prompt. Without a terminal the prompt is skipped, but an existing managed section in a Markdown config file is still refreshed.
 
 If you use the [skills CLI](https://github.com/vercel-labs/skills), `npx skills add VeraTools/Vera` installs the same skill.
 

@@ -143,10 +143,20 @@ impl Bm25Index {
     /// must use [`Bm25Index::begin_bulk_build`] instead of calling this once
     /// per window.
     pub fn insert_batch(&self, docs: &[Bm25Document<'_>]) -> Result<()> {
+        self.replace_batch(&[], docs)
+    }
+
+    fn replace_batch(&self, file_paths: &[&str], docs: &[Bm25Document<'_>]) -> Result<()> {
         let mut writer: IndexWriter = self
             .writer()
             .context("failed to create BM25 index writer")?;
 
+        for file_path in file_paths {
+            writer.delete_term(tantivy::Term::from_field_text(
+                self.schema.file_path,
+                file_path,
+            ));
+        }
         for doc_data in docs {
             add_document(&writer, &self.schema, doc_data)?;
         }
@@ -179,6 +189,19 @@ impl Bm25Index {
 
     /// Insert all chunks as BM25 documents in one batch.
     pub fn insert_chunks(&self, chunks: &[crate::types::Chunk]) -> Result<()> {
+        self.replace_chunks(&[], chunks)
+    }
+
+    /// Delete old file documents before adding their replacements, committing
+    /// once. Delete opstamps precede adds, so replacements survive the deletion.
+    pub fn replace_chunks(
+        &self,
+        file_paths: &[&str],
+        chunks: &[crate::types::Chunk],
+    ) -> Result<()> {
+        if file_paths.is_empty() && chunks.is_empty() {
+            return Ok(());
+        }
         let lang_strings: Vec<String> = chunks.iter().map(|c| c.language.to_string()).collect();
         let docs: Vec<Bm25Document<'_>> = chunks
             .iter()
@@ -191,7 +214,7 @@ impl Bm25Index {
                 language: lang,
             })
             .collect();
-        self.insert_batch(&docs)
+        self.replace_batch(file_paths, &docs)
     }
 
     /// Search the index with a text query.
@@ -288,22 +311,7 @@ impl Bm25Index {
             return Ok(());
         }
 
-        let mut writer: IndexWriter = self
-            .writer()
-            .context("failed to create BM25 writer for file delete")?;
-
-        for file_path in file_paths {
-            let term = tantivy::Term::from_field_text(self.schema.file_path, file_path);
-            writer.delete_term(term);
-        }
-        writer
-            .commit()
-            .context("failed to commit BM25 file delete")?;
-        writer
-            .wait_merging_threads()
-            .map_err(|e| anyhow::anyhow!("BM25 merge after file delete failed: {e}"))?;
-
-        Ok(())
+        self.replace_batch(file_paths, &[])
     }
 
     /// Clear the entire index (drop and recreate).
@@ -772,6 +780,36 @@ mod tests {
         index.delete_by_files(&[]).unwrap();
 
         assert_eq!(index.doc_count().unwrap(), before);
+    }
+
+    #[test]
+    fn replacement_deletes_old_documents_before_adding_new_ones() {
+        let index = Bm25Index::open_in_memory().unwrap();
+        index.insert_batch(&sample_docs()).unwrap();
+        let replacement = Bm25Document {
+            chunk_id: "src/main.rs:0",
+            file_path: "src/main.rs",
+            content: "replacementmarker",
+            symbol_name: None,
+            language: "rust",
+        };
+        index
+            .replace_batch(&["src/main.rs"], &[replacement])
+            .unwrap();
+        assert_eq!(index.doc_count().unwrap(), 7);
+        assert_eq!(
+            index.search("replacementmarker", 10).unwrap()[0].chunk_id,
+            "src/main.rs:0"
+        );
+        assert_eq!(
+            index
+                .search("hello", 50)
+                .unwrap()
+                .iter()
+                .filter(|hit| hit.chunk_id.starts_with("src/main.rs:"))
+                .count(),
+            0
+        );
     }
 
     #[test]

@@ -1155,14 +1155,16 @@ const VERA_SNIPPET_BEGIN_MARKER: &str = "<!-- vera:begin -->";
 const VERA_SNIPPET_END_MARKER: &str = "<!-- vera:end -->";
 const AGENTS_MD_SNIPPET_HEADING: &str = "## Code Search";
 const LEGACY_AGENTS_MD_SNIPPET_INTRO: &str = "Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
-const AGENTS_MD_SNIPPET_INTRO: &str = "In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. Fall back to grep or rg only after a Vera call has missed.";
+#[cfg(test)]
+const AGENTS_MD_SNIPPET_INTRO: &str = "In a repository with a Vera index, use Vera when the answer is not a string you already know: how or where something works, unfamiliar code, definitions and callers, and enumerating routes, env reads, or implementations. Run `vera overview` when you have not searched this repository yet, then `vera search \"<what the code does>\"`. For known exact strings, counts, file names, find-and-replace, or unindexed trees, rg or a direct read is the better tool.";
+#[cfg(test)]
 const AGENTS_MD_SNIPPET_NO_INDEX: &str = "If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.";
 
 const AGENTS_MD_SNIPPET: &str = r#"## Code Search
 
 <!-- vera:begin -->
 
-In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. Fall back to grep or rg only after a Vera call has missed.
+In a repository with a Vera index, use Vera when the answer is not a string you already know: how or where something works, unfamiliar code, definitions and callers, and enumerating routes, env reads, or implementations. Run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. For known exact strings, counts, file names, find-and-replace, or unindexed trees, rg or a direct read is the better tool.
 
 If Vera reports no index and this is a code repository you will work in, run `vera index .` from its root. A first index can take several minutes, so give the command a long timeout or run it in the background, and use rg until it finishes; an interrupted API-mode run reuses its finished embeddings. Otherwise, or if you cannot run shell commands, use your usual search tools.
 
@@ -1170,7 +1172,7 @@ Route by question type:
 
 - How or where something works: `vera search "request teardown ordering"`. Describe behavior ("JWT validation"), not nouns ("auth"). If a phrasing misses, add `--intent "<goal>"` or use `--deep`.
 - The question names a function, class, or config key: `vera structural definitions <symbol>` for the definition, `vera references <symbol>` for callers (`--callees` for callees). One call returns ranked definitions or call sites, not raw matching lines.
-- Exact text or regex: `vera grep "pattern"`. Line numbers are always shown; cap results with `--limit <N>`.
+- Exact text you already know: rg. Use `vera grep "pattern"` when you want Vera's `--lang`, `--path`, or `--changed` filters on indexed files.
 - Enumerate every X (signals, routes, env reads, implementations): `vera structural routes`, `vera structural env <NAME>`, `vera structural impls <symbol>`, or `vera grep "X" --lang <lang>`.
 
 Working with results:
@@ -1343,8 +1345,8 @@ fn refresh_vera_snippet_in_markdown(existing: &str) -> Option<String> {
         .unwrap_or(existing.len());
     let section = &existing[start..end];
 
-    let legacy_snippet = legacy_agents_md_snippet();
-    let legacy_snippet = adapt_line_endings(&legacy_snippet, existing);
+    let legacy_snippet = LEGACY_AGENTS_MD_SNIPPET;
+    let legacy_snippet = adapt_line_endings(legacy_snippet, existing);
     if !section.contains(LEGACY_AGENTS_MD_SNIPPET_INTRO)
         || section.trim_end() != legacy_snippet.trim_end()
     {
@@ -1377,17 +1379,27 @@ fn marked_snippet_body() -> &'static str {
     body
 }
 
-fn legacy_agents_md_snippet() -> String {
-    AGENTS_MD_SNIPPET
-        .replace(&format!("{VERA_SNIPPET_BEGIN_MARKER}\n\n"), "")
-        .replace(&format!("\n{VERA_SNIPPET_END_MARKER}"), "")
-        .replace(AGENTS_MD_SNIPPET_INTRO, LEGACY_AGENTS_MD_SNIPPET_INTRO)
-        .replace(&format!("\n\n{AGENTS_MD_SNIPPET_NO_INDEX}"), "")
-        .replace(
-            "(it refreshes the repository root's index).",
-            "(it refreshes the repository root's index; `vera index .` from the repository root if none exists).",
-        )
-}
+/// The unmarked section older releases wrote; upgraded in place when unedited.
+const LEGACY_AGENTS_MD_SNIPPET: &str = r#"## Code Search
+
+Your first search in this repository goes through Vera, not grep, rg, or file reads: run `vera overview` when you have not searched this repository yet, then `vera search "<what the code does>"`. Fall back to grep or rg only after a Vera call has missed.
+
+Route by question type:
+
+- How or where something works: `vera search "request teardown ordering"`. Describe behavior ("JWT validation"), not nouns ("auth"). If a phrasing misses, add `--intent "<goal>"` or use `--deep`.
+- The question names a function, class, or config key: `vera structural definitions <symbol>` for the definition, `vera references <symbol>` for callers (`--callees` for callees). One call returns ranked definitions or call sites, not raw matching lines.
+- Exact text or regex: `vera grep "pattern"`. Line numbers are always shown; cap results with `--limit <N>`.
+- Enumerate every X (signals, routes, env reads, implementations): `vera structural routes`, `vera structural env <NAME>`, `vera structural impls <symbol>`, or `vera grep "X" --lang <lang>`.
+
+Working with results:
+
+- Hits are `path:start-end kind:name` plus the code. Cite from the hit; open a file only for lines the hit did not include.
+- If the top hit is a usage site, re-run with the symbol name or `vera structural definitions <symbol>` instead of trying more phrasings.
+- `--path` is relative to the repository root (`--path src/flask`, not an absolute path). Narrow with `--lang`, `--path`, `--type`, or `--scope docs`; widen with `--limit 8`.
+- Vera indexes this repository only. For dependency sources (site-packages, uv or pip caches) use rg, then return to Vera for repository code.
+- A stale-index warning does not invalidate hits. After editing files, run `vera update .` from any directory (it refreshes the repository root's index; `vera index .` from the repository root if none exists).
+- `vera explain-path <file>`, `vera stats --json`, and detailed usage are in the Vera skill installed by `vera agent install`.
+"#;
 
 /// Match generated content's line endings to the target file's.
 fn adapt_line_endings<'a>(generated: &'a str, file: &str) -> std::borrow::Cow<'a, str> {
@@ -1593,6 +1605,12 @@ fn should_offer_snippet_prompt(existing_mentions_vera: bool, stdin_is_terminal: 
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn snippet_contains_its_intro_and_no_index_guidance() {
+        assert!(AGENTS_MD_SNIPPET.contains(AGENTS_MD_SNIPPET_INTRO));
+        assert!(AGENTS_MD_SNIPPET.contains(AGENTS_MD_SNIPPET_NO_INDEX));
+    }
 
     #[test]
     fn empty_and_additive_selections_preserve_unselected_installs() {
@@ -1803,7 +1821,7 @@ mod tests {
 
     #[test]
     fn refresh_vera_snippet_in_markdown_migrates_identical_legacy_section() {
-        let legacy = legacy_agents_md_snippet();
+        let legacy = LEGACY_AGENTS_MD_SNIPPET;
         assert!(legacy.contains(LEGACY_AGENTS_MD_SNIPPET_INTRO));
         assert!(!legacy.contains(AGENTS_MD_SNIPPET_NO_INDEX));
         assert!(legacy.contains("; `vera index .` from the repository root if none exists)"));
@@ -1825,7 +1843,7 @@ mod tests {
 
     #[test]
     fn refresh_previous_marked_snippet() {
-        let previous = legacy_agents_md_snippet().replacen(
+        let previous = LEGACY_AGENTS_MD_SNIPPET.replacen(
             "## Code Search\n\n",
             &format!("## Code Search\n\n{VERA_SNIPPET_BEGIN_MARKER}\n\n"),
             1,
@@ -1853,7 +1871,7 @@ mod tests {
 
     #[test]
     fn refresh_vera_snippet_in_markdown_migrates_crlf_legacy_section() {
-        let legacy = legacy_agents_md_snippet().replace('\n', "\r\n");
+        let legacy = LEGACY_AGENTS_MD_SNIPPET.replace('\n', "\r\n");
         let existing = format!("# Repo\r\n\r\n{}\r\n", legacy.trim_end());
 
         let updated = refresh_vera_snippet_in_markdown(&existing).unwrap();
@@ -1867,7 +1885,7 @@ mod tests {
 
     #[test]
     fn refresh_vera_snippet_in_markdown_skips_edited_legacy_section() {
-        let edited = legacy_agents_md_snippet().replace(
+        let edited = LEGACY_AGENTS_MD_SNIPPET.replace(
             "- Exact text or regex: `vera grep \"pattern\"`. Line numbers are always shown; cap results with `--limit <N>`.",
             "- Use my preferred search tool instead",
         );

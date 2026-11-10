@@ -245,27 +245,48 @@ impl SearchContext {
     }
 
     fn search_stores(&self, index_dir: &Path) -> Result<Arc<SearchStores>> {
-        // Check on cache hits too: an interrupted update can leave the same inode.
-        crate::indexing::freshness::ensure_index_complete(index_dir)?;
+        let cached_stores = {
+            let mut cached = self
+                .stores
+                .lock()
+                .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?;
+            cached
+                .iter()
+                .position(|(dir, _)| dir == index_dir)
+                .map(|pos| {
+                    let entry = cached.remove(pos);
+                    let stores = Arc::clone(&entry.1);
+                    cached.insert(0, entry);
+                    stores
+                })
+        };
+        // Revalidate outside the LRU lock: a staging swap leaves cached stores
+        // pointing at the old inode. Check the live marker on every cache hit too.
+        if let Some(stores) = cached_stores {
+            if stores.is_open_stamp_current() {
+                stores.ensure_complete(index_dir)?;
+                return Ok(stores);
+            }
+            // Drop stale readers now so a failed reopen does not keep them cached.
+            self.stores
+                .lock()
+                .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?
+                .retain(|(dir, cached)| dir != index_dir || !Arc::ptr_eq(cached, &stores));
+        }
+
+        // Opening checks completeness before touching the remaining stores and
+        // does not hold the shared cache lock across filesystem/SQLite work.
+        let opened = Arc::new(SearchStores::open(index_dir)?);
         let mut cached = self
             .stores
             .lock()
             .map_err(|_| anyhow::anyhow!("search store cache lock poisoned"))?;
-        if let Some(pos) = cached.iter().position(|(dir, _)| dir == index_dir) {
-            let entry = cached.remove(pos);
-            // Staleness check: if the live index was rebuilt (staging swap), the
-            // cached SearchStores points at the old .vera.old directory inode.
-            // Its open_stamp will not match the current metadata.db stamp at the
-            // live path, so we must reopen instead of serving stale BM25/metadata.
-            if entry.1.is_open_stamp_current() {
-                let stores = Arc::clone(&entry.1);
-                cached.insert(0, entry);
-                return Ok(stores);
-            }
-            // Stale entry: drop it and fall through to reopen.
-        }
-
-        let stores = Arc::new(SearchStores::open(index_dir)?);
+        // A concurrent miss may have installed current stores while this one opened.
+        let stores = cached
+            .iter()
+            .find(|(dir, cached)| dir == index_dir && cached.is_open_stamp_current())
+            .map_or(opened, |(_, cached)| Arc::clone(cached));
+        cached.retain(|(dir, _)| dir != index_dir);
         cached.insert(0, (index_dir.to_path_buf(), Arc::clone(&stores)));
         if cached.len() > SEARCH_STORES_LRU_CAPACITY {
             cached.truncate(SEARCH_STORES_LRU_CAPACITY);
@@ -309,22 +330,31 @@ impl SearchContext {
         let index_open = Some(open_start.elapsed());
         // `fallback` says why semantic search was skipped, or is `None` when
         // BM25-only search was requested.
-        let bm25_only = |fallback: Option<String>| -> Result<(Vec<SearchResult>, SearchTimings)> {
-            if let Some(reason) = &fallback {
-                warn!("{reason}; using BM25-only search");
+        let bm25_only = |fallback: Option<String>| {
+            let stores = Arc::clone(&stores);
+            let query = query.to_owned();
+            let filters = filters.clone();
+            let config = config.clone();
+            async move {
+                if let Some(reason) = &fallback {
+                    warn!("{reason}; using BM25-only search");
+                }
+                let (results, mut timings) = tokio::task::spawn_blocking(move || {
+                    run_bm25_only(
+                        &query,
+                        &filters,
+                        fetch_limit,
+                        result_limit,
+                        total_start,
+                        &stores,
+                        &config,
+                    )
+                })
+                .await??;
+                timings.semantic_fallback = fallback;
+                timings.index_open = index_open;
+                Ok((results, timings))
             }
-            let (results, mut timings) = run_bm25_only(
-                query,
-                filters,
-                fetch_limit,
-                result_limit,
-                total_start,
-                &stores,
-                config,
-            )?;
-            timings.semantic_fallback = fallback;
-            timings.index_open = index_open;
-            Ok((results, timings))
         };
 
         // Profiling: docs/adr/009-filter-scan-profiling.md — three `get_index_meta` reads per
@@ -334,18 +364,19 @@ impl SearchContext {
         let index_meta = match stores.cached_index_meta() {
             Ok(meta) => meta,
             Err(err) => {
-                return bm25_only(Some(format!("failed to read index metadata: {err}")));
+                return bm25_only(Some(format!("failed to read index metadata: {err}"))).await;
             }
         };
         if index_meta.full_text_only {
-            return bm25_only(None);
+            return bm25_only(None).await;
         }
         let Some(provider) = self.provider.as_ref() else {
             return bm25_only(
                 self.provider_error
                     .as_ref()
                     .map(|error| format!("embedding provider unavailable: {error}")),
-            );
+            )
+            .await;
         };
         let mut stored_dim = config.embedding.max_stored_dim;
         if let (Some(s_model), Some(s_dim), s_prefix) = (
@@ -362,7 +393,7 @@ impl SearchContext {
             {
                 return bm25_only(Some(format!(
                     "index was built with model '{s_model}' but the active model is '{model_name}'; re-index to restore vector search"
-                )));
+                ))).await;
             }
             // A changed document prefix means the stored vectors live in a
             // different vector space. Indexes written before this guard have
@@ -372,7 +403,7 @@ impl SearchContext {
                 return bm25_only(Some(format!(
                     "index document prefix '{}' does not match the active prefix '{active_prefix}'; re-index to restore vector search",
                     s_prefix.as_deref().unwrap_or("")
-                )));
+                ))).await;
             }
             if let Ok(dim) = s_dim.parse::<usize>() {
                 if let Some(provider_dim) = provider.expected_dim()
@@ -380,7 +411,7 @@ impl SearchContext {
                 {
                     return bm25_only(Some(format!(
                         "index dimension {dim} exceeds the provider dimension {provider_dim}; re-index to restore vector search"
-                    )));
+                    ))).await;
                 }
                 stored_dim = dim;
             }
@@ -662,6 +693,107 @@ mod tests {
     use crate::types::{Chunk, SymbolType};
     use tempfile::tempdir;
 
+    #[test]
+    fn invalidated_stores_recheck_interrupted_updates() {
+        use crate::indexing::freshness::INDEX_COMPLETE_KEY;
+        let dir = tempdir().unwrap();
+        let metadata =
+            crate::retrieval::test_metadata_store(&dir.path().join("metadata.db")).unwrap();
+        let _bm25 = Bm25Index::open(&dir.path().join("bm25")).unwrap();
+        let context = SearchContext::bm25_only();
+        let stores = context.search_stores(dir.path()).unwrap();
+        assert!(Arc::ptr_eq(
+            &stores,
+            &context.search_stores(dir.path()).unwrap()
+        ));
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        assert!(!stores.is_open_stamp_current());
+        assert!(
+            context
+                .search_stores(dir.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("incomplete")
+        );
+        assert!(!context.search_stores_cache_contains(dir.path()));
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "1").unwrap();
+        assert!(context.search_stores(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cached_stores_recheck_interrupted_updates_after_writer_unlocks() {
+        use crate::indexing::freshness::INDEX_COMPLETE_KEY;
+        use crate::indexing::lock::IndexLock;
+
+        let dir = tempdir().unwrap();
+        let index_dir = dir.path().join(".vera");
+        std::fs::create_dir(&index_dir).unwrap();
+        let metadata =
+            crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        let _bm25 = Bm25Index::open(&index_dir.join("bm25")).unwrap();
+        let writer = IndexLock::try_acquire_for_index_dir(&index_dir)
+            .unwrap()
+            .unwrap();
+        let context = SearchContext::bm25_only();
+        let stores = context.search_stores(&index_dir).unwrap();
+        assert!(Arc::ptr_eq(
+            &stores,
+            &context.search_stores(&index_dir).unwrap()
+        ));
+
+        // Releasing the writer changes no metadata stamps: the next query must
+        // inspect the marker on the existing cache entry, not reopen the stores.
+        drop(writer);
+        assert!(stores.is_open_stamp_current());
+        let error = context.search_stores(&index_dir).err().unwrap();
+        assert!(error.to_string().contains("incomplete"));
+        assert!(stores.is_open_stamp_current());
+        assert!(Arc::ptr_eq(&stores, &context.stores.lock().unwrap()[0].1));
+    }
+
+    #[test]
+    fn incomplete_index_error_precedes_bm25_open_failure() {
+        use crate::indexing::freshness::INDEX_COMPLETE_KEY;
+        let dir = tempdir().unwrap();
+        let index_dir = dir.path().join(".vera");
+        std::fs::create_dir(&index_dir).unwrap();
+        let metadata =
+            crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
+        metadata.set_index_meta(INDEX_COMPLETE_KEY, "0").unwrap();
+        std::fs::write(index_dir.join("bm25"), "not a directory").unwrap();
+
+        let error = SearchContext::bm25_only()
+            .search_stores(&index_dir)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("incomplete"), "{error}");
+        assert!(error.contains("vera update"), "{error}");
+    }
+
+    #[test]
+    fn completeness_check_does_not_wait_for_bm25_work() {
+        let dir = tempdir().unwrap();
+        crate::retrieval::test_metadata_store(&dir.path().join("metadata.db")).unwrap();
+        let _bm25 = Bm25Index::open(&dir.path().join("bm25")).unwrap();
+        let context = Arc::new(SearchContext::bm25_only());
+        let stores = context.search_stores(dir.path()).unwrap();
+        let busy_bm25 = stores.bm25_metadata.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let index_dir = dir.path().to_path_buf();
+        let worker_context = Arc::clone(&context);
+        let worker = std::thread::spawn(move || {
+            send.send(worker_context.search_stores(&index_dir).is_ok())
+                .unwrap();
+        });
+        let checked = receive.recv_timeout(Duration::from_secs(2));
+        drop(busy_bm25);
+        worker.join().unwrap();
+        assert!(checked.expect("completeness check must not wait for BM25 work"));
+    }
+
     #[tokio::test]
     async fn full_text_only_search_ignores_available_or_failed_provider() {
         use crate::embedding::test_helpers::MockProvider;
@@ -888,7 +1020,7 @@ mod tests {
         let index_dir = dir.path();
 
         let metadata_path = index_dir.join("metadata.db");
-        let store = MetadataStore::open(&metadata_path).unwrap();
+        let store = crate::retrieval::test_metadata_store(&metadata_path).unwrap();
 
         // 1. Test dimension mismatch (requires local model so provider_dim is Some(768))
         store
@@ -968,7 +1100,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let index_dir = dir.path();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[Chunk {
                 id: "auth:0".to_string(),
@@ -1037,7 +1169,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let index_dir = dir.path();
 
-        let store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let store = crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         store
             .insert_chunks(&[Chunk {
                 id: "auth:0".to_string(),
@@ -1096,7 +1228,8 @@ mod tests {
     fn bm25_only_search_fills_path_scoped_results_from_deeper_pool() {
         let dir = tempdir().unwrap();
         let index_dir = dir.path();
-        let metadata_store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+        let metadata_store =
+            crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
         let bm25 = Bm25Index::open(&index_dir.join("bm25")).unwrap();
 
         let mut chunks = Vec::new();

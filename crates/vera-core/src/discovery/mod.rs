@@ -988,12 +988,21 @@ fn determine_ignore_strategy(root: &Path, config: &IndexingConfig) -> Result<Ign
     })
 }
 
+fn default_exclude_pattern(pattern: &str) -> String {
+    // Linked worktrees use a .git pointer file, not a directory.
+    if pattern == ".git" {
+        "!.git".to_string()
+    } else {
+        format!("!{pattern}/")
+    }
+}
+
 fn build_overrides(root: &Path, config: &IndexingConfig) -> Result<Override> {
     let mut overrides = OverrideBuilder::new(root);
     if !config.no_default_excludes {
         for pattern in &config.default_excludes {
             overrides
-                .add(&format!("!{pattern}/"))
+                .add(&default_exclude_pattern(pattern))
                 .with_context(|| format!("invalid exclusion pattern: {pattern}"))?;
         }
         overrides.add("!.veraignore")?;
@@ -1040,7 +1049,7 @@ fn explain_override_match(
         for pattern in &config.default_excludes {
             let mut builder = OverrideBuilder::new(root);
             builder
-                .add(&format!("!{pattern}/"))
+                .add(&default_exclude_pattern(pattern))
                 .with_context(|| format!("invalid exclusion pattern: {pattern}"))?;
             let matcher = builder
                 .build()
@@ -2235,6 +2244,29 @@ mod tests {
         assert_eq!(explanation.decision, PathDecision::Excluded);
         assert_eq!(explanation.reason, PathReason::DefaultExclude);
         assert_eq!(explanation.pattern.as_deref(), Some("dist"));
+    }
+
+    #[test]
+    fn linked_worktree_git_pointer_file_is_a_default_exclude() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(
+            dir.path().join(".git"),
+            "gitdir: /repo/.git/worktrees/lane\n",
+        )
+        .unwrap();
+
+        let result = discover_files(dir.path(), &default_config()).unwrap();
+        let names: Vec<&str> = result
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        assert_eq!(names, ["main.rs"]);
+        let explanation = explain_path(dir.path(), Path::new(".git"), &default_config()).unwrap();
+        assert_eq!(explanation.decision, PathDecision::Excluded);
+        assert_eq!(explanation.reason, PathReason::DefaultExclude);
+        assert_eq!(explanation.pattern.as_deref(), Some(".git"));
     }
 
     #[test]

@@ -30,9 +30,9 @@ pub fn ensure_ort_runtime(lib_path: Option<&std::path::Path>) -> Result<()> {
 
     let result = ORT_INIT_RESULT.get_or_init(|| match ::ort::init_from(&requested) {
         Ok(builder) => {
-            builder.commit();
+            let environment = builder.build().map_err(|error| error.to_string())?;
             let _ = ORT_INIT_LIBRARY_PATH.set(requested.clone());
-            Ok(())
+            Ok(environment)
         }
         Err(e) => Err(format!(
             "ONNX Runtime shared library not found.\n\
@@ -46,9 +46,18 @@ pub fn ensure_ort_runtime(lib_path: Option<&std::path::Path>) -> Result<()> {
     }
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(msg) => anyhow::bail!("{msg}"),
     }
+}
+
+/// Return the shared environment created by `ensure_ort_runtime`.
+pub(crate) fn ort_environment() -> Result<&'static ::ort::environment::Environment> {
+    ORT_INIT_RESULT
+        .get()
+        .context("ONNX Runtime has not been initialized")?
+        .as_ref()
+        .map_err(|message| anyhow::anyhow!("{message}"))
 }
 
 fn validate_ort_library_path(initialized: Option<&str>, requested: &str) -> Result<()> {

@@ -632,7 +632,7 @@ const PHP_KINDS: &[(&[&str], SymbolType)] = &[
 const HASKELL_KINDS: &[(&[&str], SymbolType)] = &[
     (&["function", "signature"], SymbolType::Function),
     (&["data_type"], SymbolType::Struct),
-    (&["type_alias", "type_synomym"], SymbolType::TypeAlias),
+    (&["type_alias", "type_synonym"], SymbolType::TypeAlias),
     (&["newtype"], SymbolType::TypeAlias),
 ];
 

@@ -688,23 +688,7 @@ impl OpenAiProvider {
             .await
             .map_err(|error| response_read_error(error, "failed to parse embedding response"))?;
 
-        // Sort by index to ensure correct ordering.
-        let mut data = resp.data;
-        data.sort_by_key(|d| d.index);
-
-        let vectors: Vec<Vec<f32>> = data.into_iter().map(|d| d.embedding).collect();
-
-        if vectors.len() != body.input.len() {
-            return Err(EmbeddingError::ResponseError {
-                message: format!(
-                    "expected {} embeddings, got {}",
-                    body.input.len(),
-                    vectors.len()
-                ),
-            });
-        }
-
-        Ok(vectors)
+        resp.into_vectors(body.input.len())
     }
 }
 
@@ -1261,6 +1245,9 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
                 _ = cancel.cancelled() => Err(EmbeddingError::Cancelled),
             };
             match result {
+                Ok(vectors) if vectors.len() != batch.len() => EmbeddingError::ResponseError {
+                    message: format!("expected {} embeddings, got {}", batch.len(), vectors.len()),
+                },
                 Ok(vectors) => {
                     completed.extend(
                         batch
@@ -1610,6 +1597,28 @@ struct EmbeddingResponse {
     data: Vec<EmbeddingData>,
 }
 
+impl EmbeddingResponse {
+    fn into_vectors(mut self, expected: usize) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if self.data.len() != expected {
+            return Err(EmbeddingError::ResponseError {
+                message: format!("expected {expected} embeddings, got {}", self.data.len()),
+            });
+        }
+        self.data.sort_by_key(|item| item.index);
+        if self
+            .data
+            .iter()
+            .enumerate()
+            .any(|(index, item)| item.index != index)
+        {
+            return Err(EmbeddingError::ResponseError {
+                message: format!("expected embedding indices 0..{expected}, got invalid indices"),
+            });
+        }
+        Ok(self.data.into_iter().map(|item| item.embedding).collect())
+    }
+}
+
 #[derive(Deserialize)]
 struct EmbeddingData {
     embedding: Vec<f32>,
@@ -1713,6 +1722,81 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn response_requires_exact_input_indices() {
+        for indices in [vec![0, 0], vec![0, 2], vec![1, 2], vec![0], vec![0, 1, 2]] {
+            let count = indices.len();
+            let response = EmbeddingResponse {
+                data: indices
+                    .into_iter()
+                    .map(|index| EmbeddingData {
+                        index,
+                        embedding: vec![index as f32],
+                    })
+                    .collect(),
+            };
+            let Err(EmbeddingError::ResponseError { message }) = response.into_vectors(2) else {
+                panic!("expected invalid response error");
+            };
+            if count != 2 {
+                assert_eq!(message, format!("expected 2 embeddings, got {count}"));
+            } else {
+                assert_eq!(
+                    message,
+                    "expected embedding indices 0..2, got invalid indices"
+                );
+            }
+        }
+        let response = EmbeddingResponse {
+            data: vec![
+                EmbeddingData {
+                    index: 1,
+                    embedding: vec![1.0],
+                },
+                EmbeddingData {
+                    index: 0,
+                    embedding: vec![0.0],
+                },
+            ],
+        };
+        assert_eq!(
+            response.into_vectors(2).unwrap(),
+            vec![vec![0.0], vec![1.0]]
+        );
+    }
+
+    #[tokio::test]
+    async fn resilient_batch_rejects_wrong_vector_count_without_losing_items() {
+        struct ShortProvider;
+        impl EmbeddingProvider for ShortProvider {
+            async fn embed_batch(&self, _: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Ok(Vec::new())
+            }
+
+            fn expected_dim(&self) -> Option<usize> {
+                Some(1)
+            }
+        }
+        let mut items = vec![EmbeddingBatchItem {
+            original_index: 0,
+            chunk_id: "chunk".into(),
+            text: "text".into(),
+        }];
+        let mut completed = Vec::new();
+        assert!(matches!(
+            embed_batch_resilient(
+                &ShortProvider,
+                &mut items,
+                &mut completed,
+                &CancellationToken::new()
+            )
+            .await,
+            Err(EmbeddingError::ResponseError { .. })
+        ));
+        assert_eq!(items.len(), 1);
+        assert!(completed.is_empty());
+    }
 
     #[tokio::test]
     async fn checkpoint_saves_successful_siblings_before_returning_a_group_error() {

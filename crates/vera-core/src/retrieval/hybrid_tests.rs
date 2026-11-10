@@ -456,7 +456,6 @@ async fn setup_test_index(tmp: &std::path::Path) -> (std::path::PathBuf, usize) 
     use crate::embedding::test_helpers::MockProvider;
     use crate::parsing;
     use crate::storage::bm25::Bm25Index;
-    use crate::storage::metadata::MetadataStore;
     use crate::storage::vector::VectorStore;
 
     let dim = 8;
@@ -498,7 +497,7 @@ async fn setup_test_index(tmp: &std::path::Path) -> (std::path::PathBuf, usize) 
 
     // Metadata store.
     let metadata_path = index_dir.join("metadata.db");
-    let metadata_store = MetadataStore::open(&metadata_path).unwrap();
+    let metadata_store = crate::retrieval::test_metadata_store(&metadata_path).unwrap();
     metadata_store.insert_chunks(&all_chunks).unwrap();
 
     // Vector store.
@@ -1304,7 +1303,7 @@ mod indexed_files_cache_tests {
         let dir = tempfile::tempdir().unwrap();
         let index_dir = dir.path();
         let metadata_path = index_dir.join("metadata.db");
-        MetadataStore::open(&metadata_path)
+        crate::retrieval::test_metadata_store(&metadata_path)
             .unwrap()
             .insert_chunks(&[chunk("src/a.rs")])
             .unwrap();
@@ -1440,7 +1439,6 @@ fn candidate_pool_is_clamped_to_index_for_extreme_limits() {
 #[tokio::test]
 async fn exact_paths_filter_reaches_island_above_cap() {
     use crate::embedding::test_helpers::MockProvider;
-    use crate::storage::metadata::MetadataStore;
     use crate::storage::vector::VectorStore;
     use crate::types::{Chunk, SearchFilters};
     use std::collections::HashSet;
@@ -1480,7 +1478,8 @@ async fn exact_paths_filter_reaches_island_above_cap() {
         part_index: None,
     });
 
-    let metadata_store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+    let metadata_store =
+        crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
     metadata_store.insert_chunks(&chunks).unwrap();
     let vector_store = VectorStore::open(&index_dir.join("vectors.db"), dim).unwrap();
     crate::embedding::test_helpers::embed_and_insert_vectors(&vector_store, &provider, &chunks)
@@ -1522,7 +1521,6 @@ async fn exact_paths_filter_reaches_island_above_cap() {
 #[tokio::test]
 async fn multiple_path_filters_use_or_semantics() {
     use crate::embedding::test_helpers::MockProvider;
-    use crate::storage::metadata::MetadataStore;
     use crate::storage::vector::VectorStore;
     use crate::types::{Chunk, SearchFilters};
 
@@ -1568,7 +1566,8 @@ async fn multiple_path_filters_use_or_semantics() {
         },
     ];
 
-    let metadata_store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+    let metadata_store =
+        crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
     metadata_store.insert_chunks(&chunks).unwrap();
     let vector_store = VectorStore::open(&index_dir.join("vectors.db"), dim).unwrap();
     crate::embedding::test_helpers::embed_and_insert_vectors(&vector_store, &provider, &chunks)
@@ -1670,7 +1669,6 @@ async fn filtered_results_survive_reranking_and_graceful_degradation() {
     use crate::embedding::test_helpers::MockProvider;
     use crate::retrieval::reranker::RerankerError;
     use crate::retrieval::reranker::test_helpers::MockReranker;
-    use crate::storage::metadata::MetadataStore;
     use crate::storage::vector::VectorStore;
     use crate::types::{Chunk, SearchFilters};
 
@@ -1705,7 +1703,8 @@ async fn filtered_results_survive_reranking_and_graceful_degradation() {
         },
     ];
 
-    let metadata_store = MetadataStore::open(&index_dir.join("metadata.db")).unwrap();
+    let metadata_store =
+        crate::retrieval::test_metadata_store(&index_dir.join("metadata.db")).unwrap();
     metadata_store.insert_chunks(&chunks).unwrap();
     let vector_store = VectorStore::open(&index_dir.join("vectors.db"), dim).unwrap();
     crate::embedding::test_helpers::embed_and_insert_vectors(&vector_store, &provider, &chunks)

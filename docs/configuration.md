@@ -12,7 +12,7 @@ vera config get retrieval.default_limit       # one value
 vera config set retrieval.default_limit 10    # save a value
 ```
 
-Environment variables are never written to `config.json`. An invalid environment value is ignored, and the saved value or default applies. Where a key has aliases, they are listed in parentheses after it.
+Environment variables are never written to `config.json`. Most invalid environment values are ignored so the saved value or default applies, but invalid local-model numeric and pooling settings return errors instead. Where a key has aliases, they are listed in parentheses after it.
 
 ## Backend/API
 

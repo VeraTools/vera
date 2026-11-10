@@ -1,6 +1,6 @@
 # Storage: SQLite + sqlite-vec + Tantivy
 
-Vera stores chunk metadata, 768-dim embedding vectors, and a BM25 full-text index. We compared SQLite+sqlite-vec vs LanceDB for the metadata/vector layer. Tantivy handles BM25 in both cases. it's the obvious Rust choice there.
+Vera stores chunk metadata, embedding vectors (768-dim in this original evaluation setup; the current Potion Code default is 256-dim and stored dimensions are configurable), and a BM25 full-text index. We compared SQLite+sqlite-vec vs LanceDB for the metadata/vector layer. Tantivy handles BM25 in both cases. it's the obvious Rust choice there.
 
 ## Benchmarks
 

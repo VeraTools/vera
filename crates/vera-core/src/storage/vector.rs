@@ -30,6 +30,7 @@ const MANIFEST_FILE_NAME: &str = "vectors.manifest";
 const FLAT_MANIFEST_VERSION: u32 = 2;
 const VECTOR_SCAN_ENV: &str = "VERA_VECTOR_SCAN";
 const DATABASE_ID_KEY: &str = "database_id";
+const COMPACTION_DEAD_SLOT_FLOOR: i64 = 4096;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -184,6 +185,13 @@ impl FlatSnapshot {
 }
 
 impl FlatStorage {
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Disk(storage) => storage.snapshot.manifest.generation,
+            Self::Memory(storage) => storage.snapshot.manifest.generation,
+        }
+    }
+
     fn open_disk(conn: &Connection, dim: usize, sidecar_dir: &Path) -> Result<Self> {
         let storage = DiskFlatStorage {
             dim,
@@ -228,6 +236,27 @@ impl FlatStorage {
         )?;
         storage.snapshot = snapshot;
         Ok(())
+    }
+
+    fn reload_compacted(&mut self, conn: &Connection) -> Result<()> {
+        let Self::Memory(storage) = self else {
+            return self.reload_disk(conn);
+        };
+        let mut stmt = conn.prepare("SELECT rowid, embedding FROM vec_chunks ORDER BY rowid")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut vectors = Vec::new();
+        for row in rows {
+            let (rowid, bytes) = row?;
+            vectors.push((rowid, decode_f32_vector(&bytes, storage.dim)?));
+        }
+        let inserts: Vec<_> = vectors
+            .iter()
+            .map(|(rowid, vector)| (*rowid, vector.as_slice()))
+            .collect();
+        storage.snapshot = FlatSnapshot::empty(storage.dim, 0);
+        storage.apply_update(&inserts, &[], current_generation(conn)?)
     }
 
     fn apply_update(
@@ -659,6 +688,51 @@ fn current_max_rowid(conn: &Connection) -> Result<i64> {
     .context("failed to read maximum vector rowid")
 }
 
+/// Dense IDs retain the old row order, including distance tie-breaking. The
+/// durable database is rewritten atomically; sidecars are published only after
+/// commit. A crash in between leaves an old generation, rebuilt on next open.
+fn compact_rowids_if_needed(tx: &rusqlite::Transaction<'_>) -> Result<bool> {
+    // Old interrupted writes can leave mappings with no vector or metadata.
+    // Remove them before counting live slots so they cannot suppress compaction.
+    tx.execute(
+        "DELETE FROM chunk_id_map WHERE NOT EXISTS (
+             SELECT 1 FROM vec_chunks v WHERE v.rowid = chunk_id_map.rowid
+         )",
+        [],
+    )
+    .context("failed to remove vectorless mappings before compaction")?;
+    let live: i64 = tx.query_row("SELECT COUNT(*) FROM chunk_id_map", [], |row| row.get(0))?;
+    if current_max_rowid(tx)? - live <= live.max(COMPACTION_DEAD_SLOT_FLOOR) {
+        return Ok(false);
+    }
+    let inconsistent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM vec_chunks v WHERE NOT EXISTS (
+             SELECT 1 FROM chunk_id_map m WHERE m.rowid = v.rowid
+         ))",
+        [],
+        |row| row.get(0),
+    )?;
+    if inconsistent {
+        anyhow::bail!("cannot compact vectors with inconsistent ID mappings");
+    }
+    tx.execute_batch(
+        "CREATE TEMP TABLE compact_vectors AS
+             SELECT ROW_NUMBER() OVER (ORDER BY m.rowid) AS rowid, m.chunk_id, v.embedding
+             FROM chunk_id_map m JOIN vec_chunks v ON v.rowid = m.rowid;
+         DELETE FROM vec_chunks;
+         DELETE FROM chunk_id_map;
+         INSERT INTO chunk_id_map (rowid, chunk_id)
+             SELECT rowid, chunk_id FROM compact_vectors ORDER BY rowid;
+         INSERT INTO vec_chunks (rowid, embedding)
+             SELECT rowid, embedding FROM compact_vectors ORDER BY rowid;
+         UPDATE sqlite_sequence SET seq = (SELECT COUNT(*) FROM compact_vectors)
+             WHERE name = 'chunk_id_map';
+         DROP TABLE compact_vectors;",
+    )
+    .context("failed to compact vector rowids")?;
+    Ok(true)
+}
+
 fn expected_flat_bytes(dim: usize, max_rowid: i64) -> Result<u64> {
     let max_rowid = u64::try_from(max_rowid).context("negative maximum vector rowid")?;
     let dim = u64::try_from(dim).context("vector dimension does not fit in u64")?;
@@ -1035,14 +1109,27 @@ fn vector_byte_offset(rowid: i64, dim: usize) -> Result<u64> {
 }
 
 fn write_vector_at(file: &mut File, offset: u64, vector: &[f32]) -> Result<()> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
+    let bytes = little_endian_bytes(vector);
     file.seek(SeekFrom::Start(offset))
         .with_context(|| format!("failed to seek flat vector file to byte {offset}"))?;
-    file.write_all(&bytes)
+    file.write_all(bytes.as_ref())
         .with_context(|| format!("failed to write flat vector row at byte {offset}"))
+}
+
+fn little_endian_bytes(values: &[f32]) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(target_endian = "little")]
+    {
+        std::borrow::Cow::Borrowed(values.as_bytes())
+    }
+    #[cfg(target_endian = "big")]
+    {
+        std::borrow::Cow::Owned(
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        )
+    }
 }
 
 fn publish_disk_files(
@@ -1053,12 +1140,9 @@ fn publish_disk_files(
     tombstones: &[u8],
     manifest: &FlatManifest,
 ) -> Result<()> {
-    let mut flat_bytes = Vec::with_capacity(std::mem::size_of_val(values));
-    for value in values {
-        flat_bytes.extend_from_slice(&value.to_le_bytes());
-    }
+    let flat_bytes = little_endian_bytes(values);
     let manifest_bytes = serde_json::to_vec(manifest).context("failed to encode flat manifest")?;
-    let flat_tmp = write_temp_file(flat_path, &flat_bytes)?;
+    let flat_tmp = write_temp_file(flat_path, flat_bytes.as_ref())?;
     let tombstone_tmp = match write_temp_file(tombstone_path, tombstones) {
         Ok(path) => path,
         Err(error) => {
@@ -1187,6 +1271,50 @@ impl VectorStore {
             )?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect()
+        })
+    }
+
+    /// Compare indexed IDs across the two databases, returning only coverage
+    /// gaps. `None` means the vector database or its tables are missing.
+    pub(crate) fn coverage_gaps(
+        db_path: &Path,
+        metadata_path: &Path,
+    ) -> Result<Option<(Vec<String>, Vec<i64>)>> {
+        // Match rusqlite's path handling: Unix database paths need not be UTF-8.
+        #[cfg(unix)]
+        let metadata_path = rusqlite::types::ToSqlOutput::Borrowed(
+            rusqlite::types::ValueRef::Text(metadata_path.as_os_str().as_encoded_bytes()),
+        );
+        #[cfg(not(unix))]
+        let metadata_path = metadata_path
+            .to_str()
+            .context("metadata path is not UTF-8")?;
+        read_stored_chunk_map(db_path, |conn| {
+            conn.execute("ATTACH DATABASE ?1 AS metadata", [metadata_path])?;
+            let missing = conn
+                .prepare(
+                    "SELECT DISTINCT c.file_path FROM metadata.chunks c
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM chunk_id_map m
+                     WHERE m.chunk_id = c.id AND EXISTS (
+                         SELECT 1 FROM vec_chunks v WHERE v.rowid = m.rowid
+                     )
+                 )",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let orphans = conn
+                .prepare(
+                    "SELECT v.rowid FROM vec_chunks v WHERE NOT EXISTS (
+                     SELECT 1 FROM chunk_id_map m
+                     WHERE m.rowid = v.rowid AND EXISTS (
+                         SELECT 1 FROM metadata.chunks c WHERE c.id = m.chunk_id
+                     )
+                 )",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(Some((missing, orphans)))
         })
     }
 
@@ -1379,14 +1507,31 @@ impl VectorStore {
     /// AUTOINCREMENT orphan problem. For re-inserts, deletes old vectors
     /// first since the vec0 virtual table doesn't support upsert.
     pub fn insert_batch(&self, items: &[(&str, &[f32])]) -> Result<()> {
-        if items.is_empty() {
+        self.replace_batch(&[], items)
+    }
+
+    /// Remove all matching file prefixes and insert replacements in one
+    /// transaction and one sidecar publication. Prefix scans hold the writer
+    /// reservation, so matching concurrent inserts cannot escape cleanup.
+    pub(crate) fn replace_batch(
+        &self,
+        prefixes: &[String],
+        items: &[(&str, &[f32])],
+    ) -> Result<()> {
+        if items.is_empty() && prefixes.is_empty() {
             return Ok(());
         }
         self.refresh_flat()?;
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to begin vector insert transaction")?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin vector insert transaction")?;
+        let mut tombstones = Vec::new();
+        for prefix in prefixes {
+            tombstones.extend(rowids_with_prefix(&tx, prefix)?);
+        }
+        delete_rows(&tx, &tombstones)?;
         let mut flat_inserts = Vec::with_capacity(items.len());
         {
             let mut id_stmt = self
@@ -1439,9 +1584,17 @@ impl VectorStore {
                 flat_inserts.push((rowid, *vector));
             }
         }
+        let compacted = compact_rowids_if_needed(&tx)?;
         let generation = bump_generation(&tx)?;
         tx.commit().context("failed to commit vector batch")?;
-        self.update_flat(&flat_inserts, &[], generation)?;
+        if compacted {
+            self.flat
+                .lock()
+                .map_err(|_| anyhow::anyhow!("flat vector storage lock poisoned"))?
+                .reload_compacted(&self.conn)?;
+        } else {
+            self.update_flat(&flat_inserts, &tombstones, generation)?;
+        }
         Ok(())
     }
 
@@ -1505,6 +1658,15 @@ impl VectorStore {
     ///
     /// Returns up to `limit` results sorted by ascending distance.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<VectorSearchResult>> {
+        self.search_with_after_scan(query, limit, || {})
+    }
+
+    fn search_with_after_scan(
+        &self,
+        query: &[f32],
+        limit: usize,
+        mut after_scan: impl FnMut(),
+    ) -> Result<Vec<VectorSearchResult>> {
         if query.len() != self.dim {
             anyhow::bail!(
                 "query vector dimension mismatch: expected {}, got {}",
@@ -1514,27 +1676,18 @@ impl VectorStore {
         }
 
         if self.scan_mode == VectorScanMode::Flat {
-            let mut flat = self
-                .flat
-                .lock()
-                .map_err(|_| anyhow::anyhow!("flat vector storage lock poisoned"))?;
-            let hits = flat.search(&self.conn, query, limit)?;
-            let rowids: Vec<i64> = hits.iter().map(|hit| hit.rowid).collect();
-            let chunk_ids = self.chunk_ids_for_rowids(&rowids)?;
-            return hits
-                .iter()
-                .map(|hit| {
-                    let chunk_id = chunk_ids
-                        .get(&hit.rowid)
-                        .with_context(|| format!("failed to map rowid {} to chunk_id", hit.rowid))?
-                        .clone();
-                    Ok(VectorSearchResult {
-                        chunk_id,
-                        distance: hit.distance,
-                    })
-                })
-                .collect();
+            return self.search_flat_with_after_scan(
+                |flat| flat.search(&self.conn, query, limit),
+                after_scan,
+            );
         }
+
+        // KNN and every batched ID lookup must see the same SQLite snapshot:
+        // compaction can reuse a scanned rowid for an entirely different chunk.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin vector search read")?;
 
         // sqlite-vec reads this LIMIT as the KNN `k` and rejects anything above
         // MAX_KNN_K with "k value in knn query too large". Callers scale the
@@ -1566,9 +1719,12 @@ impl VectorStore {
             ))
             .context("failed to prepare vector search")?;
 
-        let hits: Vec<(i64, f64)> = stmt
+        let hits: Vec<DistanceCandidate> = stmt
             .query_map([query.as_bytes()], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+                Ok(DistanceCandidate {
+                    rowid: row.get(0)?,
+                    distance: row.get(1)?,
+                })
             })
             .context("failed to execute vector search")?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -1577,21 +1733,10 @@ impl VectorStore {
         // Resolve the rowids in one query instead of one per hit. The KNN
         // query above is deliberately left alone: joining `chunk_id_map` into
         // it would risk losing the vec0 KNN optimization.
-        let rowids: Vec<i64> = hits.iter().map(|(rowid, _)| *rowid).collect();
-        let chunk_ids = self.chunk_ids_for_rowids(&rowids)?;
-
-        hits.iter()
-            .map(|(rowid, distance)| {
-                let chunk_id = chunk_ids
-                    .get(rowid)
-                    .with_context(|| format!("failed to map rowid {rowid} to chunk_id"))?
-                    .clone();
-                Ok(VectorSearchResult {
-                    chunk_id,
-                    distance: *distance,
-                })
-            })
-            .collect()
+        after_scan();
+        let results = self.resolve_hits(&hits)?;
+        tx.commit().context("failed to finish vector search read")?;
+        Ok(results)
     }
 
     /// Filtered flat search using the eligibility map (filter-during-scan).
@@ -1618,11 +1763,44 @@ impl VectorStore {
         if self.scan_mode != VectorScanMode::Flat {
             anyhow::bail!("filtered scan is only available on the flat backend");
         }
+        self.search_flat_with_after_scan(
+            |flat| flat.search_filtered(&self.conn, query, limit, map, query_elig),
+            || {},
+        )
+    }
+
+    fn search_flat_with_after_scan(
+        &self,
+        scan: impl Fn(&mut FlatStorage) -> Result<Vec<DistanceCandidate>>,
+        mut after_scan: impl FnMut(),
+    ) -> Result<Vec<VectorSearchResult>> {
         let mut flat = self
             .flat
             .lock()
             .map_err(|_| anyhow::anyhow!("flat vector storage lock poisoned"))?;
-        let hits = flat.search_filtered(&self.conn, query, limit, map, query_elig)?;
+        for _ in 0..3 {
+            let hits = scan(&mut flat)?;
+            let generation = flat.generation();
+            after_scan();
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .context("failed to begin vector ID read")?;
+            // This first SELECT pins the read snapshot used by all ID batches.
+            // Never resolve an old mmap's rowids against a compacted ID map.
+            if current_generation(&tx)? != generation {
+                drop(tx);
+                flat.refresh(&self.conn)?;
+                continue;
+            }
+            let results = self.resolve_hits(&hits)?;
+            tx.commit().context("failed to finish vector ID read")?;
+            return Ok(results);
+        }
+        anyhow::bail!("vector store changed during all 3 search attempts")
+    }
+
+    fn resolve_hits(&self, hits: &[DistanceCandidate]) -> Result<Vec<VectorSearchResult>> {
         let rowids: Vec<i64> = hits.iter().map(|hit| hit.rowid).collect();
         let chunk_ids = self.chunk_ids_for_rowids(&rowids)?;
         hits.iter()
@@ -1924,6 +2102,236 @@ fn register_sqlite_vec() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inflate_dead_slots(store: &VectorStore) {
+        store
+            .conn
+            .execute(
+                "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'chunk_id_map'",
+                [COMPACTION_DEAD_SLOT_FLOOR + 10],
+            )
+            .unwrap();
+        store.flat.lock().unwrap().reload_disk(&store.conn).unwrap();
+    }
+
+    #[test]
+    fn replacement_compacts_dead_slots_and_preserves_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.db");
+        let store = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        store
+            .insert_batch(&[("keep:0", &[1.0; 4]), ("change:0", &[0.5; 4])])
+            .unwrap();
+        inflate_dead_slots(&store);
+        let before_bytes = fs::metadata(dir.path().join(FLAT_FILE_NAME)).unwrap().len();
+        store
+            .replace_batch(&["change:".into()], &[("change:0", &[0.25; 4])])
+            .unwrap();
+        assert_eq!(
+            store.rowids_for_chunk_ids(&["keep:0", "change:0"]),
+            vec![1, 2]
+        );
+        assert_eq!(current_max_rowid(&store.conn).unwrap(), 2);
+        assert!(fs::metadata(dir.path().join(FLAT_FILE_NAME)).unwrap().len() < before_bytes);
+        assert_eq!(
+            fs::metadata(dir.path().join(FLAT_FILE_NAME)).unwrap().len(),
+            32
+        );
+        let hits = store.search(&[0.25; 4], 10).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["change:0", "keep:0"]
+        );
+        drop(store);
+        let reopened = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        assert_eq!(reopened.count().unwrap(), 2);
+        assert_eq!(
+            reopened.search(&[0.25; 4], 10).unwrap()[0].chunk_id,
+            "change:0"
+        );
+        reopened.insert("next:0", &[0.75; 4]).unwrap();
+        assert_eq!(reopened.rowids_for_chunk_ids(&["next:0"]), vec![3]);
+    }
+
+    #[test]
+    fn compaction_rolls_back_or_recovers_before_sidecar_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.db");
+        let store = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        store.insert("one:0", &[1.0; 4]).unwrap();
+        inflate_dead_slots(&store);
+        let old_max = current_max_rowid(&store.conn).unwrap();
+        {
+            let tx = store.conn.unchecked_transaction().unwrap();
+            assert!(compact_rowids_if_needed(&tx).unwrap());
+            assert_eq!(current_max_rowid(&tx).unwrap(), 1);
+            // Dropping an uncommitted compaction leaves the old IDs intact.
+        }
+        assert_eq!(current_max_rowid(&store.conn).unwrap(), old_max);
+        let tx = store.conn.unchecked_transaction().unwrap();
+        assert!(compact_rowids_if_needed(&tx).unwrap());
+        bump_generation(&tx).unwrap();
+        tx.commit().unwrap();
+        // Simulate interruption after SQLite commit but before sidecar publish.
+        drop(store);
+        let reopened = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        assert_eq!(
+            fs::metadata(dir.path().join(FLAT_FILE_NAME)).unwrap().len(),
+            16
+        );
+        assert_eq!(reopened.search(&[1.0; 4], 10).unwrap()[0].chunk_id, "one:0");
+    }
+
+    #[test]
+    fn replacement_rolls_back_deletes_when_insert_fails() {
+        let store = VectorStore::open_in_memory_with_mode(4, VectorScanMode::Flat).unwrap();
+        store.insert("old:0", &[1.0; 4]).unwrap();
+        assert!(
+            store
+                .replace_batch(&["old:".into()], &[("new:0", &[0.0; 3])])
+                .is_err()
+        );
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(store.search(&[1.0; 4], 1).unwrap()[0].chunk_id, "old:0");
+    }
+
+    #[test]
+    fn searches_do_not_resolve_scanned_rowids_from_another_generation() {
+        use crate::storage::eligibility::{EligibilityMap, PathEligibility, QueryEligibility};
+
+        for (mode, filtered) in [
+            (VectorScanMode::Flat, false),
+            (VectorScanMode::Flat, true),
+            (VectorScanMode::Vec0, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("vectors.db");
+            let writer = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+            writer
+                .insert_batch(&[
+                    ("gone:0", &[5.0; 4]),
+                    ("near:0", &[0.1; 4]),
+                    ("far:0", &[3.0; 4]),
+                ])
+                .unwrap();
+            let reader = VectorStore::open_disk_with_mode(&path, 4, mode).unwrap();
+            let mut scans = 0;
+            let mut compact_after_scan = || {
+                scans += 1;
+                if scans == 1 {
+                    // At scan time near:0 is row 2. After this commit row 2
+                    // belongs to far:0, so an unchecked lookup mislabels it.
+                    writer
+                        .conn
+                        .execute(
+                            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'chunk_id_map'",
+                            [COMPACTION_DEAD_SLOT_FLOOR + 10],
+                        )
+                        .unwrap();
+                    writer
+                        .replace_batch(&["gone:".into()], &[("new:0", &[7.0; 4])])
+                        .unwrap();
+                    assert_eq!(
+                        writer.rowids_for_chunk_ids(&["near:0", "far:0"]),
+                        vec![1, 2]
+                    );
+                }
+            };
+            let map = EligibilityMap {
+                distinct_paths: vec!["all.rs".into()],
+                path_to_id: HashMap::new(),
+                path_ids: vec![0; 3],
+                languages: vec![0; 3],
+                max_rowid: 3,
+            };
+            let eligibility = QueryEligibility {
+                path: PathEligibility::All,
+                language: Some(0),
+                language_empty: false,
+            };
+            let hits = if filtered {
+                reader.search_flat_with_after_scan(
+                    |flat| flat.search_filtered(&reader.conn, &[0.0; 4], 1, &map, &eligibility),
+                    &mut compact_after_scan,
+                )
+            } else {
+                reader.search_with_after_scan(&[0.0; 4], 1, &mut compact_after_scan)
+            }
+            .unwrap();
+            assert_eq!(hits[0].chunk_id, "near:0", "{mode:?}, filtered={filtered}");
+            assert!((hits[0].distance - 0.2).abs() < 1e-6);
+            assert_eq!(scans, if mode == VectorScanMode::Flat { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn flat_search_stops_after_three_generation_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.db");
+        let writer = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        writer.insert("near:0", &[0.1; 4]).unwrap();
+        let reader = VectorStore::open_disk_with_mode(&path, 4, VectorScanMode::Flat).unwrap();
+        let mut scans = 0;
+        let error = reader
+            .search_with_after_scan(&[0.0; 4], 1, || {
+                scans += 1;
+                writer.insert("near:0", &[scans as f32; 4]).unwrap();
+            })
+            .unwrap_err();
+        assert_eq!(scans, 3);
+        assert!(error.to_string().contains("all 3 search attempts"));
+    }
+
+    #[test]
+    fn compaction_preserves_tie_order_and_can_empty_memory_store() {
+        let store = VectorStore::open_in_memory_with_mode(4, VectorScanMode::Flat).unwrap();
+        store
+            .insert_batch(&[
+                ("first:0", &[1.0; 4]),
+                ("gone:0", &[1.0; 4]),
+                ("third:0", &[1.0; 4]),
+            ])
+            .unwrap();
+        store.delete("gone:0").unwrap();
+        inflate_dead_slots(&store);
+        store.insert_batch(&[("last:0", &[1.0; 4])]).unwrap();
+        assert_eq!(
+            store.rowids_for_chunk_ids(&["first:0", "third:0", "last:0"]),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            store
+                .search(&[1.0; 4], 10)
+                .unwrap()
+                .iter()
+                .map(|hit| hit.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first:0", "third:0", "last:0"]
+        );
+        inflate_dead_slots(&store);
+        store.replace_batch(&[String::new()], &[]).unwrap();
+        assert_eq!(current_max_rowid(&store.conn).unwrap(), 0);
+        assert!(store.search(&[1.0; 4], 10).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_accepts_non_utf8_database_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"metadata-\xff.db".to_vec()));
+        let vector_path = dir.path().join("vectors.db");
+        let _metadata = crate::storage::metadata::MetadataStore::open(&metadata_path).unwrap();
+        let _vectors = VectorStore::open(&vector_path, 4).unwrap();
+        assert_eq!(
+            VectorStore::coverage_gaps(&vector_path, &metadata_path).unwrap(),
+            Some((Vec::new(), Vec::new()))
+        );
+    }
 
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;

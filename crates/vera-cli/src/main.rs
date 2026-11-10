@@ -100,6 +100,13 @@ fn main() {
         }
     }
 
+    // Saved settings must be applied before resolving the fallback backend.
+    let worktree_backend = match &cli.command {
+        Commands::Search { backend, .. } | Commands::Update { backend, .. } => backend.resolve(),
+        _ => vera_core::config::resolve_backend(None),
+    };
+    helpers::set_worktree_options(worktree_backend, cli.json);
+
     let show_nudges = !matches!(
         cli.command,
         Commands::Mcp
@@ -263,23 +270,26 @@ fn main() {
         Commands::Structural {
             intent,
             query,
+            extra_terms,
             filters,
             limit,
             git_scope,
             compact,
         } => {
             tracing::info!("structural query");
-            commands::structural::run(
-                intent,
-                query.as_deref(),
-                limit,
-                &filters.to_filters(),
-                cli.json,
-                cli.raw,
-                cli.timing,
-                git_scope.resolve(),
-                compact,
-            )
+            single_structural_query(intent, query.as_deref(), &extra_terms).and_then(|query| {
+                commands::structural::run(
+                    intent,
+                    query,
+                    limit,
+                    &filters.to_filters(),
+                    cli.json,
+                    cli.raw,
+                    cli.timing,
+                    git_scope.resolve(),
+                    compact,
+                )
+            })
         }
         Commands::Update {
             path,
@@ -391,6 +401,31 @@ fn main() {
         eprintln!("Error: {err:#}");
         process::exit(1);
     }
+}
+
+/// `vera structural` takes one query term. Agents sometimes pass several
+/// symbols at once; name the form that works instead of clap's bare error.
+fn single_structural_query<'a>(
+    intent: commands::structural::StructuralIntent,
+    query: Option<&'a str>,
+    extra_terms: &[String],
+) -> anyhow::Result<Option<&'a str>> {
+    use commands::structural::StructuralIntent;
+    // Routes and SQL take no term at all; the core error already says so.
+    if matches!(intent, StructuralIntent::Routes | StructuralIntent::Sql) {
+        return Ok(query);
+    }
+    let (Some(first), false) = (query, extra_terms.is_empty()) else {
+        return Ok(query);
+    };
+    let intent = clap::ValueEnum::to_possible_value(&intent)
+        .map(|value| value.get_name().to_string())
+        .unwrap_or_default();
+    anyhow::bail!(
+        "`vera structural {intent}` takes one query term, got {}: {first} {}. Run one command per symbol, for example `vera structural {intent} {first}`.",
+        extra_terms.len() + 1,
+        extra_terms.join(" ")
+    )
 }
 
 #[cfg(test)]
@@ -913,6 +948,41 @@ mod tests {
             }
             _ => panic!("expected structural command"),
         }
+    }
+
+    #[test]
+    fn structural_rejects_extra_terms_with_the_working_form() {
+        let Commands::Structural {
+            intent,
+            query,
+            extra_terms,
+            ..
+        } = parse(&["vera", "structural", "definitions", "DataSource", "Source"])
+        else {
+            panic!("expected structural command");
+        };
+        let err = single_structural_query(intent, query.as_deref(), &extra_terms)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("takes one query term, got 2: DataSource Source"),
+            "{err}"
+        );
+        assert!(
+            err.contains("`vera structural definitions DataSource`"),
+            "{err}"
+        );
+        assert_eq!(single_structural_query(intent, None, &[]).unwrap(), None);
+        // Routes defer to the core error, which points to filters instead of a term.
+        assert_eq!(
+            single_structural_query(
+                commands::structural::StructuralIntent::Routes,
+                Some("a"),
+                &["b".to_string()]
+            )
+            .unwrap(),
+            Some("a")
+        );
     }
 
     #[test]

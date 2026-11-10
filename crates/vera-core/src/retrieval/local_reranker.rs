@@ -305,10 +305,12 @@ fn build_session(ep: OnnxExecutionProvider, onnx_path: std::path::PathBuf) -> Re
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let builder = ort::session::builder::SessionBuilder::new()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(threads)?;
-    let builder = register_execution_provider(builder, ep)?;
+    let builder = Session::builder(crate::local_models::ort::ort_environment()?)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(ort::Error::<()>::from)?
+        .with_intra_threads(threads)
+        .map_err(ort::Error::<()>::from)?;
+    let mut builder = register_execution_provider(builder, ep)?;
     builder
         .commit_from_file(&onnx_path)
         .with_context(|| format!("failed to load reranker model {}", onnx_path.display()))
@@ -405,22 +407,23 @@ fn register_execution_provider(
 ) -> ort::Result<ort::session::builder::SessionBuilder> {
     match ep {
         OnnxExecutionProvider::Cpu => Ok(builder),
-        OnnxExecutionProvider::Cuda => builder.with_execution_providers([
-            ort::execution_providers::CUDAExecutionProvider::default().build(),
-        ]),
-        OnnxExecutionProvider::Rocm => builder.with_execution_providers([
-            ort::execution_providers::ROCmExecutionProvider::default().build(),
-        ]),
-        OnnxExecutionProvider::DirectMl => builder.with_execution_providers([
-            ort::execution_providers::DirectMLExecutionProvider::default().build(),
-        ]),
-        OnnxExecutionProvider::CoreMl => builder.with_execution_providers([
-            ort::execution_providers::CoreMLExecutionProvider::default().build(),
-        ]),
-        OnnxExecutionProvider::OpenVino => builder.with_execution_providers([
-            ort::execution_providers::OpenVINOExecutionProvider::default().build(),
-        ]),
+        OnnxExecutionProvider::Cuda => {
+            builder.with_execution_providers([ort::ep::CUDA::default().build()])
+        }
+        OnnxExecutionProvider::Rocm => {
+            builder.with_execution_providers([ort::ep::ROCm::default().build()])
+        }
+        OnnxExecutionProvider::DirectMl => {
+            builder.with_execution_providers([ort::ep::DirectML::default().build()])
+        }
+        OnnxExecutionProvider::CoreMl => {
+            builder.with_execution_providers([ort::ep::CoreML::default().build()])
+        }
+        OnnxExecutionProvider::OpenVino => {
+            builder.with_execution_providers([ort::ep::OpenVINO::default().build()])
+        }
     }
+    .map_err(ort::Error::from)
 }
 
 fn should_acquire_ort_library(

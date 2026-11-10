@@ -1224,6 +1224,84 @@ async fn update_mixed_add_modify_delete() {
 // ── Update: vector store consistency ────────────────────────────────
 
 #[tokio::test]
+async fn update_repairs_missing_and_orphan_vectors_with_equal_counts() {
+    let (dir, provider, config, _) = indexed_repo(&[("main.rs", "fn main() {}")]).await;
+    let idx = index_dir(&dir.path().canonicalize().unwrap());
+    let metadata = MetadataStore::open(&idx.join("metadata.db")).unwrap();
+    let id = metadata.get_chunks_by_file("main.rs").unwrap()[0]
+        .id
+        .clone();
+    let vectors = VectorStore::open(&idx.join("vectors.db"), 8).unwrap();
+    assert!(vectors.delete(&id).unwrap());
+    vectors.insert("orphan.rs:0", &[0.25; 8]).unwrap();
+    assert_eq!(vectors.count().unwrap(), metadata.chunk_count().unwrap());
+    drop(vectors);
+
+    let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(summary.files_modified, 1);
+    assert_eq!(
+        VectorStore::coverage_gaps(&idx.join("vectors.db"), &idx.join("metadata.db")).unwrap(),
+        Some((Vec::new(), Vec::new()))
+    );
+    assert_eq!(
+        VectorStore::stored_chunk_count(&idx.join("vectors.db")).unwrap(),
+        metadata.chunk_count().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn update_compaction_cleans_mapping_only_orphans() {
+    let (dir, provider, config, _) = indexed_repo(&[("main.rs", "fn main() {}")]).await;
+    let idx = index_dir(&dir.path().canonicalize().unwrap());
+    let conn = rusqlite::Connection::open(idx.join("vectors.db")).unwrap();
+    // Enough mapping-only rows to make historical slots appear mostly live
+    // unless cleanup happens before the compaction threshold is evaluated.
+    conn.execute(
+        "WITH RECURSIVE stale(n) AS (
+             SELECT 0 UNION ALL SELECT n + 1 FROM stale WHERE n < 5999
+         ) INSERT INTO chunk_id_map (chunk_id) SELECT 'dangling.rs:' || n FROM stale",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE sqlite_sequence SET seq = 10000 WHERE name = 'chunk_id_map'",
+        [],
+    )
+    .unwrap();
+    fs::write(dir.path().join("main.rs"), "fn changed() {}\n").unwrap();
+
+    let summary = update_repository(dir.path(), &provider, &config, "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(summary.files_modified, 1);
+    let dangling: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_id_map WHERE chunk_id LIKE 'dangling.rs:%')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!dangling);
+    let max_rowid: i64 = conn
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'chunk_id_map'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        max_rowid as u64,
+        VectorStore::stored_chunk_count(&idx.join("vectors.db")).unwrap()
+    );
+    assert_eq!(
+        VectorStore::coverage_gaps(&idx.join("vectors.db"), &idx.join("metadata.db")).unwrap(),
+        Some((Vec::new(), Vec::new()))
+    );
+}
+
+#[tokio::test]
 async fn update_vector_store_consistent() {
     let (dir, provider, config, _) =
         indexed_repo(&[("main.rs", "fn main() { println!(\"hello\"); }")]).await;

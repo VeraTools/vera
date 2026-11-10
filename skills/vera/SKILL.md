@@ -1,6 +1,6 @@
 ---
 name: vera
-description: Code search over the current repository. In a repository with a Vera index, your first search goes through Vera, not grep, rg, or file reads. Run `vera overview` in an unfamiliar repository, `vera search "<what the code does>"` for how or where something works, `vera structural definitions <symbol>` or `vera references <symbol>` when the question names a symbol, and `vera grep "pattern"` for exact text or regex. Fall back to grep after a Vera call has missed, or use your usual search tools when no index exists.
+description: 'Code search over an indexed repository. Use it when the answer is not a string you already know: how or where something works, unfamiliar code, definitions and callers, and enumerating routes, env reads, or implementations (`vera overview`, `vera search "<what the code does>"`, `vera structural definitions <symbol>`, `vera references <symbol>`). For known exact strings, counts, file names, find-and-replace, or unindexed trees, rg or a direct read is better. Without an index, use your usual search tools.'
 ---
 
 # Vera
@@ -12,7 +12,8 @@ Ranked code search over an indexed repository. Results are markdown codeblocks: 
 Use the following in indexed repositories. Without an index, follow [Recovery](#recovery); without a shell, use your usual search tools.
 
 1. Unfamiliar repository: `vera overview` (languages, entry points, hotspots) instead of `ls` and README skimming.
-2. Then the question's first lookup goes through the table below. Do not "check with grep first".
+2. A question about behavior across files ("how does X work", "where is Y decided"), a symbol's definition or callers, or a list of every route or env read: start with the matching Vera command below.
+3. A string you already know, a count, a file name, a find-and-replace, or a tree that is not indexed: use rg or read the file. Vera has no advantage there.
 
 ## Pick the tool
 
@@ -21,10 +22,11 @@ Use the following in indexed repositories. Without an index, follow [Recovery](#
 | How or where does something work | `vera search "env file loading decision"` |
 | The question names a function, class, or config key | `vera structural definitions make_config`, then `vera references make_config` for callers |
 | Who calls or what is called by a symbol | `vera references make_config` / `vera references make_config --callees` |
-| Exact text or regex | `vera grep "before_request"` (line numbers always shown; `--limit <N>` caps results) |
+| Exact text or regex you already know | `rg`; `vera grep "before_request"` when you want `--lang`, `--path`, or `--changed` on indexed files |
+| Counts, file names, files outside the index | `rg` |
 | Enumerate every route, env read, implementation | `vera structural routes` / `vera structural env` / `vera structural impls <symbol>` |
 | Documentation on a topic | `vera search "deploying behind proxy" --scope docs` |
-| Files changed in this branch | add `--changed`, `--since <rev>`, or `--base <rev>` to any of the above |
+| Files changed in this branch | add `--changed`, `--since <rev>`, or `--base <rev>` to any Vera command above |
 | Edit the same pattern in many files mechanically | `rg` |
 | Read a file you already know the path and lines of | Read it directly |
 

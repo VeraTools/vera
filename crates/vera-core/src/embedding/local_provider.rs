@@ -344,9 +344,11 @@ impl LocalEmbeddingProvider {
     pub fn probe_provider_registration(ep: OnnxExecutionProvider) -> Result<()> {
         let config = LocalEmbeddingModelConfig::from_env()?;
         let ep = crate::local_models::embedding_execution_provider(ep, &config);
-        let builder = ort::session::builder::SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?;
+        let builder = Session::builder(crate::local_models::ort::ort_environment()?)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(ort::Error::<()>::from)?
+            .with_intra_threads(1)
+            .map_err(ort::Error::<()>::from)?;
         let _ = register_execution_provider(builder, ep, 0)?;
         Ok(())
     }
@@ -951,10 +953,12 @@ fn build_session(
         model = %onnx_path.display(),
         "building ONNX session"
     );
-    let builder = ort::session::builder::SessionBuilder::new()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(threads)?;
-    let builder = register_execution_provider(builder, ep, gpu_mem_limit_mb)?;
+    let builder = Session::builder(crate::local_models::ort::ort_environment()?)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(ort::Error::<()>::from)?
+        .with_intra_threads(threads)
+        .map_err(ort::Error::<()>::from)?;
+    let mut builder = register_execution_provider(builder, ep, gpu_mem_limit_mb)?;
     builder
         .commit_from_file(&onnx_path)
         .with_context(|| format!("failed to load embedding model {}", onnx_path.display()))
@@ -1059,7 +1063,7 @@ fn register_execution_provider(
         }
         OnnxExecutionProvider::Cuda => {
             tracing::info!("registering CUDA execution provider");
-            let mut cuda_ep = ort::execution_providers::CUDAExecutionProvider::default();
+            let mut cuda_ep = ort::ep::CUDA::default();
             if gpu_mem_limit_mb > 0 {
                 let limit_bytes = gpu_mem_limit_mb as usize * 1024 * 1024;
                 tracing::info!("setting CUDA memory limit: {gpu_mem_limit_mb}MB");
@@ -1075,21 +1079,15 @@ fn register_execution_provider(
         }
         OnnxExecutionProvider::Rocm => {
             tracing::info!("registering ROCm execution provider");
-            builder.with_execution_providers([
-                ort::execution_providers::ROCmExecutionProvider::default().build(),
-            ])
+            builder.with_execution_providers([ort::ep::ROCm::default().build()])
         }
         OnnxExecutionProvider::DirectMl => {
             tracing::info!("registering DirectML execution provider");
-            builder.with_execution_providers([
-                ort::execution_providers::DirectMLExecutionProvider::default().build(),
-            ])
+            builder.with_execution_providers([ort::ep::DirectML::default().build()])
         }
         OnnxExecutionProvider::CoreMl => {
             tracing::info!("registering CoreML execution provider");
-            let result = builder.with_execution_providers([
-                ort::execution_providers::CoreMLExecutionProvider::default().build(),
-            ]);
+            let result = builder.with_execution_providers([ort::ep::CoreML::default().build()]);
             if result.is_ok() {
                 tracing::info!(
                     "CoreML execution provider registered (will fall back to CPU if unavailable)"
@@ -1099,11 +1097,10 @@ fn register_execution_provider(
         }
         OnnxExecutionProvider::OpenVino => {
             tracing::info!("registering OpenVINO execution provider");
-            builder.with_execution_providers([
-                ort::execution_providers::OpenVINOExecutionProvider::default().build(),
-            ])
+            builder.with_execution_providers([ort::ep::OpenVINO::default().build()])
         }
     }
+    .map_err(ort::Error::from)
 }
 
 #[cfg(test)]

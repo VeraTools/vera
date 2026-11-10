@@ -33,3 +33,29 @@ pub const VERA_SKILL_FILES: &[SkillFile] = &[
         contents: include_str!("../../../skills/vera/agents/openai.yaml"),
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::VERA_SKILL_FILES;
+
+    #[test]
+    fn skill_frontmatter_plain_values_have_no_yaml_separators() {
+        let frontmatter = VERA_SKILL_FILES[0]
+            .contents
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .expect("SKILL.md starts with frontmatter")
+            .0;
+        for line in frontmatter.lines() {
+            let (key, value) = line.split_once(": ").expect("key: value line");
+            let quoted = value.len() > 1
+                && (value.starts_with('\'') && value.ends_with('\'')
+                    || value.starts_with('"') && value.ends_with('"'));
+            // A plain YAML scalar cannot contain ": " or " #".
+            assert!(
+                quoted || !(value.contains(": ") || value.contains(" #")),
+                "frontmatter `{key}` needs quoting"
+            );
+        }
+    }
+}

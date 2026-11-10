@@ -151,7 +151,7 @@ Run `vera index .` without the flag to rebuild with embeddings.
 
 ### Symbol-aware chunks
 
-Vera parses files with tree-sitter and indexes functions, classes, methods, structs, traits, interfaces, and `impl` blocks as separate chunks, each labeled with its path, line range, and symbol name. Symbols longer than 200 lines are split at natural boundaries and keep their name with a part number. Config files are indexed whole, Markdown and reStructuredText by section, and files in unrecognized formats by line windows. See [supported languages](supported-languages.md).
+For symbol extraction, line limits, and chunk splitting rules, see [How Vera works: Parsing](how-it-works.md#parsing-chunks-that-follow-the-code) and [supported languages](supported-languages.md).
 
 Any chunk larger than `indexing.max_chunk_bytes` (24 KB by default) is split at line boundaries. That budget is separate from the embedding model's input window: local models truncate longer input to their maximum length, and an API provider with a smaller token limit can reject a chunk that fits the budget. If that happens, lower `indexing.max_chunk_bytes` and run `vera index .` again.
 
@@ -163,9 +163,13 @@ vera update . --max-files 250    # cap the work in one run
 vera watch .                     # update automatically as files change
 ```
 
-`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory.
+`vera update` re-parses only the files that changed, re-embedding them unless the index is keyword-only. It skips reading files whose recorded size, timestamps, and file identity still match, and hashes the rest; `vera update --verify` hashes every file. `vera watch` does the same in the background while you work, two seconds after the last change. `update`, `watch`, `search`, `grep`, and the other query commands find the nearest `.vera/` index above the current directory, so they work from any subdirectory. The search stops at a [linked worktree](#linked-worktrees) root.
 
 Search warns when the index is behind the working tree and tells you how many files changed.
+
+### Linked worktrees
+
+In a linked git worktree without an index, Vera seeds an independent index from the indexed main checkout, then incrementally updates it before returning results. Added, changed, and deleted files reflect the worktree, not the main checkout, including worktrees created inside the main checkout's directory. Only changed content needs new embeddings, using your active backend. `vera update --max-files` cannot cap this first seed. If seeding or updating fails, run `vera index .` from the worktree root.
 
 ### Querying another index
 
@@ -244,7 +248,9 @@ Details and measurements: [models and backends](models.md).
 vera serve --port 3000
 ```
 
-`vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
+`vera serve` runs Vera's local models behind an HTTP API so other tools, or other machines, can use them: `POST /v1/embeddings` (OpenAI format), `POST /v1/rerank` (Cohere and Jina format), and `GET /v1/health`. It listens on `127.0.0.1` by default. Use `--host` to bind elsewhere and `--api-key` (or `VERA_SERVE_KEY`) to require a bearer token.
+
+The embedding model loads at startup. The reranker is configured at startup and loads on its first request; a failed load can be retried by a later request. Models unload after 300 seconds without requests; change that with `--idle-timeout`, or pass a negative value to keep them loaded.
 
 Vera itself can be one of those clients. Opening an index takes milliseconds, but loading a local ONNX model can take seconds, and each CLI call or MCP session loads it again. Running `vera serve --idle-timeout -1` once and pointing Vera at it in API mode keeps one model loaded for every command, session, and index on the machine (`vera serve --help` shows the client setup).
 

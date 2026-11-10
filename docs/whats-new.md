@@ -2,6 +2,20 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.4.0
+
+- Building from source needs Rust 1.92 or later (was 1.88).
+- Dependency upgrades: model2vec-rs 0.4 (Potion Code vectors are bit-identical to before, so existing indexes stay valid; whole batches are now encoded in one call), ort 2.0.0-rc.15 (the downloaded ONNX Runtime stays 1.24.4), tokenizers 0.23, rusqlite 0.41, sqlite-vec 0.1.9, notify-debouncer-mini 0.7, and newer tree-sitter grammars for C, C#, Dart, Erlang, F#, Fortran, GraphQL, Haskell, OCaml, PHP, R, Racket, Scala, Scheme, Swift, and others. Haskell `type` synonyms are labeled as type aliases again.
+- `vera update` does less work per changed file: stale rows are removed in one metadata transaction, vectors are replaced and published once, and the keyword index commits once per update instead of once per file. Vector files are compacted when deleted slots outnumber live ones, so repeated updates no longer grow the index without bound. On Vera's own source tree, an update after 150 changed files went from 1.5 s to 0.96 s, and the index after five such updates was 58 MB instead of 81 MB.
+- Index repair now checks which chunks have vectors instead of comparing counts, so a missing vector can no longer hide behind an orphaned one.
+- Searches open fewer database connections, copy less data while fusing and reranking results, and skip a full-index scan that only fed a warning for the optional `vec0` backend.
+- API embedding responses with duplicate or out-of-range indices are rejected, and search drops API reranker entries with out-of-range or duplicate indices, instead of being matched to the wrong chunks.
+- `vera serve` loads the reranker on first use, so a failed load at startup no longer disables reranking until restart.
+- The MCP file watcher ignores events from Vera's own index files earlier, and no longer drops a change that arrives during its final update pass.
+- In a linked git worktree without its own index, Vera seeds one from the main checkout's index and updates it for the worktree's added, changed, and deleted files before answering, so per-lane worktrees work without a full `vera index`. If the update fails, nothing is published and the error names the main index and the command to run. See [linked worktrees](features.md#linked-worktrees).
+- The agent skill and the `AGENTS.md` section written by `vera agent install` now say when Vera is the better tool (cross-file and conceptual questions, unfamiliar code, definitions and callers, structural lists) and when rg or a direct read is (known exact strings, counts, file names, find-and-replace, unindexed trees). Run `vera agent install` to refresh installed copies.
+- `vera structural definitions`, `env`, or `impls` given more than one query term now explains that it takes one term and shows the working command, instead of clap's bare "unexpected argument" error.
+
 ## v2.3.1
 
 - Reranking now defaults to 20 candidates (`retrieval.rerank_candidates`, was 50) of up to 2,000 characters each (`retrieval.reranker_max_doc_chars`, was 4,800). This cuts reranker tokens by about two thirds, and at the default result limit each search makes one reranker request; quality was unchanged within noise. See the [reranker budget sweep](benchmarks-history.md#reranker-budget-sweep-2026-11-03). Installs keep saved values, except that configs written before `reranker_max_doc_chars` existed now get 2,000. To switch, run `vera config set retrieval.rerank_candidates 20` and `vera config set retrieval.reranker_max_doc_chars 2000`.

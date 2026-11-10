@@ -33,6 +33,14 @@ pub const INDEX_COMPLETE_VALUE: &str = "1";
 pub fn ensure_index_complete(idx_dir: &Path) -> Result<()> {
     let metadata = MetadataStore::open_existing(&idx_dir.join("metadata.db"))
         .context("failed to open index completeness metadata")?;
+    ensure_index_complete_with_store(idx_dir, &metadata)
+}
+
+/// Check the live marker on a revalidated read-side connection, including cache hits.
+pub(crate) fn ensure_index_complete_with_store(
+    idx_dir: &Path,
+    metadata: &MetadataStore,
+) -> Result<()> {
     if metadata.get_index_meta(INDEX_COMPLETE_KEY)?.as_deref() == Some("0")
         && !super::lock::IndexLock::is_locked_for_index_dir(idx_dir)
     {

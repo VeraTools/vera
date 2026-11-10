@@ -15,7 +15,7 @@
 //! 6. Return an UpdateSummary describing what changed
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -61,6 +61,9 @@ pub struct UpdateSummary {
     pub parse_errors: Vec<FileError>,
     /// Added or modified files deferred by the per-run file limit.
     pub files_deferred: usize,
+    /// Files that could not be read during discovery, classification, or parsing.
+    #[serde(skip)]
+    pub files_unreadable: usize,
     /// Total chunks after the update.
     pub total_chunks: u64,
     /// Number of vectors reused from a previous failed run.
@@ -315,6 +318,33 @@ where
     P: EmbeddingProvider,
     F: Fn(UpdateProgress) + Send + Sync,
 {
+    update_repository_at_index(
+        (repo_path, None),
+        provider,
+        config,
+        model_name,
+        options,
+        on_progress,
+        cancellation,
+    )
+    .await
+}
+
+/// Use the same update pipeline on an unpublished worktree seed. Staged callers
+/// supply the held destination lock instead of locking/excluding the staging path.
+pub(super) async fn update_repository_at_index<P, F>(
+    (repo_path, staged): (&Path, Option<(&Path, &super::lock::IndexLock)>),
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    options: &UpdateOptions,
+    on_progress: F,
+    cancellation: &CancellationToken,
+) -> Result<UpdateSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(UpdateProgress) + Send + Sync,
+{
     let start = Instant::now();
     let mut phase_secs = PhaseSecs::default();
     cancellation.check()?;
@@ -331,13 +361,22 @@ where
         .canonicalize()
         .with_context(|| format!("failed to resolve path: {}", repo_path.display()))?;
 
-    let idx_dir = pipeline::index_dir(&repo_root);
+    let idx_dir = staged.map_or_else(
+        || pipeline::index_dir(&repo_root),
+        |(path, _)| path.to_path_buf(),
+    );
     if !idx_dir.exists() {
         bail!(super::missing_index_message(&repo_root));
     }
 
-    let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
-        .context("failed to acquire index lock")?;
+    let _index_lock = if staged.is_none() {
+        Some(
+            crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
+                .context("failed to acquire index lock")?,
+        )
+    } else {
+        None
+    };
 
     info!(path = %repo_root.display(), "starting incremental update");
 
@@ -452,7 +491,12 @@ where
     let vectorless_files = if full_text_only {
         HashSet::new()
     } else {
-        repair_vector_coverage(&metadata_store, &idx_dir.join("vectors.db"), stored_dim)?
+        repair_vector_coverage(
+            &metadata_store,
+            &idx_dir.join("metadata.db"),
+            &idx_dir.join("vectors.db"),
+            stored_dim,
+        )?
     };
 
     let mut classified = super::freshness::classify_files(
@@ -530,6 +574,7 @@ where
         .collect();
     let mut prepared_files = Vec::new();
     let mut parse_errors = Vec::new();
+    let mut files_unreadable = disc.error_skipped + classified.unreadable.len();
 
     if !files_to_index.is_empty() {
         // Parse and chunk new/modified files. Tree-sitter parsing is CPU-bound,
@@ -599,13 +644,14 @@ where
 
         // `files_to_index` order is preserved by `collect`, so the sequential
         // and parallel paths produce identical `prepared_files` ordering.
+        files_unreadable += parsed.iter().filter(|file| file.is_none()).count();
         (prepared_files, parse_errors) =
             collect_prepared_results(parsed.into_iter().flatten().collect());
     }
 
     let all_chunks: Vec<_> = prepared_files
-        .iter()
-        .flat_map(|file| file.chunks.iter().cloned())
+        .iter_mut()
+        .flat_map(|file| file.chunks.drain(..))
         .collect();
     let file_states: Vec<_> = prepared_files
         .iter()
@@ -704,19 +750,18 @@ where
         let bm25_index =
             Bm25Index::open(&bm25_dir).context("failed to open BM25 index for update")?;
 
-        // Every path whose BM25 documents have to go is removed in one pass
-        // before any per-file mutation. `delete_by_files` allocates a writer,
-        // commits a segment and joins the merge threads, which costs tens of
-        // milliseconds per call however little is actually deleted. The batch
-        // must stay ahead of `insert_chunks`, or it would delete newly written docs.
+        // Queue all BM25 deletions before additions in one writer lifecycle.
+        // Publish it before file hashes certify the replacement stores.
         let mut bm25_deletions: Vec<&str> = deleted.iter().map(String::as_str).collect();
         let cleanup_chunk_data: Vec<bool> = prepared_files
             .iter()
             .map(|file| {
+                if file.modified {
+                    return Ok(true);
+                }
                 metadata_store
-                    .get_chunks_by_file(&file.path)
+                    .has_chunks_by_file(&file.path)
                     .with_context(|| format!("failed to inspect existing chunks for {}", file.path))
-                    .map(|chunks| file.modified || !chunks.is_empty())
             })
             .collect::<Result<_>>()?;
         bm25_deletions.extend(
@@ -746,25 +791,31 @@ where
             .set_file_hashes_batch_borrowed(&dirty_hashes)
             .context("failed to mark changed files for repair")?;
         bm25_index
-            .delete_by_files(&bm25_deletions)
-            .context("failed to delete BM25 entries for changed files")?;
-
-        for file_path in &deleted {
-            remove_file_from_index(&metadata_store, vector_store.as_ref(), file_path)?;
-        }
+            .replace_chunks(&bm25_deletions, &all_chunks)
+            .context("failed to replace updated BM25 documents")?;
 
         // A previous attempt may have failed after writing one store but before
         // committing the file hash. Cleaning every prepared path makes retries
-        // idempotent for both modified and newly added files.
-        for (file, cleanup_chunks) in prepared_files.iter().zip(cleanup_chunk_data) {
-            remove_file_parse_data(&metadata_store, &file.path)?;
-            if cleanup_chunks {
-                remove_file_chunk_data(&metadata_store, vector_store.as_ref(), &file.path)?;
-            }
-            metadata_store
-                .delete_file_state(&file.path)
-                .with_context(|| format!("failed to delete file state for {}", file.path))?;
+        // idempotent for both modified and newly added files. Keep deleted
+        // hashes until BM25 and vectors are cleaned, so a retry still finds
+        // deleted paths if publication stops between stores.
+        if let Some(vector_store) = &vector_store {
+            let prefixes: Vec<String> = bm25_deletions
+                .iter()
+                .map(|path| format!("{path}:"))
+                .collect();
+            let batch: Vec<(&str, &[f32])> = embeddings
+                .iter()
+                .map(|(id, vector)| (id.as_str(), vector.as_slice()))
+                .collect();
+            vector_store
+                .replace_batch(&prefixes, &batch)
+                .context("failed to replace updated vectors")?;
         }
+        let touched_paths: Vec<&str> = dirty_hashes.iter().map(|(path, _)| *path).collect();
+        metadata_store
+            .cleanup_files(&touched_paths, &bm25_deletions, &deleted)
+            .context("failed to clean changed file metadata")?;
         // Batched into a single transaction instead of up to two commits per
         // file. This stays at the same point in the sequence as the per-file
         // writes it replaces, so the "nothing is replaced until embedding
@@ -788,18 +839,6 @@ where
             metadata_store
                 .insert_chunks(&all_chunks)
                 .context("failed to insert updated chunk metadata")?;
-            let batch: Vec<(&str, &[f32])> = embeddings
-                .iter()
-                .map(|(id, vector)| (id.as_str(), vector.as_slice()))
-                .collect();
-            if let Some(vector_store) = &vector_store {
-                vector_store
-                    .insert_batch(&batch)
-                    .context("failed to insert updated vectors")?;
-            }
-            bm25_index
-                .insert_chunks(&all_chunks)
-                .context("failed to insert updated BM25 documents")?;
         }
 
         if !file_states.is_empty() {
@@ -854,6 +893,7 @@ where
         files_using_tier0_fallback: pipeline::count_tier0_fallback_files(&file_states),
         parse_errors,
         files_deferred,
+        files_unreadable,
         total_chunks,
         embeddings_reused,
         embedding_requests: stats.requests,
@@ -880,36 +920,18 @@ where
 
 /// Files with a chunk that has no stored vector, as left by a deleted or
 /// damaged vector database; update re-embeds them. Vectors whose chunk is gone
-/// are deleted. Indexing stores exactly one vector per chunk, so the id lists
-/// are only compared when the counts differ.
+/// are deleted. Equal counts do not imply that the ID sets match.
 fn repair_vector_coverage(
     metadata_store: &MetadataStore,
+    metadata_path: &Path,
     vector_path: &Path,
     stored_dim: usize,
 ) -> Result<HashSet<String>> {
-    let chunk_count = metadata_store
-        .chunk_count()
-        .context("failed to count chunks")?;
-    if VectorStore::stored_chunk_count(vector_path)? == chunk_count {
-        return Ok(HashSet::new());
-    }
-    let mut vector_rowids = HashMap::new();
-    let mut orphan_rowids = Vec::new();
-    for (rowid, id) in VectorStore::stored_vectors(vector_path)? {
-        match id {
-            Some(id) => {
-                vector_rowids.insert(id, rowid);
-            }
-            None => orphan_rowids.push(rowid),
-        }
-    }
-    let mut vectorless_files = HashSet::new();
-    for (id, file) in metadata_store.chunk_ids_with_files()? {
-        if vector_rowids.remove(&id).is_none() {
-            vectorless_files.insert(file);
-        }
-    }
-    orphan_rowids.extend(vector_rowids.into_values());
+    let (missing, orphan_rowids) = match VectorStore::coverage_gaps(vector_path, metadata_path)? {
+        Some(gaps) => gaps,
+        None => (metadata_store.files_with_chunks()?, Vec::new()),
+    };
+    let vectorless_files: HashSet<String> = missing.into_iter().collect();
     if !orphan_rowids.is_empty() {
         warn!(
             vectors = orphan_rowids.len(),
@@ -990,64 +1012,6 @@ fn chunk_file_for_update(
             )
         }
     }
-}
-
-/// Remove parse-phase rows (references, type relations) for a file.
-/// Modified files re-insert these during parsing, so stale rows go first.
-fn remove_file_parse_data(metadata_store: &MetadataStore, file_path: &str) -> Result<()> {
-    metadata_store
-        .delete_references_by_file(file_path)
-        .context("failed to delete references for file")?;
-    metadata_store
-        .delete_type_relations_by_file(file_path)
-        .context("failed to delete type relations for file")?;
-    Ok(())
-}
-
-/// Remove vector and chunk metadata for a file.
-///
-/// The caller must delete the file's BM25 documents before calling this helper.
-fn remove_file_chunk_data(
-    metadata_store: &MetadataStore,
-    vector_store: Option<&VectorStore>,
-    file_path: &str,
-) -> Result<()> {
-    // Delete from vector store using file prefix pattern.
-    if let Some(vector_store) = vector_store {
-        let prefix = format!("{file_path}:");
-        vector_store
-            .delete_by_file_prefix(&prefix)
-            .with_context(|| format!("failed to delete vectors for {file_path}"))?;
-    }
-
-    // Delete chunk metadata.
-    metadata_store
-        .delete_chunks_by_file(file_path)
-        .with_context(|| format!("failed to delete metadata for {file_path}"))?;
-
-    debug!(file = %file_path, "removed file chunk data from index");
-
-    Ok(())
-}
-
-/// Remove all data for a file from the index stores.
-fn remove_file_from_index(
-    metadata_store: &MetadataStore,
-    vector_store: Option<&VectorStore>,
-    file_path: &str,
-) -> Result<()> {
-    remove_file_parse_data(metadata_store, file_path)?;
-    remove_file_chunk_data(metadata_store, vector_store, file_path)?;
-
-    // Delete file hash.
-    metadata_store
-        .delete_file_hash(file_path)
-        .with_context(|| format!("failed to delete file hash for {file_path}"))?;
-    metadata_store
-        .delete_file_state(file_path)
-        .with_context(|| format!("failed to delete file state for {file_path}"))?;
-
-    Ok(())
 }
 
 #[cfg(test)]
