@@ -120,7 +120,7 @@ The interactive picker preselects agents you already have installed. Press Space
 
 In a terminal, the installer (with or without `--client`) also offers to add a short Vera section to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules`. Vera keeps that section up to date between its `<!-- vera:begin -->` and `<!-- vera:end -->` markers and leaves the rest of the file alone.
 
-To add that section later, run `vera agent install --client <agent>` in a terminal and accept the prompt. Without a terminal the prompt is skipped, but an existing managed section in a Markdown config file is still refreshed.
+To add that section later, run `vera agent install --client <agent>` from the project root in a terminal and accept the prompt. Without a terminal the prompt is skipped, but an existing managed section in a Markdown config file is still refreshed.
 
 If you use the [skills CLI](https://github.com/vercel-labs/skills), `npx skills add VeraTools/Vera` installs the same skill.
 

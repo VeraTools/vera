@@ -121,10 +121,23 @@ fn worktree_cli_search_and_lookup_bootstrap_from_indexed_main() {
     assert!(!capped.status.success());
     assert!(String::from_utf8_lossy(&capped.stderr).contains("--max-files cannot limit"));
     assert!(!private_lane.join(".vera").exists());
-    let output = vera(&private_lane, &["update", ".", "--exclude", "private.rs"]);
+    let output = vera(
+        &private_lane,
+        &[
+            "update",
+            ".",
+            "--exclude",
+            "private.rs",
+            "--exclude",
+            "lib.rs",
+        ],
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("updated 0 changed files"), "{stderr}");
-    let output = vera(&private_lane, &["search", "private_only", "--json"]);
-    let results: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(results, serde_json::json!([]));
+    assert!(stderr.contains("updated 1 changed files"), "{stderr}");
+    // Neither a new file nor one inherited from the main index survives exclusion.
+    for query in ["private_only", "main_version"] {
+        let output = vera(&private_lane, &["search", query, "--json"]);
+        let results: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(results, serde_json::json!([]));
+    }
 }

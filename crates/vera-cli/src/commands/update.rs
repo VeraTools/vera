@@ -69,7 +69,7 @@ pub fn run(path: &str, json_output: bool, options: CommandOptions) -> anyhow::Re
     {
         bail!(
             "--max-files cannot limit the first index of a linked worktree, which is seeded in full from its main checkout.\n\
-             Hint: run `vera update .` without --max-files to create it, then use --max-files for later updates."
+             Hint: re-run the same command without --max-files to create it, then use --max-files for later updates."
         );
     }
     let repo_path = crate::helpers::resolve_index_root_with(&start, Some((&config, backend)))?;
