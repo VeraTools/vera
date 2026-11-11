@@ -608,7 +608,7 @@ where
                     // For RST, refs come from raw source; chunks from preprocessed.
                     // For all other languages, parse once for both.
                     let (chunks, refs, file_state, parse_error) = if language == Language::Rst {
-                        let refs = parsing::parse_and_extract_references(&content, language);
+                        let refs = parsing::parse_and_extract_references_for_path(&content, rel_path, language);
                         chunk_file_for_update(&normalized_source, rel_path, language, config, Some(refs))
                     } else {
                         chunk_file_for_update(&content, rel_path, language, config, None)

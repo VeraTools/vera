@@ -196,12 +196,24 @@ fn parse_rst_section_chunks(
 /// Parse a source file and extract call-site references only.
 ///
 /// Only works for languages with tree-sitter grammars. Returns an empty
-/// vec for unsupported languages or parse failures.
+/// vec for unsupported languages or parse failures. Without a path, ambiguous
+/// `.h` files cannot be distinguished from explicit C sources; use
+/// [`parse_and_extract_references_for_path`] when the file path is available.
 pub fn parse_and_extract_references(
     source: &str,
     language: Language,
 ) -> Vec<references::RawReference> {
-    let grammar = match languages::tree_sitter_grammar(language) {
+    parse_and_extract_references_for_path(source, "", language)
+}
+
+/// Extract call-site references using the same path-aware grammar selection
+/// and C/C++ header recovery as indexing. Prefer this when a path is known.
+pub fn parse_and_extract_references_for_path(
+    source: &str,
+    file_path: &str,
+    language: Language,
+) -> Vec<references::RawReference> {
+    let grammar = match languages::tree_sitter_grammar_for_path(language, file_path) {
         Some(g) => g,
         None => return Vec::new(),
     };
@@ -209,7 +221,7 @@ pub fn parse_and_extract_references(
     if parser.set_language(&grammar).is_err() {
         return Vec::new();
     }
-    let (tree, language) = match parse_tree(&mut parser, source, "", language) {
+    let (tree, language) = match parse_tree(&mut parser, source, file_path, language) {
         Some(parsed) => parsed,
         None => return Vec::new(),
     };

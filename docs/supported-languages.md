@@ -138,6 +138,9 @@ and selects it only when the whole file parses cleanly and contains a C++-specif
 construct (for example, a class, template, namespace, reference, or constructor
 initializer). Valid C headers remain C. Explicit `.c` files never switch to C++.
 The selected language is recorded in both chunks and index-health metadata.
+Callers extracting references without chunking can pass the source path to
+`parse_and_extract_references_for_path` for identical header and dialect
+selection; the legacy pathless API retains its original signature.
 
 For erroneous C/C++ parses, Vera also retries a byte- and line-preserving view
 of the source for these common constructs:

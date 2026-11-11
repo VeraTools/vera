@@ -48,10 +48,11 @@ fn recover_annotations(parser: &mut Parser, source: &str, tree: Tree) -> Option<
         return Some(tree);
     }
     let mut masked = source.as_bytes().to_vec();
-    let mut changed = mask_linkage_guards(source, &tree, &mut masked);
+    let guards_changed = mask_linkage_guards(source, &tree, &mut masked);
+    let mut annotations_changed = false;
     // Removing a linkage wrapper can expose annotation errors that were
     // previously swallowed by a file-wide ERROR node.
-    let guard_tree = if changed {
+    let guard_tree = if guards_changed {
         parser.parse(&masked, None)
     } else {
         None
@@ -77,7 +78,7 @@ fn recover_annotations(parser: &mut Parser, source: &str, tree: Tree) -> Option<
             {
                 let start = node.start_byte() + text.len() - trimmed.len();
                 masked[start..start + token.len()].fill(b' ');
-                changed = true;
+                annotations_changed = true;
             }
         }
         if cursor.goto_first_child() {
@@ -90,10 +91,14 @@ fn recover_annotations(parser: &mut Parser, source: &str, tree: Tree) -> Option<
         }
     }
     drop(cursor);
-    if !changed {
+    if !guards_changed && !annotations_changed {
         return Some(tree);
     }
-    let candidate = parser.parse(&masked, None)?;
+    let candidate = if annotations_changed {
+        parser.parse(&masked, None)?
+    } else {
+        guard_tree?
+    };
     Some(if candidate.root_node().has_error() {
         tree
     } else {
@@ -111,7 +116,7 @@ fn mask_linkage_guards(source: &str, tree: &Tree, masked: &mut [u8]) -> bool {
             r#"[\t ]*#[\t ]*endif[\t ]*(?://[^\r\n]*|/\*(?:[^*\r\n]|\*+[^*/\r\n])*\*+/)?[\t ]*\r?$"#,
         )).expect("valid linkage guard regex")
     });
-    let mut opening = None;
+    let mut openings = Vec::new();
     let mut changed = false;
     for captures in GUARD.captures_iter(source) {
         let whole = captures.get(0).expect("whole guard");
@@ -121,8 +126,8 @@ fn mask_linkage_guards(source: &str, tree: &Tree, masked: &mut [u8]) -> bool {
             continue;
         }
         if body.as_str().starts_with("extern") {
-            opening = Some((whole.range(), body.end() - 1));
-        } else if let Some((open_range, open_brace)) = opening.take()
+            openings.push((whole.range(), body.end() - 1));
+        } else if let Some((open_range, open_brace)) = openings.pop()
             && matching_braces(tree, open_brace, body.start())
         {
             for range in [open_range, whole.range()] {
@@ -192,7 +197,8 @@ fn has_cpp_construct(tree: &Tree) -> bool {
     loop {
         if matches!(
             cursor.node().kind(),
-            "class_specifier"
+            "alias_declaration"
+                | "class_specifier"
                 | "namespace_definition"
                 | "template_declaration"
                 | "reference_declarator"
@@ -278,7 +284,7 @@ mod tests {
     #[test]
     fn winapi_recovery_preserves_content_lines_and_calls() {
         for language in [Language::C, Language::Cpp] {
-            let source = "// Unicode: ?\r\n#define WINAPI __stdcall\r\nunsigned long WINAPI worker(void *arg) { return helper(); }\r\n";
+            let source = "// Unicode: \u{03bb}\r\n#define WINAPI __stdcall\r\nunsigned long WINAPI worker(void *arg) { return helper(); }\r\n";
             let (chunks, refs, diagnostics) = parse_file_with_diagnostics(
                 source,
                 "worker.cpp",
@@ -293,6 +299,24 @@ mod tests {
                 .unwrap();
             assert!(worker.content.contains("WINAPI worker"));
             assert_eq!(worker.line_end, 3);
+            assert!(source.len() > source.chars().count());
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&super::super::languages::tree_sitter_grammar(language).unwrap())
+                .unwrap();
+            let (tree, effective_language) =
+                super::super::parse_tree(&mut parser, source, "worker.cpp", language).unwrap();
+            let symbols = super::super::extractor::extract_symbols(
+                &tree,
+                source.as_bytes(),
+                effective_language,
+            );
+            let symbol = symbols
+                .iter()
+                .find(|s| s.name.as_deref() == Some("worker"))
+                .unwrap();
+            assert_eq!(symbol.start_byte, source.find("unsigned long").unwrap());
+            assert_eq!(symbol.end_byte, source.rfind('}').unwrap() + 1);
             assert!(refs.iter().any(|r| r.callee == "helper" && r.line == 3));
         }
     }
@@ -457,7 +481,7 @@ mod tests {
 
     #[test]
     fn nested_braces_and_utf8_literals_do_not_confuse_linkage_matching() {
-        let source = "#ifdef __cplusplus\nextern \"C\" {\n#endif\nconst char *text = \"? } {\";\nint f(void) { if (1) { return 1; } return 0; }\n#ifdef __cplusplus\n}\n#endif\n";
+        let source = "#ifdef __cplusplus\nextern \"C\" {\n#endif\nconst char *text = \"\u{03bb} } {\";\nint f(void) { if (1) { return 1; } return 0; }\n#ifdef __cplusplus\n}\n#endif\n";
         let (chunks, _, diagnostics) = parse_file_with_diagnostics(
             source,
             "nested.h",
@@ -483,5 +507,96 @@ mod tests {
         )
         .unwrap();
         assert!(diagnostics.tree_has_error);
+    }
+    #[test]
+    fn nested_conditional_linkage_guards_preserve_all_symbols() {
+        let open = "#ifdef __cplusplus\nextern \"C\" {\n#endif\n";
+        let close = "#ifdef __cplusplus\n}\n#endif\n";
+        let source = format!(
+            "{open}int outer(void) {{ return first(); }}\n{open}int inner(void) {{ return second(); }}\n{close}int after(void) {{ return third(); }}\n{close}"
+        );
+        let (chunks, refs, diagnostics) = parse_file_with_diagnostics(
+            &source,
+            "nested.h",
+            Language::C,
+            &IndexingConfig::default(),
+        )
+        .unwrap();
+        assert!(!diagnostics.tree_has_error);
+        for (name, line, callee) in [
+            ("outer", 4, "first"),
+            ("inner", 8, "second"),
+            ("after", 12, "third"),
+        ] {
+            assert!(
+                chunks
+                    .iter()
+                    .any(|c| c.symbol_name.as_deref() == Some(name) && c.line_start == line)
+            );
+            assert!(refs.iter().any(|r| r.callee == callee
+                && r.caller.as_deref() == Some(name)
+                && r.line == line));
+        }
+    }
+
+    #[test]
+    fn path_aware_references_match_cpp_header_indexing() {
+        let source = "template<class T> class Box { public: int run() { return helper(); } };\n";
+        let (_, expected, diagnostics) =
+            parse_file_with_diagnostics(source, "box.h", Language::C, &IndexingConfig::default())
+                .unwrap();
+        assert!(!diagnostics.tree_has_error);
+        let actual =
+            crate::parsing::parse_and_extract_references_for_path(source, "box.h", Language::C);
+        assert!(!actual.is_empty());
+        let edges = |refs: Vec<crate::parsing::references::RawReference>| {
+            refs.into_iter()
+                .map(|r| (r.callee, r.caller, r.qualifier, r.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(edges(actual), edges(expected));
+    }
+
+    #[test]
+    fn path_aware_references_respect_tsx_dialect() {
+        let source = "function Panel() { return <Button onClick={handleClick()} />; }";
+        let (_, expected, _) = parse_file_with_diagnostics(
+            source,
+            "Panel.tsx",
+            Language::TypeScript,
+            &IndexingConfig::default(),
+        )
+        .unwrap();
+        let actual = crate::parsing::parse_and_extract_references_for_path(
+            source,
+            "Panel.tsx",
+            Language::TypeScript,
+        );
+        assert!(actual.iter().any(|r| r.callee == "handleClick"));
+        assert_eq!(
+            actual
+                .iter()
+                .map(|r| (&r.callee, &r.caller, r.line))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|r| (&r.callee, &r.caller, r.line))
+                .collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn cpp_alias_header_uses_cpp_language() {
+        let source = "using Alias = int *;\n";
+        let (chunks, _, diagnostics) =
+            parse_file_with_diagnostics(source, "alias.h", Language::C, &IndexingConfig::default())
+                .unwrap();
+        assert!(!diagnostics.tree_has_error);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| chunk.language == Language::Cpp));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.content.contains("using Alias = int *;"))
+        );
     }
 }

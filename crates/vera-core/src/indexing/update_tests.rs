@@ -1361,13 +1361,12 @@ async fn cpp_header_language_is_consistent_after_index_and_update() {
     let metadata =
         MetadataStore::open_existing(&index_dir(dir.path()).join("metadata.db")).unwrap();
     assert_eq!(metadata.file_states().unwrap()[0].language, "cpp");
-    assert!(
-        metadata
-            .get_chunks_by_file("box.h")
-            .unwrap()
-            .iter()
-            .all(|c| c.language == Language::Cpp)
-    );
+    let assert_chunk_language = |expected| {
+        let chunks = metadata.get_chunks_by_file("box.h").unwrap();
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| chunk.language == expected));
+    };
+    assert_chunk_language(Language::Cpp);
     fs::write(
         dir.path().join("box.h"),
         "template<class T> class Box { public: T updated; };\n",
@@ -1379,9 +1378,11 @@ async fn cpp_header_language_is_consistent_after_index_and_update() {
     assert_eq!(summary.files_modified, 1);
     assert_eq!(metadata.file_states().unwrap()[0].language, "cpp");
     assert!(!metadata.file_states().unwrap()[0].tree_has_error);
+    assert_chunk_language(Language::Cpp);
     fs::write(dir.path().join("box.h"), "struct box { int value; };\n").unwrap();
     update_repository(dir.path(), &provider, &config, "mock-model")
         .await
         .unwrap();
     assert_eq!(metadata.file_states().unwrap()[0].language, "c");
+    assert_chunk_language(Language::C);
 }

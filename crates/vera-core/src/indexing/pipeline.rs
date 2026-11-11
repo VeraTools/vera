@@ -976,7 +976,11 @@ pub(crate) fn parse_discovered_files_parallel(
             // update and is re-parsed forever.
             let hash;
             let parsed = if language == Language::Rst {
-                let refs = parsing::parse_and_extract_references(&source, language);
+                let refs = parsing::parse_and_extract_references_for_path(
+                    &source,
+                    &file.relative_path,
+                    language,
+                );
                 let normalized_source = match parsing::sphinx::preprocess_rst_with_limit(
                     &source,
                     &file.absolute_path,
