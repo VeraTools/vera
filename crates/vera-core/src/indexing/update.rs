@@ -977,17 +977,16 @@ fn chunk_file_for_update(
         Ok((chunks, parsed_refs, diagnostics)) => {
             let chunk_count = chunks.len() as u64;
             let refs = refs_override.unwrap_or(parsed_refs);
-            (
-                chunks,
-                refs,
-                state(
-                    FileIndexStatus::Indexed,
-                    diagnostics.tree_has_error,
-                    diagnostics.used_tier0_fallback,
-                    chunk_count,
-                ),
-                None,
-            )
+            let mut file_state = state(
+                FileIndexStatus::Indexed,
+                diagnostics.tree_has_error,
+                diagnostics.used_tier0_fallback,
+                chunk_count,
+            );
+            if let Some(chunk) = chunks.first() {
+                file_state.language = chunk.language.to_string();
+            }
+            (chunks, refs, file_state, None)
         }
         Err(err) => {
             let refs = refs_override.unwrap_or_default();

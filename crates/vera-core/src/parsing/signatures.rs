@@ -93,7 +93,7 @@ fn extract_signature_inner(content: &str, lang: Language, file_path: &str) -> Op
 
     let mut parser = Parser::new();
     parser.set_language(&grammar).ok()?;
-    let tree = parser.parse(content, None)?;
+    let (tree, _) = super::parse_tree(&mut parser, content, file_path, lang)?;
 
     // Walk the tree looking for the first body node at depth <= 3.
     let mut cursor = tree.root_node().walk();

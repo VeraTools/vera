@@ -12,6 +12,7 @@
 //! - [`extractor`] — AST node extraction rules per language
 //! - [`chunker`] — Symbol-to-chunk conversion and large symbol splitting
 
+mod c_family;
 pub mod chunker;
 pub mod extractor;
 pub mod languages;
@@ -99,8 +100,7 @@ pub fn parse_file_with_diagnostics(
         .set_language(&grammar)
         .context("failed to load tree-sitter grammar")?;
 
-    let tree = parser
-        .parse(source, None)
+    let (tree, language) = parse_tree(&mut parser, source, file_path, language)
         .context("tree-sitter parsing returned None")?;
     let tree_has_error = tree.root_node().has_error();
 
@@ -125,6 +125,17 @@ pub fn parse_file_with_diagnostics(
             used_tier0_fallback,
         },
     ))
+}
+
+/// Parse with source-preserving recovery for C-family annotations and headers.
+pub(crate) fn parse_tree(
+    parser: &mut Parser,
+    source: &str,
+    file_path: &str,
+    language: Language,
+) -> Option<(tree_sitter::Tree, Language)> {
+    let tree = parser.parse(source, None)?;
+    c_family::recover(parser, source, file_path, language, tree)
 }
 
 fn uses_indexing_tier0_fallback(language: Language) -> bool {
@@ -198,8 +209,8 @@ pub fn parse_and_extract_references(
     if parser.set_language(&grammar).is_err() {
         return Vec::new();
     }
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
+    let (tree, language) = match parse_tree(&mut parser, source, "", language) {
+        Some(parsed) => parsed,
         None => return Vec::new(),
     };
     references::extract_references(&tree, source.as_bytes(), language)

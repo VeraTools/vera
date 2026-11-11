@@ -130,3 +130,29 @@ Haskell files are indexed as line windows, so they do not produce symbols or ent
 | JSON | `.json` | `json` | Whole file |
 | Markdown | `.md`, `.markdown` | `markdown` | Sections |
 | reStructuredText | `.rst`, `.rst.inc` | `rst` | Sections |
+
+## C and C++ parser recovery
+
+A `.h` file starts with the C grammar. If that parse has errors, Vera tries C++
+and selects it only when the whole file parses cleanly and contains a C++-specific
+construct (for example, a class, template, namespace, reference, or constructor
+initializer). Valid C headers remain C. Explicit `.c` files never switch to C++.
+The selected language is recorded in both chunks and index-health metadata.
+
+For erroneous C/C++ parses, Vera also retries a byte- and line-preserving view
+of the source for these common constructs:
+
+- `WINAPI`, `CALLBACK`, `APIENTRY`, `NTAPI`, `WINAPIV`, and `PASCAL` when the
+  grammar places the annotation in an error node.
+- Matched three-line `#ifdef __cplusplus` / `extern "C" {` / `#endif` wrappers
+  and their closing wrappers. `#if defined(__cplusplus)` and
+  `#if defined __cplusplus` are also recognized. The wrapper braces must match;
+  conditional branches containing declarations are not removed.
+
+Recovery is accepted only if the complete retry has no syntax errors. It does
+not expand macros, select build configurations, or replace compiler-based
+analysis. Other errors remain visible. Indexed content and line numbers always
+come from the original source, including annotations and linkage guards.
+
+Rebuild existing indexes with `vera index .` after upgrading to pick up parser
+changes in unchanged files. `vera update .` alone skips unchanged source files.

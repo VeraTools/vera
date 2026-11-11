@@ -1014,6 +1014,7 @@ pub(crate) fn parse_discovered_files_parallel(
 
             match parsed {
                 Ok((chunks, refs, diagnostics)) => {
+                    let language = chunks.first().map_or(language, |chunk| chunk.language);
                     let chunk_count = chunks.len() as u64;
                     let type_relations = parsing::type_relations::extract_type_relations(&chunks);
                     debug!(
