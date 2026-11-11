@@ -1,6 +1,6 @@
 # Vera documentation
 
-New to Vera? Start with the [README](../README.md) for what it is and a three-command quick start.
+New to Vera? Start with the [README](../README.md) for how it works with coding agents and a quick start.
 
 ## Get started
 
@@ -25,7 +25,7 @@ New to Vera? Start with the [README](../README.md) for what it is and a three-co
 ## How it is built and measured
 
 - [How Vera works](how-it-works.md): the search pipeline from parsing to ranking.
-- [Benchmarks](benchmarks.md): current results, the agent benchmark, and methodology.
+- [Benchmarks](benchmarks.md): agent context-efficiency results, retrieval comparisons, and methodology.
 - [Benchmark history](benchmarks-history.md): earlier results, model screenings, and rejected experiments.
 - [Architecture](architecture.md): crate and module layout, for contributors.
 - [Architecture decisions](adr/000-decision-summary.md): why each major component was chosen.

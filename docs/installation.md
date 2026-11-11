@@ -1,6 +1,6 @@
 # Installation
 
-The short version is in the [README quick start](../README.md#quick-start). This page covers every install method, backend setup, agent integration, updates, and removal.
+The short version is in the [README quick start](../README.md#quick-start). Setup splits into a one-time setup on your machine (binary, model backend, and global agent skill) and a lightweight per-repository step (`vera index .`). This page covers every install method, backend option, agent integration, updates, and removal.
 
 ## Install the binary
 
@@ -38,15 +38,15 @@ cp target/release/vera ~/.local/bin/
 
 ## Set up a backend
 
-Vera always indexes, stores, and searches on your machine. The backend only decides where the embedding model (and the optional reranker) runs.
+Parsing, SQLite + Tantivy + vector storage, BM25 keyword search, and code-aware ranking always run on your machine. Your backend choice only decides where embeddings (and optional reranking) run. Most setups start with either **local CPU (`--potion-code`)** for offline zero-cost inference or **API mode (`--api`)** with Qwen3 embeddings plus reranking for maximum retrieval quality and agent context savings.
 
-Run the guided setup:
+Run the guided wizard once on your machine:
 
 ```bash
 vera setup
 ```
 
-It asks for a backend, offers to install the agent skill, and offers to index the current directory. Local CPU is the default choice. To skip the wizard, pass a backend flag, and add `--index .` to index in the same step. In a terminal, setup then asks one confirmation; add `--yes` to skip it:
+It asks for a backend, offers to install the agent skill, and offers to index the current directory (defaulting to Yes for local backends and No for API mode). To skip the wizard, pass a backend flag directly, and add `--index .` if you want to index the current project in the same command (`--yes` skips the confirmation prompt):
 
 ```bash
 vera setup --potion-code --index .
@@ -58,11 +58,21 @@ vera setup --potion-code --index .
 vera setup --potion-code
 ```
 
-This downloads [`potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2), a 32 MB static embedding model for code. It runs on any supported machine, needs no GPU or ONNX Runtime, and works offline after the download. Use this unless you have a specific reason to pick something else.
+Downloads [`potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2), a ~32 MB static code embedding model from MinishLab. It runs on any supported CPU, needs no GPU, ONNX Runtime, or API account, indexes hundreds of files per second, and works offline after the initial download. Pick this when you want zero ongoing cost, offline operation, or local-only privacy.
+
+### API mode
+
+```bash
+vera setup --api
+```
+
+Sends embedding (and optional reranking) requests to any OpenAI-compatible endpoint while keeping indexing, storage, BM25 search, and code-aware ranking local. The first and recommended preset is Qwen (`qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b`) through OpenRouter, where one paid key covers both models; this pair achieved the highest retrieval score in our subset benchmark and a 48% prompt-token reduction in our agent benchmark. Presets for OpenAI, Jina, and Voyage are included, and custom endpoints let you mix providers (for example, OpenRouter for embeddings and SiliconFlow for lower-cost reranking) or point at a self-hosted [llama.cpp](llama-cpp-setup.md) server. Configuring a reranker enables reranking automatically.
+
+Provider details, privacy notes, and non-interactive setup are in [models: API mode](models.md#api-mode).
 
 ### Local GPU
 
-Jina ONNX backends run the [Jina v5 nano](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval) embedding model on your GPU. Vera downloads the model and the matching ONNX Runtime build.
+Jina ONNX backends run the [Jina v5 nano](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval) embedding model (or a custom ONNX model) on your GPU. Vera downloads the model and the matching ONNX Runtime build.
 
 | Hardware | Command |
 |---|---|
@@ -74,28 +84,18 @@ Jina ONNX backends run the [Jina v5 nano](https://huggingface.co/jinaai/jina-emb
 
 The ROCm and OpenVINO runtimes are installed with pip into a Python environment that Vera manages. A GPU is optional: in model screening, the default CPU model scored within about 0.01 nDCG@10 of Jina and indexed faster. See [models](models.md) for the comparison and for custom ONNX models.
 
-### API mode
-
-```bash
-vera setup --api
-```
-
-API mode sends embedding (and optionally reranking) requests to any OpenAI-compatible endpoint. The setup menu offers presets for Qwen through OpenRouter (recommended: one key covers embeddings and reranking, paid usage), OpenAI, Jina, and Voyage, plus a custom endpoint for anything else, including a local [llama.cpp](llama-cpp-setup.md) server. If you give setup a reranker, it turns reranking on.
-
-Provider details and non-interactive setup are in [models: API mode](models.md#api-mode).
-
 ## Index and search
 
-If you did not pass `--index .` during setup:
+Once your backend and global skill are set up, adding Vera to a new repository only requires indexing its root:
 
 ```bash
 vera index .
 vera search "authentication logic"
 ```
 
-Inside a git repository, Vera adds `.vera/` and its `.vera.*` siblings to the local exclude file when it can write it (the path printed by `git rev-parse --git-path info/exclude`, normally `.git/info/exclude`). This avoids a `.gitignore` change; if that file cannot be written, add those paths to `.gitignore` yourself.
+Inside a git repository, Vera automatically writes `.vera/` and its `.vera.*` working paths to the repository's local exclude file (the path printed by `git rev-parse --git-path info/exclude`, normally `.git/info/exclude`, including linked worktrees). You do not need to edit `.gitignore` unless that exclude file cannot be written or the directory is outside Git.
 
-If you search in a project without an index, an interactive `vera search` offers to create one. Scripts and `--json` searches get an error instead, so they can handle it.
+If you run `vera search` interactively in a directory with no index, Vera offers to create one. Non-interactive agent runs, scripts, and `--json` calls fail immediately with setup guidance instead of blocking on a prompt. Linked git worktrees without an index automatically seed one from an indexed main checkout and update changed files before answering.
 
 ## Check your setup
 
@@ -108,15 +108,15 @@ vera doctor --probe   # also loads the local backend to test it
 
 ## Set up agent skills
 
-The Vera skill teaches coding agents when to use Vera, how to phrase queries, and when plain `grep` is the better tool. It supports more than 30 agent clients, including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, GitHub Copilot, Windsurf, Cline, Roo Code, Junie, and Factory Droid.
+For coding agents that already have shell access (including Claude Code, OpenCode, Codex, Factory Droid, Cursor, Gemini CLI, GitHub Copilot, Windsurf, Cline, and Roo Code), the CLI paired with the Vera skill is the recommended integration. A skill exposes a short discovery description and loads detailed command instructions on demand, which can be lighter than exposing seven MCP tool schemas in clients that load MCP tool definitions upfront. It also teaches the agent how to choose between `vera search`, `vera structural`, `vera references`, `rg`, and direct file reads.
 
 ```bash
-vera agent install                                 # interactive: pick agents and scope
-vera agent install --client all                    # all agents, global scope
-vera agent install --client claude --scope project # one agent, this project only
+vera agent install                                 # interactive: pick agents and global/project scope
+vera agent install --client all                    # install globally across supported skill directories
+vera agent install --client claude --scope project # one client, this repository only
 ```
 
-The interactive picker preselects agents you already have installed. Press Space to toggle and Enter to continue. It only adds or updates the agents you select and never removes others. Use `vera agent status` to see what is installed, `vera agent remove` to uninstall, and `vera agent sync` to refresh outdated copies.
+Installing in `global` scope covers future repositories automatically; `vera agent install` writes to the shared `.agents/skills/` convention and client-specific skill directories without building an index. The interactive picker preselects clients where the Vera skill is already installed (Space toggles, Enter confirms) and never removes unselected ones. Use `vera agent status` to inspect installed locations, `vera agent remove` to uninstall, and `vera agent sync` to refresh outdated copies.
 
 In a terminal, the installer (with or without `--client`) also offers to add a short Vera section to your project's `AGENTS.md`, `CLAUDE.md`, `COPILOT.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules`. Vera keeps that section up to date between its `<!-- vera:begin -->` and `<!-- vera:end -->` markers and leaves the rest of the file alone.
 

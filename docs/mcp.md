@@ -2,7 +2,9 @@
 
 `vera mcp` runs a Model Context Protocol server over standard input and output, using JSON-RPC.
 
-For most coding agents, the CLI plus the skill installed by `vera agent install` works better than MCP (see [Installation](installation.md)). Use MCP when your client is built around MCP servers or your team shares one server config.
+For agents that already have shell access (such as Claude Code, OpenCode, Codex, Factory Droid, and Cursor), the CLI paired with the Vera skill (`vera agent install`) is usually a lighter fit: the skill exposes a short discovery summary up front, loads command details on demand rather than exposing seven MCP tool schemas in clients that load MCP definitions upfront, and guides when to use `vera search`, `vera structural`, `vera references`, `rg`, or direct file reads (see [Installation](installation.md#set-up-agent-skills)).
+
+`vera mcp` is built for clients centered on MCP tools, environments without general shell execution, and teams standardizing on shared MCP server configurations.
 
 ## Tools
 

@@ -1,18 +1,20 @@
 # Models and backends
 
-Vera needs an embedding model for semantic search. It can run one locally or call a hosted API. For keyword search only, skip the model with a [keyword-only index](features.md#keyword-only-index).
+Vera always parses files, stores indexes (`.vera/`), runs BM25 keyword search, and applies code-aware ranking locally on your machine. Your backend choice only determines where embeddings (and optional reranking) run. For keyword, regex, and structural search with no model at all, build a [keyword-only index](features.md#keyword-only-index).
 
 ## Which backend to use
 
-| Your situation | Backend | Setup command |
-|---|---|---|
-| Most users, any machine | Potion Code on CPU (the default) | `vera setup --potion-code` |
-| You have a supported GPU and want a neural local model | Jina ONNX on GPU | `vera setup --onnx-jina-cuda` (or another `--onnx-jina-*` flag) |
-| You want the highest measured quality, or a hosted model | API mode | `vera setup --api` |
+Most users should start with one of the first two rows below:
 
-Potion Code ([`minishlab/potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2)) is a static embedding model. It runs on the CPU of any supported machine, needs no GPU, no ONNX Runtime, and no API account, and works offline after the first download.
+| Recommended setup | Backend | Command | Tradeoffs |
+|---|---|---|---|
+| **Offline, zero API cost, any machine** | Potion Code on CPU (default) | `vera setup --potion-code` | Fast CPU indexing, ~32 MB one-time download, full local privacy, no GPU or ONNX Runtime needed. |
+| **Highest retrieval quality and agent context savings** | API mode (`qwen/qwen3-embedding-8b` + `qwen/qwen3-reranker-8b`) | `vera setup --api` | Highest measured nDCG@10 (`0.8647` vs `0.8538` on the 320-task slice) and `-48%` prompt tokens in the Flask agent benchmark. Requires network access, provider billing, and sending chunk text and queries to configured endpoints. |
+| **Local neural embeddings on a GPU** | Jina ONNX on GPU | `vera setup --onnx-jina-cuda` (or ROCm, CoreML, DirectML, OpenVINO) | Runs Jina v5 nano, CodeRankEmbed, or custom ONNX models locally on supported accelerators. |
 
-API mode works with any OpenAI-compatible endpoint. The recommended preset is Qwen through OpenRouter (`qwen/qwen3-embedding-8b` for embeddings and `qwen/qwen3-reranker-8b` for reranking, one key, paid usage). On the 320-task Semble subset, this pair with reranking scored 0.8647 nDCG@10 against 0.8538 for the local default, and Recall@1 rose by three percentage points. That was measured on the subset only; see [current results](benchmarks.md#current-results). API mode adds network latency and provider costs, and sends code to the provider (see [API mode](#api-mode)).
+Potion Code ([`minishlab/potion-code-16M-v2`](https://huggingface.co/minishlab/potion-code-16M-v2)) is a static code embedding model from MinishLab. It runs directly on any supported CPU and works offline once cached.
+
+API mode accepts any OpenAI-compatible `/embeddings` endpoint plus optional generic or Voyage-style `/rerank` endpoints. The built-in Qwen preset configures `qwen/qwen3-embedding-8b` and `qwen/qwen3-reranker-8b` through OpenRouter with a single API key, or you can point the embedding and reranker URLs at separate providers (for example, OpenRouter for embeddings and SiliconFlow for lower-cost reranking, or a local [llama.cpp](llama-cpp-setup.md) server). On the 320-task Semble subset, the Qwen pair scored `0.8647` nDCG@10 against `0.8538` for local Potion Code, lifting Recall@1 by three percentage points, and in the 4-arm Flask agent evaluation it cut total prompt tokens by 48% (see [benchmarks](benchmarks.md#evaluations-at-a-glance)).
 
 Local backends download their assets into Vera's data directory (see [Installation](installation.md)). Jina ONNX backends also download the matching ONNX Runtime library into `lib/`, and some GPU providers need drivers or Python packages; see [Troubleshooting](troubleshooting.md#onnx-runtime-or-gpu-backend-fails).
 
@@ -96,7 +98,7 @@ vera setup --api
 | Voyage AI | `voyage-code-3` | `rerank-2` | [Voyage AI](https://www.voyageai.com/) |
 | Custom | any OpenAI-compatible endpoint | optional | your provider |
 
-Check pricing, quotas, and model availability with the provider.
+Check pricing, quotas, and data retention policies with your chosen provider. Because embedding and reranker endpoints are configured independently, you can also split them across providers (for instance, using OpenRouter for `qwen/qwen3-embedding-8b` and SiliconFlow or another `/rerank` host for `Qwen/Qwen3-Reranker-8B`).
 
 For a reranker, setup also asks for the wire protocol (`auto`, `generic`, or `voyage`), an optional endpoint path, and an optional task instruction. The Qwen preset sets the `generic` protocol for you and skips these questions. Switching to Qwen clears endpoint and task overrides left over from another provider.
 

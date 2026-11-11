@@ -1,6 +1,6 @@
 # Benchmark history
 
-This page archives benchmark runs that are no longer the current comparison: older version snapshots, model screenings, rejected experiments, and benchmarks from before Vera 1.0. The numbers are kept as they were measured, so you can see how Vera got where it is and why some ideas were dropped. For current results, see [Benchmarks](benchmarks.md#current-results).
+This page archives benchmark runs that are no longer the main summary: older version snapshots, model screenings, rejected experiments, and benchmarks from before Vera 1.0. The numbers are kept as they were measured, so you can see how Vera got where it is and why some ideas were dropped. For the main benchmark overview, see [Benchmarks](benchmarks.md#evaluations-at-a-glance).
 
 A few terms used below:
 
@@ -239,7 +239,7 @@ The first two runs (claude-opus-5 and kimi-k3, medium reasoning effort) compared
 
 The input-token column counts only tokens that were not served from cache; for claude-opus-5 nearly everything was a cache read, which is why its numbers are so small. On that uncached count, kimi-k3 used 17% fewer tokens with Vera (230.6k vs 278.0k). On total prompt tokens (uncached input plus cache reads, the measure used in the four-arm table below), kimi-k3 used 15% more with Vera (3.21M vs 2.78M), with two questions (q09 and q10) causing all of the overrun, and claude-opus-5 used 58% more (4.94M vs 3.13M; lower on only 3 of 10 questions). Both runs used an older binary and an earlier integration (the skill only, with no `AGENTS.md` snippet and no isolated agent home directory), so they say nothing about the current setup. Treat them as history, not as evidence across models.
 
-A later four-arm run with GLM-5.3 (high reasoning effort) added the Qwen and Semble arms. At that effort level GLM-5.3 answers every question correctly with grep alone, so all four arms scored 10.0 on every valid question and the score cannot tell them apart. What does differ is how much context each arm used and how often the agent called the search tool. Prompt tokens here are uncached input plus cache reads, which this setup reports separately:
+A later four-arm run with GLM-5.3 (high reasoning effort, 40 sessions totaling ~65.8M prompt tokens and ~29.8 hours of wall time) added the Qwen and Semble arms, isolated each session via `FACTORY_HOME_OVERRIDE` and `--disable-builtin-skills`, and included the verbatim `AGENTS.md` routing snippet from `vera agent install` on the Vera arms alongside a CLI `AGENTS.md` guide on the Semble arm. (Earlier attempts while building the four-arm harness uncovered setup bugs such as a fresh `VERA_HOME` leaving the Qwen reranker off, missing `AGENTS.md` parity, and rotated auth credentials; affected sweeps were discarded and re-run cleanly.) At high reasoning effort GLM-5.3 answers every question correctly with grep alone, so all four arms scored 10.0 on every question and accuracy cannot tell them apart. What differs is how much context each arm used and how often the agent called the search tool. Prompt tokens here are uncached input plus cache reads:
 
 | Arm | Score | Tool calls | Prompt tokens | Vera/Semble activations | Wall |
 |-----|-------|------------|---------------|-------------------------|------|
@@ -460,5 +460,5 @@ From the same benchmark:
 
 ## Related docs
 
-- [Current benchmark results](benchmarks.md#current-results)
+- [Benchmarks overview](benchmarks.md#evaluations-at-a-glance)
 - [Models and backends](models.md)

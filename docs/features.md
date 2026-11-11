@@ -228,17 +228,17 @@ Search output has no length limit by default. Set `retrieval.max_output_chars` (
 
 ## Agent integration
 
-- **Skill files.** `vera agent install` installs a Vera skill for more than 30 agent clients, globally or per project. It tells the agent which Vera command fits which question and when to use `grep` instead. See [installation](installation.md#set-up-agent-skills).
-- **Project instructions.** The installer can add a short Vera section to `AGENTS.md`, `CLAUDE.md`, and similar files, kept current between `<!-- vera:begin -->` and `<!-- vera:end -->` markers.
-- **Keeping skills current.** `vera agent sync` refreshes outdated skill copies and project sections. Upgrades do this on their own.
-- **MCP server.** `vera mcp` exposes search, regex, structural, references, overview, explain-path, and stats tools to MCP clients, indexing on first use and keeping the index current. See [MCP](mcp.md).
+- **Skill files (recommended for shell-capable agents).** `vera agent install` writes the Vera skill to `.agents/skills/` and client-specific skill directories, globally or per project. Agents see a short discovery summary and load full command instructions on demand, including routing rules for when `vera search`, `vera structural`, `vera references`, `rg`, or direct file reads fit best. See [installation](installation.md#set-up-agent-skills).
+- **Project instructions.** In a terminal, the installer can maintain a short Vera routing block in a repository's `AGENTS.md`, `CLAUDE.md`, or editor rules file between `<!-- vera:begin -->` and `<!-- vera:end -->` markers.
+- **Keeping skills current.** `vera agent sync` refreshes outdated skill copies and managed project sections. Upgrades run this automatically.
+- **MCP server.** `vera mcp` exposes `search_code`, `regex_search`, `structural_search`, `find_references`, `get_overview`, `explain_path`, and `get_stats` over stdio, auto-indexing on first search and watching for file changes while running. See [MCP](mcp.md).
 
 ## Models and backends
 
-- **Default.** Potion Code runs on CPU and needs only a one-time 32 MB download.
-- **Local GPU.** Jina ONNX backends for CUDA, ROCm, CoreML, DirectML, and OpenVINO. Batch sizes adapt to sequence length and available memory, and `--low-vram` forces conservative settings on small GPUs.
-- **API.** Any OpenAI-compatible embedding endpoint, with optional reranking through generic or Voyage-style rerank APIs.
-- **Switching.** `vera backend` changes the backend without rerunning the full setup.
+- **Local CPU (default).** Potion Code (`minishlab/potion-code-16M-v2`) runs on any supported CPU after a one-time ~32 MB download, with no GPU, ONNX Runtime, or API account.
+- **API mode.** Any OpenAI-compatible embedding endpoint plus optional generic or Voyage-style reranking. Pairing `qwen/qwen3-embedding-8b` and `qwen/qwen3-reranker-8b` (built-in OpenRouter preset, or separate OpenAI-compatible hosts) produced our highest measured retrieval and agent context-efficiency results.
+- **Local GPU / custom ONNX.** Jina ONNX backends for CUDA, ROCm, CoreML, DirectML, and OpenVINO, plus custom Hugging Face or local ONNX models. Batch sizes adapt to sequence length and memory; `--low-vram` forces conservative settings on small GPUs.
+- **Switching.** `vera backend` changes the backend without rerunning the full setup wizard.
 
 Details and measurements: [models and backends](models.md).
 
