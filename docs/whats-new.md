@@ -2,6 +2,10 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## Unreleased
+
+- API embedding batches that exceed a provider's token quota are split into smaller requests instead of repeatedly retrying the oversized batch. Single inputs still retry normally, and retries honor delays in provider error messages when no `Retry-After` header is present.
+
 ## v2.4.0
 
 - Building from source needs Rust 1.92 or later (was 1.88).

@@ -82,6 +82,58 @@ fn retry_after_parses_seconds_dates_and_invalid_values() {
 }
 
 #[test]
+fn retry_after_body_parses_provider_delays() {
+    for (body, expected) in [
+        (NEBIUS_TOKEN_QUOTA_BODY, Some(Duration::from_secs(2))),
+        (
+            "Please try again in 1.5s.",
+            Some(Duration::from_millis(1500)),
+        ),
+        ("Please try again in 20ms.", Some(Duration::from_millis(20))),
+        ("Please try again in 2s.", Some(Duration::from_secs(2))),
+        ("Retry the request after 0 sec.", Some(Duration::ZERO)),
+        ("rate limit exceeded", None),
+        ("try again in -1s", None),
+        ("try again in 1.5 minutes", None),
+        ("retry the request after 18446744073709551616 sec", None),
+    ] {
+        assert_eq!(parse_retry_after_body(body), expected, "{body}");
+    }
+}
+
+#[test]
+fn token_quota_classification_requires_a_rate_limit_and_explicit_token_quota() {
+    for message in [
+        "You exceeded your tokens quota for `Qwen/Qwen3-Embedding-8B`.",
+        "Rate limit reached on tokens per min (TPM).",
+        "Rate limit reached on TOKENS PER MINUTE.",
+    ] {
+        let error = EmbeddingError::RateLimitError {
+            message: message.into(),
+            retry_after: None,
+        };
+        assert!(is_token_quota_error(&error));
+        assert!(is_retryable_error(&error));
+        assert!(is_transient_batch_error(&error));
+        assert!(!is_token_quota_error(&EmbeddingError::ApiError {
+            status: 400,
+            message: message.into(),
+        }));
+    }
+    for message in [
+        "rate limit reached on requests per min",
+        "invalid token",
+        "maximum input length is 8192 tokens",
+        "rate limit exceeded",
+    ] {
+        assert!(!is_token_quota_error(&EmbeddingError::RateLimitError {
+            message: message.into(),
+            retry_after: None,
+        }));
+    }
+}
+
+#[test]
 fn retry_classification_excludes_permanent_and_context_errors() {
     for status in [408, 500, 502, 503, 504, 599] {
         assert!(is_retryable_error(&EmbeddingError::ApiError {
@@ -299,6 +351,83 @@ fn assert_output_order(output: &[(String, Vec<f32>)], chunks: &[Chunk]) {
         })
         .collect();
     assert_eq!(output, expected);
+}
+
+const NEBIUS_TOKEN_QUOTA_BODY: &str = r#"{"error":{"message":"HTTP 429: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You exceeded your tokens quota for `Qwen/Qwen3-Embedding-8B`. Retry the request after 2 sec.\",\"code\":\"rate_limit_exceeded\"}}"}}"#;
+
+#[tokio::test]
+async fn token_quota_batches_split_without_retrying_oversized_requests() {
+    for limit in [1, 2, 4] {
+        let server = MockApi::start(move |input, _| {
+            if input.len() > limit {
+                Reply::Error {
+                    status: "429 Too Many Requests",
+                    retry_after: None,
+                    body: NEBIUS_TOKEN_QUOTA_BODY,
+                }
+            } else {
+                Reply::Success
+            }
+        })
+        .await;
+        let provider = server.provider(3);
+        let mut chunks = chunks(8);
+        chunks[0].content.push_str(" // longest content");
+        let output = embed_chunks_concurrent(&provider, &chunks, 8, 1, 0)
+            .await
+            .unwrap();
+        assert_output_order(&output, &chunks);
+        let inputs = server.inputs();
+        assert_eq!(inputs[0].len(), 8);
+        assert_eq!(inputs.len(), 2 * (8 / limit) - 1);
+        for oversized in inputs.iter().filter(|input| input.len() > limit) {
+            assert_eq!(inputs.iter().filter(|input| *input == oversized).count(), 1);
+        }
+        assert_eq!(
+            provider.stats().unwrap().snapshot(),
+            EmbeddingRequestStats {
+                requests: inputs.len() as u64,
+                ..Default::default()
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_input_token_quota_errors_retry_and_honor_body_delay() {
+    for body in [
+        NEBIUS_TOKEN_QUOTA_BODY,
+        "Rate limit reached on tokens per min (TPM). Please try again in 1.5s.",
+    ] {
+        let server = MockApi::start(move |_, attempt| {
+            if attempt == 1 {
+                Reply::Error {
+                    status: "429 Too Many Requests",
+                    retry_after: None,
+                    body,
+                }
+            } else {
+                Reply::Success
+            }
+        })
+        .await;
+        let provider = server.provider(0);
+        assert_eq!(
+            provider.embed_batch(&["input".into()]).await.unwrap(),
+            vec![vector_for("input")]
+        );
+        assert_eq!(server.inputs(), vec![vec!["input".to_string()]; 2]);
+        let records = server.requests.lock().unwrap();
+        assert!(records[1].at.duration_since(records[0].at) >= small_policy().max_retry_after);
+        assert_eq!(
+            provider.stats().unwrap().snapshot(),
+            EmbeddingRequestStats {
+                requests: 2,
+                retries: 1,
+                ..Default::default()
+            }
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
