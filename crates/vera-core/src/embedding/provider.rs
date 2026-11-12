@@ -1259,8 +1259,10 @@ fn split_embedding_batch(
 }
 
 /// Embed texts in input order, in batches no larger than the provider allows,
-/// splitting them further on context-size or recognized token-quota errors. A single text over the context limit fails rather than
-/// being truncated, so callers never get a vector for text they did not send.
+/// splitting them further on context-size or recognized token-quota errors.
+/// When the provider rejects a single text as over its context limit, the
+/// error is returned instead of retrying a shortened text. Providers that
+/// truncate input themselves, such as local models, still do so.
 ///
 /// Texts are sent without adding query or document prefixes. Cancellation stops
 /// the active request and any remaining sub-batches.
