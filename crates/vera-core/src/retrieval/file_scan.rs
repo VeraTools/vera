@@ -16,7 +16,7 @@ pub(crate) struct IndexedLanguages {
 impl IndexedLanguages {
     pub(crate) fn load(store: &MetadataStore) -> Result<Self> {
         let cpp_headers = store
-            .indexed_cpp_files()?
+            .indexed_cpp_headers()?
             .into_iter()
             .filter(|path| language_for_path(path) == Language::C)
             .collect();
