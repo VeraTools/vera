@@ -1258,8 +1258,8 @@ fn split_embedding_batch(
     pending.push(batch);
 }
 
-/// Embed texts in input order, splitting batches on context-size or recognized
-/// token-quota errors. A single text over the context limit fails rather than
+/// Embed texts in input order, in batches no larger than the provider allows,
+/// splitting them further on context-size or recognized token-quota errors. A single text over the context limit fails rather than
 /// being truncated, so callers never get a vector for text they did not send.
 ///
 /// Texts are sent without adding query or document prefixes. Cancellation stops
@@ -1273,7 +1273,7 @@ pub async fn embed_texts_resilient<P: EmbeddingProvider>(
         return Ok(Vec::new());
     }
 
-    let mut items = texts
+    let items: Vec<_> = texts
         .iter()
         .enumerate()
         .map(|(original_index, text)| EmbeddingBatchItem {
@@ -1283,7 +1283,10 @@ pub async fn embed_texts_resilient<P: EmbeddingProvider>(
         })
         .collect();
     let mut completed = Vec::with_capacity(texts.len());
-    embed_batch_resilient(provider, &mut items, &mut completed, cancel, false).await?;
+    for batch in items.chunks(effective_batch_size(provider, texts.len())) {
+        let mut batch = batch.to_vec();
+        embed_batch_resilient(provider, &mut batch, &mut completed, cancel, false).await?;
+    }
     completed.sort_by_key(|(index, _, _)| *index);
     Ok(completed.into_iter().map(|(_, _, vector)| vector).collect())
 }

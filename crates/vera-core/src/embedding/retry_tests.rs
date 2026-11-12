@@ -416,6 +416,47 @@ async fn resilient_texts_preserve_order_across_token_quota_and_context_splits() 
 }
 
 #[tokio::test]
+async fn resilient_texts_respect_the_provider_batch_limit() {
+    struct LimitedProvider(Mutex<Vec<Vec<String>>>);
+
+    impl EmbeddingProvider for LimitedProvider {
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            self.0.lock().unwrap().push(texts.to_vec());
+            Ok(texts.iter().map(|text| vector_for(text)).collect())
+        }
+
+        fn expected_dim(&self) -> Option<usize> {
+            Some(2)
+        }
+
+        fn max_batch_size(&self) -> Option<usize> {
+            Some(2)
+        }
+    }
+
+    let provider = LimitedProvider(Mutex::new(Vec::new()));
+    let texts: Vec<String> = (0..5).map(|index| format!("text {index}")).collect();
+    let output = embed_texts_resilient(&provider, &texts, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        output,
+        texts
+            .iter()
+            .map(|text| vector_for(text))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        *provider.0.lock().unwrap(),
+        vec![
+            texts[..2].to_vec(),
+            texts[2..4].to_vec(),
+            texts[4..].to_vec()
+        ]
+    );
+}
+
+#[tokio::test]
 async fn resilient_texts_retry_tpm_limits_without_splitting_and_honor_body_delay() {
     let server = MockApi::start(|_, attempt| {
         if attempt == 1 {
