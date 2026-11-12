@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::corpus::{ContentClass, classify_content};
 use crate::path_containment::canonical_project_root;
 use crate::retrieval::file_scan::{
-    allows_class, language_for_path, line_context_snippet, symbol_for_line,
+    IndexedLanguages, allows_class, line_context_snippet, symbol_for_line,
 };
 use crate::types::{SearchFilters, SearchResult};
 
@@ -39,6 +39,7 @@ pub fn search_callers_through(
     }
 
     let store = super::open_search_metadata(index_dir)?;
+    let languages = IndexedLanguages::load(&store)?;
     let repo_root = canonical_project_root(index_dir)?;
     let root_dir = crate::discovery::open_root_dir(&repo_root)?;
     let max_file_size_bytes = super::configured_max_file_size_bytes(&store);
@@ -51,7 +52,7 @@ pub fn search_callers_through(
             break;
         }
 
-        let language = language_for_path(&caller.file_path);
+        let language = languages.language(&caller.file_path);
         if !filters.matches_file(&caller.file_path, language) {
             continue;
         }
@@ -140,6 +141,33 @@ mod tests {
         lines.push("  return MixerConsole({});".to_string());
         lines.push("}".to_string());
         lines.join("\n")
+    }
+
+    #[tokio::test]
+    async fn recovered_cpp_header_uses_indexed_language_in_file_scans() {
+        let source = "template<class T> class Box { public: int run() { return helper(); } };\n";
+        let dir = index_repo(&[("box.h", source)]).await;
+        let index_dir = crate::indexing::index_dir(dir.path());
+
+        for (language, expected_count) in [("cpp", 1), ("c", 0)] {
+            let filters = SearchFilters {
+                language: Some(language.to_string()),
+                ..Default::default()
+            };
+            let grep = crate::retrieval::regex_search::search_regex(
+                &index_dir, "Box", 10, false, 0, &filters,
+            )
+            .unwrap();
+            let callers = search_callers(&index_dir, "helper", 10, &filters).unwrap();
+
+            for results in [grep, callers] {
+                assert_eq!(results.len(), expected_count, "{language}");
+                for result in results {
+                    assert_eq!(result.file_path, "box.h");
+                    assert_eq!(result.language, crate::types::Language::Cpp);
+                }
+            }
+        }
     }
 
     #[tokio::test]

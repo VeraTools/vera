@@ -1,9 +1,36 @@
+use std::collections::HashSet;
 use std::path::Path;
 
+use anyhow::Result;
+
 use crate::corpus::{ContentClass, classify_path};
+use crate::storage::metadata::MetadataStore;
 use crate::types::{Chunk, Language, SearchFilters, SymbolType};
 
 use super::query_utils::path_depth;
+
+pub(crate) struct IndexedLanguages {
+    cpp_headers: HashSet<String>,
+}
+
+impl IndexedLanguages {
+    pub(crate) fn load(store: &MetadataStore) -> Result<Self> {
+        let cpp_headers = store
+            .indexed_cpp_headers()?
+            .into_iter()
+            .filter(|path| language_for_path(path) == Language::C)
+            .collect();
+        Ok(Self { cpp_headers })
+    }
+
+    pub(crate) fn language(&self, file_path: &str) -> Language {
+        if self.cpp_headers.contains(file_path) {
+            Language::Cpp
+        } else {
+            language_for_path(file_path)
+        }
+    }
+}
 
 pub(crate) fn language_for_path(file_path: &str) -> Language {
     let path = Path::new(file_path);
@@ -61,14 +88,18 @@ pub(crate) fn file_scan_priority(class: ContentClass, filters: &SearchFilters) -
 
 /// Sort files so high-priority classes (per active scope filters) and
 /// shallower paths are scanned first; ties break by path for determinism.
-pub(crate) fn sort_files_by_scan_priority(files: &mut [String], filters: &SearchFilters) {
+pub(crate) fn sort_files_by_scan_priority(
+    files: &mut [String],
+    filters: &SearchFilters,
+    languages: &IndexedLanguages,
+) {
     files.sort_by(|left, right| {
         let left_key = (
-            file_scan_priority(classify_path(left, language_for_path(left)), filters),
+            file_scan_priority(classify_path(left, languages.language(left)), filters),
             path_depth(left),
         );
         let right_key = (
-            file_scan_priority(classify_path(right, language_for_path(right)), filters),
+            file_scan_priority(classify_path(right, languages.language(right)), filters),
             path_depth(right),
         );
         left_key.cmp(&right_key).then_with(|| left.cmp(right))

@@ -12,6 +12,7 @@
 //! - [`extractor`] — AST node extraction rules per language
 //! - [`chunker`] — Symbol-to-chunk conversion and large symbol splitting
 
+mod c_family;
 pub mod chunker;
 pub mod extractor;
 pub mod languages;
@@ -99,8 +100,7 @@ pub fn parse_file_with_diagnostics(
         .set_language(&grammar)
         .context("failed to load tree-sitter grammar")?;
 
-    let tree = parser
-        .parse(source, None)
+    let (tree, language) = parse_tree(&mut parser, source, file_path, language)
         .context("tree-sitter parsing returned None")?;
     let tree_has_error = tree.root_node().has_error();
 
@@ -125,6 +125,17 @@ pub fn parse_file_with_diagnostics(
             used_tier0_fallback,
         },
     ))
+}
+
+/// Parse with source-preserving recovery for C-family annotations and headers.
+pub(crate) fn parse_tree(
+    parser: &mut Parser,
+    source: &str,
+    file_path: &str,
+    language: Language,
+) -> Option<(tree_sitter::Tree, Language)> {
+    let tree = parser.parse(source, None)?;
+    c_family::recover(parser, source, file_path, language, tree)
 }
 
 fn uses_indexing_tier0_fallback(language: Language) -> bool {
@@ -185,12 +196,24 @@ fn parse_rst_section_chunks(
 /// Parse a source file and extract call-site references only.
 ///
 /// Only works for languages with tree-sitter grammars. Returns an empty
-/// vec for unsupported languages or parse failures.
+/// vec for unsupported languages or parse failures. Without a path, ambiguous
+/// `.h` files cannot be distinguished from explicit C sources; use
+/// [`parse_and_extract_references_for_path`] when the file path is available.
 pub fn parse_and_extract_references(
     source: &str,
     language: Language,
 ) -> Vec<references::RawReference> {
-    let grammar = match languages::tree_sitter_grammar(language) {
+    parse_and_extract_references_for_path(source, "", language)
+}
+
+/// Extract call-site references using the same path-aware grammar selection
+/// and C/C++ header recovery as indexing. Prefer this when a path is known.
+pub fn parse_and_extract_references_for_path(
+    source: &str,
+    file_path: &str,
+    language: Language,
+) -> Vec<references::RawReference> {
+    let grammar = match languages::tree_sitter_grammar_for_path(language, file_path) {
         Some(g) => g,
         None => return Vec::new(),
     };
@@ -198,8 +221,8 @@ pub fn parse_and_extract_references(
     if parser.set_language(&grammar).is_err() {
         return Vec::new();
     }
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
+    let (tree, language) = match parse_tree(&mut parser, source, file_path, language) {
+        Some(parsed) => parsed,
         None => return Vec::new(),
     };
     references::extract_references(&tree, source.as_bytes(), language)

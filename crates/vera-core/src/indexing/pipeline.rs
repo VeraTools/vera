@@ -976,7 +976,11 @@ pub(crate) fn parse_discovered_files_parallel(
             // update and is re-parsed forever.
             let hash;
             let parsed = if language == Language::Rst {
-                let refs = parsing::parse_and_extract_references(&source, language);
+                let refs = parsing::parse_and_extract_references_for_path(
+                    &source,
+                    &file.relative_path,
+                    language,
+                );
                 let normalized_source = match parsing::sphinx::preprocess_rst_with_limit(
                     &source,
                     &file.absolute_path,
@@ -1014,6 +1018,7 @@ pub(crate) fn parse_discovered_files_parallel(
 
             match parsed {
                 Ok((chunks, refs, diagnostics)) => {
+                    let language = chunks.first().map_or(language, |chunk| chunk.language);
                     let chunk_count = chunks.len() as u64;
                     let type_relations = parsing::type_relations::extract_type_relations(&chunks);
                     debug!(
