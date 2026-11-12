@@ -2,9 +2,11 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
-## Unreleased
+## v2.4.1
 
-- API embedding batches receiving recognized token-quota 429 messages are split into smaller requests, including through `vera serve`, instead of repeatedly retrying the oversized batch. Single inputs and tokens-per-minute limits still retry normally. When no `Retry-After` header is present, retries honor delays read from provider messages, capped at 60 seconds just like `Retry-After`.
+- Indexing with an API embedding provider no longer fails when a provider rejects large requests as over its token quota. OpenRouter sends `qwen/qwen3-embedding-8b` to Nebius, which answers any request above roughly 50,000–65,000 tokens with HTTP 429 "You exceeded your tokens quota" every time. Vera now splits such a batch into smaller requests instead of retrying it until the index fails, in indexing and in `vera serve`. On a test repository of large functions, an index that failed after 8 minutes now finishes in under 2. Tokens-per-minute limits and single inputs still retry normally, and when there is no `Retry-After` header Vera waits for the delay named in the error message, capped at 60 seconds.
+- C and C++ indexing recovers more valid code that tree-sitter misparses: `.h` files that contain C++ (indexed as C++ when a C++ parse is clean), Windows calling conventions such as `WINAPI` and `CALLBACK`, and the usual `#ifdef __cplusplus` / `extern "C" {` wrappers. Text, line numbers and symbol names stay as written. Grep, callers, structural and type searches use the recovered language for `--lang`. Run `vera index .` to apply this to unchanged files; `vera update .` skips them. Thanks to @DanielTillett. See [C and C++ parser recovery](supported-languages.md#c-and-c-parser-recovery).
+- rustix 1.1.6 (RUSTSEC-2026-0486).
 
 ## v2.4.0
 
