@@ -2,6 +2,12 @@
 
 Release notes from v1.0 onward, newest first. Current benchmark results are on the [benchmarks page](benchmarks.md), and every command is described in the [feature guide](features.md). Upgrading from 1.x? Read the [v2 migration guide](migration-v2.md) first.
 
+## v2.4.1
+
+- Indexing with an API embedding provider no longer fails when the provider rejects a large request with a token-quota 429. OpenRouter sends `qwen/qwen3-embedding-8b` to Nebius, which returned "You exceeded your tokens quota" for every large batch that Vera retried, so indexing a repository with large functions failed. Vera now splits such a batch into smaller requests, in indexing and in `vera serve`. Tokens-per-minute limits and single inputs still retry normally, and when there is no `Retry-After` header Vera waits for the delay named in the error message, capped at 60 seconds.
+- C and C++ indexing recovers more valid code that tree-sitter misparses: C++ in `.h` files, Windows calling conventions such as `WINAPI`, and `extern "C"` wrappers. `--lang` filters in grep, callers, structural and type searches follow the recovered language. Run `vera index .` to apply this to unchanged files. Thanks to @DanielTillett. See [C and C++ parser recovery](supported-languages.md#c-and-c-parser-recovery).
+- rustix 1.1.6 (RUSTSEC-2026-0486).
+
 ## v2.4.0
 
 - Building from source needs Rust 1.92 or later (was 1.88).

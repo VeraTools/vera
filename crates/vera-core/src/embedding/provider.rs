@@ -489,6 +489,25 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
         .map(|date| date.duration_since(now).unwrap_or_default())
 }
 
+fn parse_retry_after_body(body: &str) -> Option<Duration> {
+    static NEBIUS_RE: OnceLock<Regex> = OnceLock::new();
+    static OPENAI_RE: OnceLock<Regex> = OnceLock::new();
+    let lower = body.to_ascii_lowercase();
+    let nebius_re =
+        NEBIUS_RE.get_or_init(|| Regex::new(r"retry the request after ([0-9]+) sec\b").unwrap());
+    if let Some(caps) = nebius_re.captures(&lower) {
+        return caps[1].parse().ok().map(Duration::from_secs);
+    }
+    let openai_re = OPENAI_RE
+        .get_or_init(|| Regex::new(r"try again in ([0-9]+(?:\.[0-9]+)?)(ms|s)\b").unwrap());
+    let caps = openai_re.captures(&lower)?;
+    let mut seconds = caps[1].parse::<f64>().ok()?;
+    if &caps[2] == "ms" {
+        seconds /= 1000.0;
+    }
+    Duration::try_from_secs_f64(seconds).ok()
+}
+
 /// OpenAI-compatible embedding provider.
 ///
 /// Works with any API that implements the OpenAI `/v1/embeddings` endpoint,
@@ -565,8 +584,9 @@ impl OpenAiProvider {
                 Err(e) => {
                     // A timed-out request may still be running behind a proxy,
                     // so replaying it can create an abandoned-work queue.
-                    // Context-size errors are handled by embed_batch_resilient.
-                    if !is_retryable_error(&e) {
+                    // Context-size and multi-input token-quota errors are
+                    // handled by embed_batch_resilient.
+                    if !is_retryable_error(&e) || (texts.len() > 1 && is_token_quota_error(&e)) {
                         return Err(e);
                     }
 
@@ -661,7 +681,7 @@ impl OpenAiProvider {
                 read_error_response_text(response, "failed to read rate limit response").await?;
             return Err(EmbeddingError::RateLimitError {
                 message: sanitize_error_body(&text),
-                retry_after,
+                retry_after: retry_after.or_else(|| parse_retry_after_body(&text)),
             });
         }
 
@@ -1021,6 +1041,14 @@ fn retry_limit_for_error(error: &EmbeddingError, configured_retries: u32) -> u32
     }
 }
 
+fn is_token_quota_error(error: &EmbeddingError) -> bool {
+    let EmbeddingError::RateLimitError { message, .. } = error else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    lower.contains("exceeded your tokens quota")
+}
+
 fn is_retryable_error(error: &EmbeddingError) -> bool {
     matches!(
         error,
@@ -1221,7 +1249,51 @@ fn shrink_text_for_context_limit(
     shrunk
 }
 
-/// Embed `items`, splitting batches that exceed the provider context.
+fn split_embedding_batch(
+    mut batch: Vec<EmbeddingBatchItem>,
+    pending: &mut Vec<Vec<EmbeddingBatchItem>>,
+) {
+    let second_half = batch.split_off(batch.len() / 2);
+    pending.push(second_half);
+    pending.push(batch);
+}
+
+/// Embed texts in input order, in batches no larger than the provider allows,
+/// splitting them further on context-size or recognized token-quota errors.
+/// When the provider rejects a single text as over its context limit, the
+/// error is returned instead of retrying a shortened text. Providers that
+/// truncate input themselves, such as local models, still do so.
+///
+/// Texts are sent without adding query or document prefixes. Cancellation stops
+/// the active request and any remaining sub-batches.
+pub async fn embed_texts_resilient<P: EmbeddingProvider>(
+    provider: &P,
+    texts: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let items: Vec<_> = texts
+        .iter()
+        .enumerate()
+        .map(|(original_index, text)| EmbeddingBatchItem {
+            original_index,
+            chunk_id: String::new(),
+            text: text.clone(),
+        })
+        .collect();
+    let mut completed = Vec::with_capacity(texts.len());
+    for batch in items.chunks(effective_batch_size(provider, texts.len())) {
+        let mut batch = batch.to_vec();
+        embed_batch_resilient(provider, &mut batch, &mut completed, cancel, false).await?;
+    }
+    completed.sort_by_key(|(index, _, _)| *index);
+    Ok(completed.into_iter().map(|(_, _, vector)| vector).collect())
+}
+
+/// Embed `items`, splitting batches that exceed the provider context or token quota.
 ///
 /// Finished vectors are appended to `completed` as they arrive. On failure,
 /// `items` holds every item not yet embedded, so callers can keep the finished
@@ -1231,6 +1303,7 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
     items: &mut Vec<EmbeddingBatchItem>,
     completed: &mut Vec<(usize, String, Vec<f32>)>,
     cancel: &CancellationToken,
+    truncate: bool,
 ) -> Result<(), EmbeddingError> {
     let mut pending = vec![std::mem::take(items)];
 
@@ -1261,19 +1334,16 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
             }
         };
 
-        if let Some(info) = context_size_info(&error) {
-            if batch.len() > 1 {
-                let mid = batch.len() / 2;
-                debug!(
-                    batch_size = batch.len(),
-                    token_limit = info.max_tokens,
-                    "embedding batch exceeded provider context limit, retrying in smaller batches"
-                );
-                pending.push(batch[mid..].to_vec());
-                pending.push(batch[..mid].to_vec());
-                continue;
-            }
+        if batch.len() > 1 && (is_token_quota_error(&error) || is_context_size_error(&error)) {
+            debug!(
+                batch_size = batch.len(),
+                "embedding batch exceeded the provider's context or token quota, retrying in smaller batches"
+            );
+            split_embedding_batch(batch, &mut pending);
+            continue;
+        }
 
+        if let Some(info) = context_size_info(&error).filter(|_| truncate) {
             let item = &batch[0];
             let shrunk_text =
                 shrink_text_for_context_limit(&item.text, info.max_tokens, info.input_tokens);
@@ -1449,7 +1519,7 @@ where
                 }
             }
             debug!(batch = batch.index + 1, total_batches, "embedding batch");
-            embed_batch_resilient(provider, &mut batch.items, &mut embedded, cancel).await
+            embed_batch_resilient(provider, &mut batch.items, &mut embedded, cancel, true).await
         }
         .await;
         (batch, embedded, result)
@@ -1789,7 +1859,8 @@ mod tests {
                 &ShortProvider,
                 &mut items,
                 &mut completed,
-                &CancellationToken::new()
+                &CancellationToken::new(),
+                true,
             )
             .await,
             Err(EmbeddingError::ResponseError { .. })

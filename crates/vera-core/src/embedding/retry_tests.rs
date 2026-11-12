@@ -82,6 +82,71 @@ fn retry_after_parses_seconds_dates_and_invalid_values() {
 }
 
 #[test]
+fn retry_after_body_parses_provider_delays() {
+    for (body, expected) in [
+        (NEBIUS_TOKEN_QUOTA_BODY, Some(Duration::from_secs(2))),
+        (OPENAI_TPM_BODY, Some(Duration::from_millis(1500))),
+        (
+            "Please try again in 1.5s.",
+            Some(Duration::from_millis(1500)),
+        ),
+        ("Please try again in 20ms.", Some(Duration::from_millis(20))),
+        ("Please try again in 2s.", Some(Duration::from_secs(2))),
+        ("Retry the request after 0 sec.", Some(Duration::ZERO)),
+        ("rate limit exceeded", None),
+        ("try again in -1s", None),
+        ("try again in 1.5 minutes", None),
+        ("retry the request after 18446744073709551616 sec", None),
+    ] {
+        assert_eq!(parse_retry_after_body(body), expected, "{body}");
+    }
+}
+
+#[test]
+fn token_quota_classification_requires_a_rate_limit_and_explicit_token_quota() {
+    for message in [
+        "You exceeded your tokens quota for `Qwen/Qwen3-Embedding-8B`.",
+        "YOU EXCEEDED YOUR TOKENS QUOTA.",
+    ] {
+        let error = EmbeddingError::RateLimitError {
+            message: message.into(),
+            retry_after: None,
+        };
+        assert!(is_token_quota_error(&error));
+        assert!(is_retryable_error(&error));
+        assert!(is_transient_batch_error(&error));
+        assert!(!is_token_quota_error(&EmbeddingError::ApiError {
+            status: 400,
+            message: message.into(),
+        }));
+    }
+    for message in [
+        OPENAI_TPM_BODY,
+        "Rate limit reached on TOKENS PER MINUTE.",
+        "rate limit reached on requests per min",
+        "invalid token",
+        "maximum input length is 8192 tokens",
+        "rate limit exceeded",
+    ] {
+        assert!(!is_token_quota_error(&EmbeddingError::RateLimitError {
+            message: message.into(),
+            retry_after: None,
+        }));
+    }
+    let tpm = EmbeddingError::RateLimitError {
+        message: OPENAI_TPM_BODY.into(),
+        retry_after: parse_retry_after_body(OPENAI_TPM_BODY),
+    };
+    assert!(is_retryable_error(&tpm));
+    assert!(is_transient_batch_error(&tpm));
+    assert!(matches!(
+        tpm,
+        EmbeddingError::RateLimitError { retry_after: Some(delay), .. }
+        if delay == Duration::from_millis(1500)
+    ));
+}
+
+#[test]
 fn retry_classification_excludes_permanent_and_context_errors() {
     for status in [408, 500, 502, 503, 504, 599] {
         assert!(is_retryable_error(&EmbeddingError::ApiError {
@@ -299,6 +364,232 @@ fn assert_output_order(output: &[(String, Vec<f32>)], chunks: &[Chunk]) {
         })
         .collect();
     assert_eq!(output, expected);
+}
+
+const NEBIUS_TOKEN_QUOTA_BODY: &str = r#"{"error":{"message":"HTTP 429: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You exceeded your tokens quota for `Qwen/Qwen3-Embedding-8B`. Retry the request after 2 sec.\",\"code\":\"rate_limit_exceeded\"}}"}}"#;
+const OPENAI_TPM_BODY: &str = "Rate limit reached for test-model on tokens per min (TPM): Limit 1000000, Used 999000, Requested 5000. Please try again in 1.5s.";
+
+#[tokio::test]
+async fn resilient_texts_preserve_order_across_token_quota_and_context_splits() {
+    for (status, body) in [
+        ("429 Too Many Requests", NEBIUS_TOKEN_QUOTA_BODY),
+        (
+            "400 Bad Request",
+            "max allowed tokens per submitted batch is 8192",
+        ),
+    ] {
+        let server = MockApi::start(move |input, _| {
+            if input.len() > 2 {
+                Reply::Error {
+                    status,
+                    retry_after: None,
+                    body,
+                }
+            } else {
+                Reply::Success
+            }
+        })
+        .await;
+        let provider = DynamicProvider::Api(server.provider(3));
+        let texts = ["longest text", "x", "two words", "", "last text"].map(str::to_owned);
+        let output = embed_texts_resilient(&provider, &texts, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            output,
+            texts
+                .iter()
+                .map(|text| vector_for(text))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            server.inputs(),
+            vec![
+                texts.to_vec(),
+                texts[..2].to_vec(),
+                texts[2..].to_vec(),
+                texts[2..3].to_vec(),
+                texts[3..].to_vec(),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn resilient_texts_respect_the_provider_batch_limit() {
+    struct LimitedProvider(Mutex<Vec<Vec<String>>>);
+
+    impl EmbeddingProvider for LimitedProvider {
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            self.0.lock().unwrap().push(texts.to_vec());
+            Ok(texts.iter().map(|text| vector_for(text)).collect())
+        }
+
+        fn expected_dim(&self) -> Option<usize> {
+            Some(2)
+        }
+
+        fn max_batch_size(&self) -> Option<usize> {
+            Some(2)
+        }
+    }
+
+    let provider = LimitedProvider(Mutex::new(Vec::new()));
+    let texts: Vec<String> = (0..5).map(|index| format!("text {index}")).collect();
+    let output = embed_texts_resilient(&provider, &texts, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        output,
+        texts
+            .iter()
+            .map(|text| vector_for(text))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        *provider.0.lock().unwrap(),
+        vec![
+            texts[..2].to_vec(),
+            texts[2..4].to_vec(),
+            texts[4..].to_vec()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn resilient_texts_retry_tpm_limits_without_splitting_and_honor_body_delay() {
+    let server = MockApi::start(|_, attempt| {
+        if attempt == 1 {
+            Reply::Error {
+                status: "429 Too Many Requests",
+                retry_after: None,
+                body: OPENAI_TPM_BODY,
+            }
+        } else {
+            Reply::Success
+        }
+    })
+    .await;
+    let provider = DynamicProvider::Api(server.provider(0));
+    let texts = ["first", "second"].map(str::to_owned);
+    let output = embed_texts_resilient(&provider, &texts, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        output,
+        texts
+            .iter()
+            .map(|text| vector_for(text))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(server.inputs(), vec![texts.to_vec(); 2]);
+    let records = server.requests.lock().unwrap();
+    assert!(records[1].at.duration_since(records[0].at) >= small_policy().max_retry_after);
+}
+
+#[tokio::test]
+async fn resilient_texts_split_batches_but_do_not_truncate_single_inputs() {
+    let server = MockApi::start(|input, _| {
+        if input.iter().any(|text| text.len() > 80) {
+            Reply::Error {
+                status: "400 Bad Request",
+                retry_after: None,
+                body: "maximum input length is 20 tokens",
+            }
+        } else {
+            Reply::Success
+        }
+    })
+    .await;
+    let provider = server.provider(0);
+    let texts = ["short".to_string(), "word ".repeat(80)];
+    let error = embed_texts_resilient(&provider, &texts, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        EmbeddingError::ApiError { status: 400, .. }
+    ));
+    assert_eq!(
+        server.inputs(),
+        vec![
+            texts.to_vec(),
+            vec![texts[0].clone()],
+            vec![texts[1].clone()]
+        ]
+    );
+}
+
+#[tokio::test]
+async fn token_quota_batches_split_without_retrying_oversized_requests() {
+    for limit in [1, 2, 4] {
+        let server = MockApi::start(move |input, _| {
+            if input.len() > limit {
+                Reply::Error {
+                    status: "429 Too Many Requests",
+                    retry_after: None,
+                    body: NEBIUS_TOKEN_QUOTA_BODY,
+                }
+            } else {
+                Reply::Success
+            }
+        })
+        .await;
+        let provider = server.provider(3);
+        let mut chunks = chunks(8);
+        chunks[0].content.push_str(" // longest content");
+        let output = embed_chunks_concurrent(&provider, &chunks, 8, 1, 0)
+            .await
+            .unwrap();
+        assert_output_order(&output, &chunks);
+        let inputs = server.inputs();
+        assert_eq!(inputs[0].len(), 8);
+        assert_eq!(inputs.len(), 2 * (8 / limit) - 1);
+        for oversized in inputs.iter().filter(|input| input.len() > limit) {
+            assert_eq!(inputs.iter().filter(|input| *input == oversized).count(), 1);
+        }
+        assert_eq!(
+            provider.stats().unwrap().snapshot(),
+            EmbeddingRequestStats {
+                requests: inputs.len() as u64,
+                ..Default::default()
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_input_rate_limits_retry_and_honor_body_delay() {
+    for body in [NEBIUS_TOKEN_QUOTA_BODY, OPENAI_TPM_BODY] {
+        let server = MockApi::start(move |_, attempt| {
+            if attempt == 1 {
+                Reply::Error {
+                    status: "429 Too Many Requests",
+                    retry_after: None,
+                    body,
+                }
+            } else {
+                Reply::Success
+            }
+        })
+        .await;
+        let provider = server.provider(0);
+        assert_eq!(
+            provider.embed_batch(&["input".into()]).await.unwrap(),
+            vec![vector_for("input")]
+        );
+        assert_eq!(server.inputs(), vec![vec!["input".to_string()]; 2]);
+        let records = server.requests.lock().unwrap();
+        assert!(records[1].at.duration_since(records[0].at) >= small_policy().max_retry_after);
+        assert_eq!(
+            provider.stats().unwrap().snapshot(),
+            EmbeddingRequestStats {
+                requests: 2,
+                retries: 1,
+                ..Default::default()
+            }
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
