@@ -4,7 +4,7 @@ Release notes from v1.0 onward, newest first. Current benchmark results are on t
 
 ## Unreleased
 
-- API embedding batches that exceed a provider's token quota are split into smaller requests instead of repeatedly retrying the oversized batch. Single inputs still retry normally, and retries honor delays in provider error messages when no `Retry-After` header is present.
+- API embedding batches receiving recognized token-quota 429 messages are split into smaller requests, including through `vera serve`, instead of repeatedly retrying the oversized batch. Single inputs and tokens-per-minute limits still retry normally. When no `Retry-After` header is present, retries honor delays read from provider messages, capped at 60 seconds just like `Retry-After`.
 
 ## v2.4.0
 

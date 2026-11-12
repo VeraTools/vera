@@ -10,7 +10,7 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use vera_core::embedding::{DynamicProvider, EmbeddingError, EmbeddingProvider};
+use vera_core::embedding::{DynamicProvider, EmbeddingError, embed_texts_resilient};
 use vera_core::retrieval::{DynamicReranker, Reranker, RerankerError};
 
 use crate::{
@@ -163,7 +163,7 @@ pub async fn embeddings(
     let cancel = CancellationToken::new();
     let _guard = cancel.clone().drop_guard();
 
-    match provider.embed_batch_cancellable(&req.input, &cancel).await {
+    match embed_texts_resilient(provider.as_ref(), &req.input, &cancel).await {
         Ok(vecs) => {
             let data: Vec<EmbeddingObject> = vecs
                 .into_iter()

@@ -1046,7 +1046,7 @@ fn is_token_quota_error(error: &EmbeddingError) -> bool {
         return false;
     };
     let lower = message.to_ascii_lowercase();
-    lower.contains("exceeded your tokens quota") || lower.contains("tokens per min")
+    lower.contains("exceeded your tokens quota")
 }
 
 fn is_retryable_error(error: &EmbeddingError) -> bool {
@@ -1249,6 +1249,45 @@ fn shrink_text_for_context_limit(
     shrunk
 }
 
+fn split_embedding_batch(
+    mut batch: Vec<EmbeddingBatchItem>,
+    pending: &mut Vec<Vec<EmbeddingBatchItem>>,
+) {
+    let second_half = batch.split_off(batch.len() / 2);
+    pending.push(second_half);
+    pending.push(batch);
+}
+
+/// Embed texts in input order, splitting batches on context-size or recognized
+/// token-quota errors. A single text over the context limit fails rather than
+/// being truncated, so callers never get a vector for text they did not send.
+///
+/// Texts are sent without adding query or document prefixes. Cancellation stops
+/// the active request and any remaining sub-batches.
+pub async fn embed_texts_resilient<P: EmbeddingProvider>(
+    provider: &P,
+    texts: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut items = texts
+        .iter()
+        .enumerate()
+        .map(|(original_index, text)| EmbeddingBatchItem {
+            original_index,
+            chunk_id: String::new(),
+            text: text.clone(),
+        })
+        .collect();
+    let mut completed = Vec::with_capacity(texts.len());
+    embed_batch_resilient(provider, &mut items, &mut completed, cancel, false).await?;
+    completed.sort_by_key(|(index, _, _)| *index);
+    Ok(completed.into_iter().map(|(_, _, vector)| vector).collect())
+}
+
 /// Embed `items`, splitting batches that exceed the provider context or token quota.
 ///
 /// Finished vectors are appended to `completed` as they arrive. On failure,
@@ -1259,6 +1298,7 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
     items: &mut Vec<EmbeddingBatchItem>,
     completed: &mut Vec<(usize, String, Vec<f32>)>,
     cancel: &CancellationToken,
+    truncate: bool,
 ) -> Result<(), EmbeddingError> {
     let mut pending = vec![std::mem::take(items)];
 
@@ -1289,30 +1329,16 @@ async fn embed_batch_resilient<P: EmbeddingProvider>(
             }
         };
 
-        if batch.len() > 1 && is_token_quota_error(&error) {
-            let mid = batch.len() / 2;
+        if batch.len() > 1 && (is_token_quota_error(&error) || is_context_size_error(&error)) {
             debug!(
                 batch_size = batch.len(),
-                "embedding batch exceeded provider token quota, retrying in smaller batches"
+                "embedding batch exceeded the provider's context or token quota, retrying in smaller batches"
             );
-            pending.push(batch[mid..].to_vec());
-            pending.push(batch[..mid].to_vec());
+            split_embedding_batch(batch, &mut pending);
             continue;
         }
 
-        if let Some(info) = context_size_info(&error) {
-            if batch.len() > 1 {
-                let mid = batch.len() / 2;
-                debug!(
-                    batch_size = batch.len(),
-                    token_limit = info.max_tokens,
-                    "embedding batch exceeded provider context limit, retrying in smaller batches"
-                );
-                pending.push(batch[mid..].to_vec());
-                pending.push(batch[..mid].to_vec());
-                continue;
-            }
-
+        if let Some(info) = context_size_info(&error).filter(|_| truncate) {
             let item = &batch[0];
             let shrunk_text =
                 shrink_text_for_context_limit(&item.text, info.max_tokens, info.input_tokens);
@@ -1488,7 +1514,7 @@ where
                 }
             }
             debug!(batch = batch.index + 1, total_batches, "embedding batch");
-            embed_batch_resilient(provider, &mut batch.items, &mut embedded, cancel).await
+            embed_batch_resilient(provider, &mut batch.items, &mut embedded, cancel, true).await
         }
         .await;
         (batch, embedded, result)
@@ -1828,7 +1854,8 @@ mod tests {
                 &ShortProvider,
                 &mut items,
                 &mut completed,
-                &CancellationToken::new()
+                &CancellationToken::new(),
+                true,
             )
             .await,
             Err(EmbeddingError::ResponseError { .. })
