@@ -9,7 +9,7 @@ use crate::corpus::{ContentClass, classify_content};
 use crate::parsing::signatures;
 use crate::path_containment::canonical_project_root;
 use crate::retrieval::file_scan::{
-    allows_class, language_for_path, line_context_snippet, smallest_symbol_chunk_for_line,
+    IndexedLanguages, allows_class, line_context_snippet, smallest_symbol_chunk_for_line,
     symbol_for_line,
 };
 use crate::types::{SearchFilters, SearchResult, SymbolType};
@@ -25,6 +25,7 @@ pub fn search_explicit_implementations(
     }
 
     let store = super::open_search_metadata(index_dir)?;
+    let languages = IndexedLanguages::load(&store)?;
     let repo_root = canonical_project_root(index_dir)?;
     let root_dir = crate::discovery::open_root_dir(&repo_root)?;
     let max_file_size_bytes = super::configured_max_file_size_bytes(&store);
@@ -38,7 +39,7 @@ pub fn search_explicit_implementations(
             break;
         }
 
-        let language = language_for_path(&relation.file_path);
+        let language = languages.language(&relation.file_path);
         if !filters.matches_file(&relation.file_path, language) {
             continue;
         }

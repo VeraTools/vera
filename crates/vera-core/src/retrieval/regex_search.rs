@@ -13,11 +13,11 @@ use regex::RegexBuilder;
 use crate::corpus::{ContentClass, classify_content};
 use crate::path_containment::canonical_project_root;
 use crate::retrieval::file_scan::{
-    allows_class, bounded_byte_snippet, language_for_path, sort_files_by_scan_priority,
+    IndexedLanguages, allows_class, bounded_byte_snippet, sort_files_by_scan_priority,
     symbol_for_line,
 };
 use crate::retrieval::ranking::{RankingStage, apply_query_ranking_with_filters};
-use crate::types::{Chunk, SearchFilters, SearchResult};
+use crate::types::{Chunk, Language, SearchFilters, SearchResult};
 
 /// Search indexed files for a regex pattern.
 ///
@@ -39,7 +39,8 @@ pub fn search_regex(
 
     let store = super::open_search_metadata(index_dir)?;
     let mut files = store.indexed_files()?;
-    sort_files_by_scan_priority(&mut files, filters);
+    let languages = IndexedLanguages::load(&store)?;
+    sort_files_by_scan_priority(&mut files, filters, &languages);
 
     // Resolve the project root (index_dir is .vera/, parent is project root).
     let project_root = canonical_project_root(index_dir)?;
@@ -53,7 +54,7 @@ pub fn search_regex(
             break;
         }
 
-        let language = language_for_path(file_rel);
+        let language = languages.language(file_rel);
         if !filters.matches_file(file_rel, language) {
             continue;
         }
@@ -92,15 +93,15 @@ pub fn search_regex(
         }
 
         if matches!(class, ContentClass::Generated) {
-            collect_minified_matches(
-                &mut results,
+            results.extend(collect_minified_matches(
                 &regex,
                 file_rel,
+                language,
                 &content,
-                limit,
+                limit - results.len(),
                 filters,
                 file_chunks.as_deref(),
-            );
+            ));
             continue;
         }
 
@@ -147,15 +148,15 @@ pub fn search_regex(
 }
 
 fn collect_minified_matches(
-    results: &mut Vec<SearchResult>,
     regex: &regex::Regex,
     file_rel: &str,
+    language: Language,
     content: &str,
     limit: usize,
     filters: &SearchFilters,
     file_chunks: Option<&[Chunk]>,
-) {
-    let language = language_for_path(file_rel);
+) -> Vec<SearchResult> {
+    let mut results = Vec::new();
 
     for found in regex.find_iter(content) {
         if results.len() >= limit {
@@ -182,6 +183,7 @@ fn collect_minified_matches(
 
         results.push(result);
     }
+    results
 }
 
 #[cfg(test)]

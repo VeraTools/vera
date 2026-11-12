@@ -150,6 +150,9 @@ fn matching_braces(tree: &Tree, opening: usize, closing: usize) -> bool {
     let mut cursor = tree.walk();
     loop {
         let node = cursor.node();
+        if node.start_byte() > closing {
+            return false;
+        }
         if node.start_byte() >= opening && node.start_byte() <= closing && !node.is_missing() {
             match node.kind() {
                 "{" => depth += 1,
@@ -165,7 +168,7 @@ fn matching_braces(tree: &Tree, opening: usize, closing: usize) -> bool {
                 _ => {}
             }
         }
-        if cursor.goto_first_child() {
+        if node.end_byte() > opening && cursor.goto_first_child() {
             continue;
         }
         while !cursor.goto_next_sibling() {
@@ -284,7 +287,7 @@ mod tests {
     #[test]
     fn winapi_recovery_preserves_content_lines_and_calls() {
         for language in [Language::C, Language::Cpp] {
-            let source = "// Unicode: \u{03bb}\r\n#define WINAPI __stdcall\r\nunsigned long WINAPI worker(void *arg) { return helper(); }\r\n";
+            let source = "// Unicode: \u{03bb}\r\n#define WINAPI __stdcall\r\nint WINAPI worker(void *arg) { return helper(); }\r\n";
             let (chunks, refs, diagnostics) = parse_file_with_diagnostics(
                 source,
                 "worker.cpp",
@@ -304,6 +307,7 @@ mod tests {
             parser
                 .set_language(&super::super::languages::tree_sitter_grammar(language).unwrap())
                 .unwrap();
+            assert!(parser.parse(source, None).unwrap().root_node().has_error());
             let (tree, effective_language) =
                 super::super::parse_tree(&mut parser, source, "worker.cpp", language).unwrap();
             let symbols = super::super::extractor::extract_symbols(
@@ -315,7 +319,7 @@ mod tests {
                 .iter()
                 .find(|s| s.name.as_deref() == Some("worker"))
                 .unwrap();
-            assert_eq!(symbol.start_byte, source.find("unsigned long").unwrap());
+            assert_eq!(symbol.start_byte, source.find("int WINAPI").unwrap());
             assert_eq!(symbol.end_byte, source.rfind('}').unwrap() + 1);
             assert!(refs.iter().any(|r| r.callee == "helper" && r.line == 3));
         }
@@ -365,6 +369,42 @@ mod tests {
         );
         assert!(refs.iter().any(|r| r.callee == "WINAPI"));
     }
+
+    #[test]
+    fn annotation_recovery_preserves_ordinary_identifiers_and_strings() {
+        let source = "int CALLBACK_count(void) { return 1; }\nint WINAPI worker(void *arg) { const char *s = \"WINAPI CALLBACK\"; return CALLBACK_count() + helper(); }\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&super::super::languages::tree_sitter_grammar(Language::C).unwrap())
+            .unwrap();
+        assert!(parser.parse(source, None).unwrap().root_node().has_error());
+
+        let (chunks, refs, diagnostics) = parse_file_with_diagnostics(
+            source,
+            "ordinary.c",
+            Language::C,
+            &IndexingConfig::default(),
+        )
+        .unwrap();
+        assert!(!diagnostics.tree_has_error);
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.symbol_name.as_deref() == Some("CALLBACK_count"))
+        );
+        let worker = chunks
+            .iter()
+            .find(|chunk| chunk.symbol_name.as_deref() == Some("worker"))
+            .unwrap();
+        assert_eq!(worker.content, source.lines().nth(1).unwrap());
+        assert!(worker.content.contains("\"WINAPI CALLBACK\""));
+        for callee in ["CALLBACK_count", "helper"] {
+            assert!(refs.iter().any(|r| r.callee == callee
+                && r.caller.as_deref() == Some("worker")
+                && r.line == 2));
+        }
+    }
+
     #[test]
     fn conditional_linkage_guards_preserve_c_symbols_and_calls() {
         for guard in [

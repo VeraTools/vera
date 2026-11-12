@@ -14,7 +14,7 @@ use crate::parsing::languages;
 use crate::path_containment::canonical_project_root;
 use crate::retrieval::apply_filters;
 use crate::retrieval::file_scan::{
-    allows_class, bounded_byte_snippet, language_for_path, smallest_symbol_chunk_for_line,
+    IndexedLanguages, allows_class, bounded_byte_snippet, smallest_symbol_chunk_for_line,
     sort_files_by_scan_priority, symbol_for_line,
 };
 use crate::storage::metadata::MetadataStore;
@@ -319,7 +319,8 @@ where
     F: FnMut(&str, Language, &str) -> Result<Vec<StructuralMatch>>,
 {
     let mut files = store.indexed_files()?;
-    sort_files_by_scan_priority(&mut files, filters);
+    let languages = IndexedLanguages::load(store)?;
+    sort_files_by_scan_priority(&mut files, filters, &languages);
 
     let mut results = Vec::new();
     let mut seen = HashSet::new();
@@ -329,7 +330,7 @@ where
             break;
         }
 
-        let language = language_for_path(&file_rel);
+        let language = languages.language(&file_rel);
         if !filters.matches_file(&file_rel, language) {
             continue;
         }

@@ -922,6 +922,18 @@ impl MetadataStore {
         collect_rows(rows)
     }
 
+    /// Get paths whose indexed language is C++, including recovered headers.
+    pub(crate) fn indexed_cpp_files(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path FROM file_index_state WHERE language = 'cpp'")
+            .context("failed to prepare indexed C++ files query")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to query indexed C++ files")?;
+        collect_rows(rows)
+    }
+
     /// Get all persisted file states.
     pub fn file_states(&self) -> Result<Vec<FileIndexState>> {
         let mut stmt = self
