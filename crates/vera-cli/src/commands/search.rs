@@ -88,53 +88,92 @@ pub fn run(
             Err(err) => eprintln!("warning: skipped {}: {err}", root.display()),
         }
     }
-    let (rt, modes, embedded, prepared) = timing::timed("setup", || -> anyhow::Result<_> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
-        let mut modes = Vec::new();
-        let mut ready = Vec::new();
-        for (i, (root, index, repo_filters)) in prepared.into_iter().enumerate() {
-            match vera_core::indexing::is_full_text_only(&index) {
-                Ok(mode) => {
-                    modes.push(mode);
-                    ready.push((root, index, repo_filters));
-                }
-                Err(err) if i == 0 => return Err(err),
-                Err(err) => eprintln!("warning: skipped {}: {err}", root.display()),
-            }
-        }
-        let embedded = if modes.contains(&false) {
-            Some(rt.block_on(SearchContext::new(&config, backend)))
-        } else {
-            None
-        };
-        Ok((rt, modes, embedded, ready))
-    })?;
-    let keyword = SearchContext::bm25_only();
-    let indexes: Vec<_> = prepared
-        .iter()
-        .zip(&modes)
-        .map(|((_, index_dir, filters), keyword_only)| IndexSearch {
-            context: if *keyword_only {
-                &keyword
-            } else {
-                embedded
-                    .as_ref()
-                    .expect("embedded context initialized for semantic indexes")
-            },
-            index_dir,
-            filters,
-        })
-        .collect();
-    let search_start = Instant::now();
-    let outcomes = rt.block_on(search_indexes(
-        &indexes,
+    let daemon_start = Instant::now();
+    let daemon_outcomes = crate::commands::daemon::try_search(
+        &config,
+        backend,
+        &prepared,
         &queries,
         intent,
-        &config,
         result_limit,
         deep,
-    ))?;
+    )?;
+    let (outcomes, search_elapsed) = if let Some(outcomes) = daemon_outcomes {
+        (outcomes, daemon_start.elapsed())
+    } else {
+        let (rt, modes, embedded, setup_errors) =
+            timing::timed("setup", || -> anyhow::Result<_> {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| anyhow::anyhow!("failed to create async runtime: {e}"))?;
+                let mut modes = Vec::with_capacity(prepared.len());
+                let mut setup_errors = Vec::with_capacity(prepared.len());
+                for (i, (_, index, _)) in prepared.iter().enumerate() {
+                    match vera_core::indexing::is_full_text_only(index) {
+                        Ok(mode) => {
+                            modes.push(Some(mode));
+                            setup_errors.push(None);
+                        }
+                        Err(err) if i == 0 => return Err(err),
+                        Err(err) => {
+                            modes.push(None);
+                            setup_errors.push(Some(format!("{err:#}")));
+                        }
+                    }
+                }
+                let embedded = if modes.contains(&Some(false)) {
+                    Some(rt.block_on(SearchContext::new(&config, backend)))
+                } else {
+                    None
+                };
+                Ok((rt, modes, embedded, setup_errors))
+            })?;
+        let keyword = SearchContext::bm25_only();
+        let valid_indexes: Vec<_> = prepared
+            .iter()
+            .zip(&modes)
+            .filter_map(|((_, index_dir, filters), mode)| {
+                mode.map(|keyword_only| IndexSearch {
+                    context: if keyword_only {
+                        &keyword
+                    } else {
+                        embedded
+                            .as_ref()
+                            .expect("embedded context initialized for semantic indexes")
+                    },
+                    index_dir,
+                    filters,
+                })
+            })
+            .collect();
+        let searched_indexes: Vec<_> = modes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mode)| mode.is_some().then_some(index))
+            .collect();
+        let search_start = Instant::now();
+        let searched_outcomes = rt.block_on(search_indexes(
+            &valid_indexes,
+            &queries,
+            intent,
+            &config,
+            result_limit,
+            deep,
+        ))?;
+        let mut outcomes: Vec<_> = setup_errors
+            .into_iter()
+            .map(|error| error.map_or_else(|| None, |message| Some(Err(anyhow::anyhow!(message)))))
+            .collect();
+        for (index, outcome) in searched_indexes.into_iter().zip(searched_outcomes) {
+            outcomes[index] = Some(outcome);
+        }
+        (
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.expect("every prepared index has a search outcome"))
+                .collect(),
+            search_start.elapsed(),
+        )
+    };
     let mut timings = SearchTimings::default();
     let mut lists = Vec::with_capacity(outcomes.len());
     let mut searched = Vec::new();
@@ -153,7 +192,7 @@ pub fn run(
             }
         }
     }
-    timings.total = Some(search_start.elapsed());
+    timings.total = Some(search_elapsed);
     let cross_mode = searched.len() > 1;
     let merged = merge_results(lists, result_limit);
     let roots: Vec<_> = prepared.iter().map(|(root, _, _)| root.clone()).collect();

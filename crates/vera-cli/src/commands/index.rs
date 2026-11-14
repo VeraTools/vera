@@ -18,6 +18,7 @@ use crate::state;
 
 pub struct CommandOptions {
     pub backend: InferenceBackend,
+    pub replace: bool,
     pub exclude: Vec<String>,
     pub no_ignore: bool,
     pub no_default_excludes: bool,
@@ -32,6 +33,7 @@ impl CommandOptions {
     pub fn new(backend: InferenceBackend) -> Self {
         Self {
             backend,
+            replace: false,
             exclude: Vec::new(),
             no_ignore: false,
             no_default_excludes: false,
@@ -71,6 +73,7 @@ pub fn execute(
 ) -> anyhow::Result<Option<vera_core::indexing::IndexSummary>> {
     let CommandOptions {
         backend,
+        replace,
         exclude,
         no_ignore,
         no_default_excludes,
@@ -92,6 +95,16 @@ pub fn execute(
         bail!(
             "path is not a directory: {path}\n\
              Hint: vera index expects a directory path, not a file."
+        );
+    }
+    let repo_root = repo_path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve path: {path}"))?;
+    let index_dir = vera_core::indexing::index_dir(&repo_root);
+    if !dry_run && !replace && index_dir.exists() {
+        bail!(
+            "index data already exists at {}. Refusing to replace it; pass `--replace` to rebuild this index.",
+            index_dir.display()
         );
     }
 
@@ -145,7 +158,7 @@ pub fn execute(
         let tracker =
             std::sync::Mutex::new(vera_core::indexing::progress::HonestProgressTracker::new());
         let task = rt.handle().spawn(async move {
-            vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+            vera_core::indexing::index_repository_with_progress_and_cancellation_with_replace(
                 &task_repo_path,
                 provider.as_deref(),
                 &config,
@@ -156,6 +169,7 @@ pub fn execute(
                     progress_reporter.observe(display, tracker.fixed_total());
                 },
                 &task_cancellation,
+                replace,
             )
             .await
         });
@@ -234,13 +248,14 @@ pub fn execute(
     let task_repo_path = repo_path.to_path_buf();
     let signal = wait_for_interrupt(rt.handle())?;
     let task = rt.handle().spawn(async move {
-        vera_core::indexing::pipeline::index_repository_with_progress_and_cancellation(
+        vera_core::indexing::index_repository_with_progress_and_cancellation_with_replace(
             &task_repo_path,
             provider.as_deref(),
             &config,
             &model_name,
             on_progress,
             &task_cancellation,
+            replace,
         )
         .await
     });

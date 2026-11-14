@@ -21,7 +21,7 @@
 
 Coding agents burn context fast in unfamiliar repositories: running broad text searches, opening half-related files, and chasing call chains one file at a time. Vera gives an agent (or a developer in a terminal) direct paths to the relevant symbols. Ask what a piece of code does, where a type is defined, or who calls a function, and Vera returns ranked functions, classes, and call sites with file paths and line ranges.
 
-Vera ships as a single native binary and keeps each project's index in `.vera/` with no background daemon or database server. Indexing, storage, keyword search, and code-aware ranking always run on your machine; embeddings run either locally on any CPU (`potion-code-16M-v2`, offline after one download) or through an OpenAI-compatible API such as Qwen3 embeddings plus reranking.
+Vera ships as a single native binary and keeps each project's index in `.vera/` with no database server. CLI searches run as one-shot commands by default; optionally, `vera daemon` keeps search models and open index stores resident for reuse across calls. Indexing, storage, keyword search, and code-aware ranking always run on your machine; embeddings run either locally on any CPU (`potion-code-16M-v2`, offline after one download) or through an OpenAI-compatible API such as Qwen3 embeddings plus reranking.
 
 ![vera search demo](docs/assets/vera-demo.gif)
 

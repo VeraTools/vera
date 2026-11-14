@@ -12,8 +12,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -31,7 +32,8 @@ use crate::types::SearchResult;
 pub const RERANKER_INSTRUCTION_FIELD: &str = "instruction";
 
 /// Reranking diagnostics for one search or an aggregated request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
 pub enum RerankOutcome {
     #[default]
     NotAttempted,

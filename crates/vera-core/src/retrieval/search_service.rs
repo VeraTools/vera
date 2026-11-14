@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
@@ -24,7 +25,7 @@ use crate::retrieval::{RerankOutcome, apply_filters, search_bm25_with_stores_and
 use crate::types::{SearchFilters, SearchResult};
 
 /// Timing data for each stage of the search pipeline.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SearchTimings {
     pub rerank_outcome: RerankOutcome,
     /// Why semantic search was skipped or failed, leaving BM25-only results.

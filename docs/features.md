@@ -44,6 +44,16 @@ vera search "config" --intent "find where database connection strings are loaded
 
 `--intent` adds your goal to a short or ambiguous query so ranking can aim at what you need.
 
+### Reuse search state across CLI calls
+
+For repeated searches, start the foreground daemon in one terminal:
+
+```bash
+vera daemon
+```
+
+In another terminal, keep using `vera search` normally. It connects to the local daemon when available, reusing loaded models and open index stores; if no daemon is running, search uses the usual one-shot CLI path. Stop the daemon with Ctrl-C. This currently uses a Unix-domain socket and is supported on Unix platforms.
+
 ### Deep search
 
 ```bash
@@ -131,6 +141,13 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+`vera index` refuses to replace existing index data by default. To deliberately
+rebuild an existing index, pass `--replace`:
+
+```bash
+vera index . --replace
+```
+
 ### Dry run
 
 ```bash
@@ -147,7 +164,7 @@ vera index . --full-text-only
 
 Build a keyword (BM25) index without configuring or loading an embedding model. Grep, structural queries, references, and overview work exactly as with an embedded index. Search ranks by keyword match only, so queries that describe behavior in plain words find less than they would with embeddings. `vera update` and watch mode keep the index keyword-only.
 
-Run `vera index .` without the flag to rebuild with embeddings.
+Run `vera index . --replace` to rebuild an existing keyword-only index with embeddings.
 
 ### Symbol-aware chunks
 
