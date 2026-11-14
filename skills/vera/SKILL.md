@@ -34,6 +34,10 @@ Use the following in indexed repositories. Without an index, follow [Recovery](#
 
 Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'`; repeat `--path` to include several patterns, just as with search.
 
+## Reuse search state across CLI calls
+
+For repeated searches, optionally start `vera daemon` in a foreground terminal. It keeps search models and open index stores resident; other `vera search` commands connect to it automatically, or run normally when no daemon is available. Stop it with Ctrl-C. The daemon currently uses a Unix-domain socket and is supported on Unix platforms.
+
 ## Search well
 
 - Search behavior, not nouns: `"JWT expiry handling"`, not `"auth"` or `"utils"`.
@@ -59,11 +63,12 @@ Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'
 
 ## Recovery
 
-If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. Otherwise, or without shell access, use your usual search tools.
+If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. If index data already exists, `vera index` stops rather than replacing it; use `vera index . --replace` only when a deliberate full rebuild is needed. For ordinary source changes, prefer `vera update .`. Otherwise, or without shell access, use your usual search tools.
 
 | Symptom | Fix |
 |---------|-----|
 | `no index found` | Follow the indexing and fallback guidance above |
+| `index data already exists` | Use `vera index . --replace` only for an intentional full rebuild; use `vera update .` for normal changes |
 | `no indexed file matches <path>` | Use a root-relative `--path`; stderr suggests a wildcard directory form when one applies |
 | Stale results after edits | `vera update .` (or `vera watch .`); works from any subdirectory |
 | A file is missing from results | `vera explain-path path/to/file` |

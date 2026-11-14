@@ -248,7 +248,33 @@ where
     P: EmbeddingProvider,
     F: Fn(IndexProgress) + Send + Sync,
 {
-    index_repository_with_progress_and_cancellation_with_window_target(
+    index_repository_with_progress_and_cancellation_with_replace(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        true,
+    )
+    .await
+}
+
+/// Index a repository, refusing to replace existing index data unless opted in.
+pub async fn index_repository_with_progress_and_cancellation_with_replace<P, F>(
+    repo_path: &Path,
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    replace_existing: bool,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_replace(
         repo_path,
         provider,
         config,
@@ -256,12 +282,14 @@ where
         on_progress,
         cancellation,
         WINDOW_CHUNK_TARGET,
+        replace_existing,
     )
     .await
 }
 
 /// Run the full-index pipeline with an explicit chunk-window target.
 /// Production uses `WINDOW_CHUNK_TARGET`; tests lower it to exercise staging windows.
+#[cfg(test)]
 pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_target<P, F>(
     repo_path: &Path,
     provider: Option<&P>,
@@ -270,6 +298,33 @@ pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_
     on_progress: F,
     cancellation: &CancellationToken,
     window_chunk_target: usize,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_replace(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        window_chunk_target,
+        true,
+    )
+    .await
+}
+
+async fn index_repository_with_progress_and_cancellation_with_window_target_and_replace<P, F>(
+    repo_path: &Path,
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    window_chunk_target: usize,
+    replace_existing: bool,
 ) -> Result<IndexSummary>
 where
     P: EmbeddingProvider,
@@ -306,6 +361,12 @@ where
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
         .context("failed to acquire index lock")?;
     recover_index_directories(&idx_dir).context("failed to recover index directories")?;
+    if idx_dir.exists() && !replace_existing {
+        bail!(
+            "index data already exists at {}. Refusing to replace it; pass `--replace` to rebuild this index.",
+            idx_dir.display()
+        );
+    }
     let checkpoint = provider
         .and_then(|provider| EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name));
 

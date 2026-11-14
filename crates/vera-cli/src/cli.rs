@@ -319,17 +319,23 @@ pub enum Commands {
                       Discovers source files (respecting .gitignore), parses them with \
                       tree-sitter for 61 languages, creates searchable chunks at symbol \
                       boundaries, generates embeddings using the current Vera mode, and \
-                      stores everything in a local `.vera/` index directory.\n\n\
+                      stores everything in a local `.vera/` index directory. If index \
+                      data already exists, Vera refuses to replace it unless you pass \
+                      `--replace`.\n\n\
                       Use `vera setup` for Vera's built-in local models, or `vera setup \
                       --api` for an OpenAI-compatible endpoint.\n\n\
                       Examples:\n  \
                       vera index .                  # Index current directory\n  \
                       vera index /path/to/repo      # Index a specific repo\n  \
+                      vera index . --replace        # Replace an existing index\n  \
                       vera index . --dry-run        # Estimate work without writing an index\n  \
                       vera index . --json           # Output summary as JSON")]
     Index {
         /// Path to the directory to index.
         path: String,
+        /// Replace an existing index.
+        #[arg(long)]
+        replace: bool,
         /// Build a keyword (BM25) index without embeddings.
         #[arg(long)]
         full_text_only: bool,

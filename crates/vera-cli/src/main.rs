@@ -219,6 +219,7 @@ fn main() {
         }
         Commands::Index {
             path,
+            replace,
             full_text_only,
             dry_run,
             backend,
@@ -235,6 +236,7 @@ fn main() {
                 cli.json,
                 commands::index::CommandOptions {
                     backend: backend.resolve(),
+                    replace,
                     exclude,
                     no_ignore,
                     no_default_excludes,

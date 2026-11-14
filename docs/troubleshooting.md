@@ -58,7 +58,7 @@ For linked git worktrees, see [automatic worktree indexes](features.md#linked-wo
 the index at ... is incomplete because an update stopped before it finished writing
 ```
 
-A `vera update` was interrupted. Vera refuses to read the partial index. Run `vera update .` to repair it or `vera index .` to rebuild.
+A `vera update` was interrupted. Vera refuses to read the partial index. Run `vera update .` to repair it or `vera index . --replace` to rebuild.
 
 ### `.vera/` shows up in git
 
@@ -111,7 +111,7 @@ The [query guide](query-guide.md) has more examples.
 A stderr warning ending in `using BM25-only search` or `falling back to BM25-only results`, or `warning: semantic search unavailable (...)` in an MCP result, means vector search did not run and results come from keyword matching alone. The message gives the cause:
 
 - The embedding endpoint failed, for example an expired key or a provider outage. See [API mode](#api-mode).
-- The index was built with a different embedding model or document prefix than the active one, or with more dimensions than the active model returns. Rebuild with `vera index .`.
+- The index was built with a different embedding model or document prefix than the active one, or with more dimensions than the active model returns. Rebuild with `vera index . --replace`.
 - The index has no stored vectors, for example because `.vera/vectors.db` was deleted. Run `vera update .` to re-embed the missing files.
 
 ### Reranker unavailable
@@ -152,7 +152,7 @@ Error messages never contain the endpoint URL or keys. They name the underlying 
 
 Vera retries connection errors, 408, 429, and 5xx responses with backoff, honoring `Retry-After` up to 60 seconds. A 400 response containing `Unable to process`, which some providers send when overloaded, is retried the same way. Other 4xx responses, including authentication errors, fail immediately. When indexing fails, stderr ends with request, retry, and timeout counts followed by the error.
 
-Run `vera index .` again. An API build resumes from the embeddings it already received.
+Run `vera index . --replace` again. An API build resumes from the embeddings it already received.
 
 ### Rate limits and quota errors
 
@@ -172,7 +172,7 @@ Vera already caps known provider limits, such as 100 inputs per request for Gemi
 
 ### The index uses a different embedding model
 
-If the active model name differs from the one stored in the index, rebuild with `vera index .`. If the two names are the same model, declare them as aliases instead; see [Changing models](models.md#changing-models).
+If the active model name differs from the one stored in the index, rebuild with `vera index . --replace`. If the two names are the same model, declare them as aliases instead; see [Changing models](models.md#changing-models).
 
 ## Local GPU and ONNX backends
 

@@ -141,6 +141,13 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+`vera index` refuses to replace existing index data by default. To deliberately
+rebuild an existing index, pass `--replace`:
+
+```bash
+vera index . --replace
+```
+
 ### Dry run
 
 ```bash
@@ -157,7 +164,7 @@ vera index . --full-text-only
 
 Build a keyword (BM25) index without configuring or loading an embedding model. Grep, structural queries, references, and overview work exactly as with an embedded index. Search ranks by keyword match only, so queries that describe behavior in plain words find less than they would with embeddings. `vera update` and watch mode keep the index keyword-only.
 
-Run `vera index .` without the flag to rebuild with embeddings.
+Run `vera index . --replace` to rebuild an existing keyword-only index with embeddings.
 
 ### Symbol-aware chunks
 

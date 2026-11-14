@@ -445,6 +445,33 @@ async fn failed_window_keeps_live_index_and_cleans_staging() {
     assert!(!sibling_index_dir(&idx_dir, "old").exists());
 }
 
+#[tokio::test]
+async fn index_without_replace_refuses_existing_index_data() {
+    let dir = TempDir::new().unwrap();
+    let idx_dir = index_dir(dir.path());
+    fs::create_dir_all(&idx_dir).unwrap();
+    fs::write(idx_dir.join("sentinel"), "previous index").unwrap();
+
+    let provider = MockProvider::new(8);
+    let error = index_repository_with_progress_and_cancellation_with_replace(
+        dir.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("Refusing to replace it"));
+    assert_eq!(
+        fs::read_to_string(idx_dir.join("sentinel")).unwrap(),
+        "previous index"
+    );
+}
+
 #[test]
 fn stale_staging_and_old_index_are_recovered_on_startup() {
     let dir = TempDir::new().unwrap();
