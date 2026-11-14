@@ -44,6 +44,16 @@ vera search "config" --intent "find where database connection strings are loaded
 
 `--intent` adds your goal to a short or ambiguous query so ranking can aim at what you need.
 
+### Reuse search state across CLI calls
+
+For repeated searches, start the foreground daemon in one terminal:
+
+```bash
+vera daemon
+```
+
+In another terminal, keep using `vera search` normally. It connects to the local daemon when available, reusing loaded models and open index stores; if no daemon is running, search uses the usual one-shot CLI path. Stop the daemon with Ctrl-C. This currently uses a Unix-domain socket and is supported on Unix platforms.
+
 ### Deep search
 
 ```bash

@@ -73,6 +73,17 @@ pub enum Commands {
                       vera mcp                       # Start MCP server on stdio")]
     Mcp,
 
+    /// Run a persistent local search server for `vera search` commands.
+    #[command(long_about = "Run a persistent local search server.\n\n\
+                      The daemon keeps search models and open index stores resident so \
+                      repeated `vera search` invocations can reuse them. In another \
+                      terminal, use `vera search` normally; it connects to the daemon \
+                      when available and otherwise performs the search locally.\n\n\
+                      The daemon runs in the foreground. Stop it with Ctrl-C.\n\n\
+                      Example:\n  \
+                      vera daemon")]
+    Daemon,
+
     /// Start the Vera HTTP API server for remote embedding and reranking.
     #[command(long_about = "Start the Vera HTTP API server.\n\n\
                       Loads the embedding model at startup and keeps it (using the \

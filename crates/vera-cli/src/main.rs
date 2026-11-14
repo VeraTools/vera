@@ -63,7 +63,10 @@ fn main() {
         }
     };
     #[cfg(unix)]
-    if !matches!(cli.command, Commands::Mcp | Commands::Serve { .. }) {
+    if !matches!(
+        cli.command,
+        Commands::Mcp | Commands::Daemon | Commands::Serve { .. }
+    ) {
         // Let `vera stats | head` end quietly, as other CLI tools do, instead of
         // panicking on a closed stdout. Servers keep Rust's default so a client
         // that disconnects mid-write cannot kill them.
@@ -110,6 +113,7 @@ fn main() {
     let show_nudges = !matches!(
         cli.command,
         Commands::Mcp
+            | Commands::Daemon
             | Commands::Serve { .. }
             | Commands::Agent { .. }
             | Commands::Uninstall
@@ -122,6 +126,10 @@ fn main() {
             tracing::info!("starting MCP server");
             commands::mcp::run();
             Ok(())
+        }
+        Commands::Daemon => {
+            tracing::info!("starting local search daemon");
+            commands::daemon::run()
         }
         Commands::Serve {
             port,
