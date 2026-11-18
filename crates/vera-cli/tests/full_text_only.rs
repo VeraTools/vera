@@ -108,7 +108,7 @@ fn full_text_only_commands_need_no_embedding_configuration() {
     assert!(!repo.join(".vera/vectors.db").exists());
     let stats = run(&["stats"]);
     assert!(String::from_utf8_lossy(&stats.stdout).contains("full-text only"));
-    let summary = run(&["index", ".", "--full-text-only"]);
+    let summary = run(&["index", ".", "--full-text-only", "--replace"]);
     let summary = String::from_utf8_lossy(&summary.stdout);
     assert!(summary.contains("full-text only"));
     assert!(!summary.contains("Embeddings generated"));

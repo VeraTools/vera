@@ -157,5 +157,5 @@ not expand macros, select build configurations, or replace compiler-based
 analysis. Other errors remain visible. Indexed content and line numbers always
 come from the original source, including annotations and linkage guards.
 
-Rebuild existing indexes with `vera index .` after upgrading to pick up parser
+Rebuild existing indexes with `vera index . --replace` after upgrading to pick up parser
 changes in unchanged files. `vera update .` alone skips unchanged source files.

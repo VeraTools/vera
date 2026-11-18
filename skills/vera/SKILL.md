@@ -59,11 +59,12 @@ Narrow callers or callees with `vera references make_config --path 'src/**/*.rs'
 
 ## Recovery
 
-If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. Otherwise, or without shell access, use your usual search tools.
+If you will work in a code repository without an index, run `vera index .` from its root. A first index can take several minutes: use a long shell timeout or run it in the background, and use rg until it finishes. An interrupted API-mode run reuses its finished embeddings. If a usable index already exists, `vera index` stops instead of overwriting it: run `vera update .` to refresh changed files, or pass `--replace` only for a deliberate full rebuild. Otherwise, or without shell access, use your usual search tools.
 
 | Symptom | Fix |
 |---------|-----|
 | `no index found` | Follow the indexing and fallback guidance above |
+| `index already exists` | Run `vera update .` for source changes, or `vera index . --replace` for a full rebuild |
 | `no indexed file matches <path>` | Use a root-relative `--path`; stderr suggests a wildcard directory form when one applies |
 | Stale results after edits | `vera update .` (or `vera watch .`); works from any subdirectory |
 | A file is missing from results | `vera explain-path path/to/file` |

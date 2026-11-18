@@ -211,6 +211,7 @@ fn main() {
         }
         Commands::Index {
             path,
+            replace,
             full_text_only,
             dry_run,
             backend,
@@ -227,6 +228,7 @@ fn main() {
                 cli.json,
                 commands::index::CommandOptions {
                     backend: backend.resolve(),
+                    replace,
                     exclude,
                     no_ignore,
                     no_default_excludes,
@@ -440,9 +442,18 @@ mod tests {
 
     #[test]
     fn cli_parses_index_command() {
-        assert!(
-            matches!(parse(&["vera", "index", "/tmp/repo"]), Commands::Index { path, .. } if path == "/tmp/repo")
-        );
+        assert!(matches!(
+            parse(&["vera", "index", "/tmp/repo"]),
+            Commands::Index { path, replace: false, .. } if path == "/tmp/repo"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_index_replace_flag() {
+        assert!(matches!(
+            parse(&["vera", "index", "/tmp/repo", "--replace"]),
+            Commands::Index { path, replace: true, .. } if path == "/tmp/repo"
+        ));
     }
 
     #[test]

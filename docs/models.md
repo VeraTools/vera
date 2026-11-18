@@ -191,7 +191,7 @@ vera setup --onnx-jina-cuda \
 
 ## Changing models
 
-The index records which embedding model built it, including every `--embedding-*` setting, so changing the model, pooling, or a prefix requires a rebuild with `vera index .`.
+The index records which embedding model built it, including every `--embedding-*` setting, so changing the model, pooling, or a prefix requires a rebuild with `vera index . --replace`.
 
 If two model names produce identical embeddings (the same model behind two endpoints, for example), declare them as aliases to skip the rebuild. Set `embedding.model_aliases` or export `VERA_EMBEDDING_MODEL_ALIASES`: groups separated by semicolons, names within a group separated by commas, at least two names per group.
 

@@ -131,6 +131,12 @@ Regex search over indexed files, with the same filters and git scopes as `vera s
 
 ## Indexing
 
+`vera index` refuses to overwrite a usable index unless you pass `--replace`. Use `vera update .` to refresh changed files, or `--replace` for a deliberate full rebuild:
+
+```bash
+vera index . --replace
+```
+
 ### Dry run
 
 ```bash
@@ -147,13 +153,13 @@ vera index . --full-text-only
 
 Build a keyword (BM25) index without configuring or loading an embedding model. Grep, structural queries, references, and overview work exactly as with an embedded index. Search ranks by keyword match only, so queries that describe behavior in plain words find less than they would with embeddings. `vera update` and watch mode keep the index keyword-only.
 
-Run `vera index .` without the flag to rebuild with embeddings.
+Run `vera index . --replace` to rebuild a keyword-only index with embeddings.
 
 ### Symbol-aware chunks
 
 For symbol extraction, line limits, and chunk splitting rules, see [How Vera works: Parsing](how-it-works.md#parsing-chunks-that-follow-the-code) and [supported languages](supported-languages.md).
 
-Any chunk larger than `indexing.max_chunk_bytes` (24 KB by default) is split at line boundaries. That budget is separate from the embedding model's input window: local models truncate longer input to their maximum length, and an API provider with a smaller token limit can reject a chunk that fits the budget. If that happens, lower `indexing.max_chunk_bytes` and run `vera index .` again.
+Any chunk larger than `indexing.max_chunk_bytes` (24 KB by default) is split at line boundaries. That budget is separate from the embedding model's input window: local models truncate longer input to their maximum length, and an API provider with a smaller token limit can reject a chunk that fits the budget. If that happens, lower `indexing.max_chunk_bytes` and run `vera index .` again (add `--replace` if an earlier index already exists).
 
 ### Updates and watch mode
 
@@ -208,7 +214,7 @@ It reports the deciding rule: a default exclude, an ignore file, the size limit,
 
 ### Indexing with an API backend
 
-API indexing sends requests in parallel, retries timeouts and rate limits with backoff, and honors `Retry-After`. If a run fails partway, the embeddings already received are saved in `.vera.resume/`, and the next `vera index` reuses them instead of paying for them again. The existing index stays usable until a new build finishes.
+API indexing sends requests in parallel, retries timeouts and rate limits with backoff, and honors `Retry-After`. If a run fails partway, the embeddings already received are saved in `.vera.resume/`, and re-running the same `vera index` command (`vera index .`, or `vera index . --replace` when rebuilding an existing index) reuses them instead of paying for them again. The existing index stays usable until a new build finishes.
 
 Indexing shows a progress display in a terminal. In CI or agent runs, it prints a short progress line to stderr every 10 seconds on slow runs, and `--json` prints a summary with file, chunk, request, retry, and timing counts.
 

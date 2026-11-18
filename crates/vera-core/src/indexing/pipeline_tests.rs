@@ -467,6 +467,200 @@ fn stale_staging_and_old_index_are_recovered_on_startup() {
 }
 
 #[tokio::test]
+async fn index_without_replace_refuses_usable_index_and_allows_explicit_replace() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("lib.rs"), "pub fn original_symbol() {}\n").unwrap();
+
+    let provider = MockProvider::new(8);
+    index_repository(dir.path(), &provider, &default_config(), "mock-model")
+        .await
+        .unwrap();
+
+    let idx_dir = index_dir(dir.path());
+    fs::write(idx_dir.join("sentinel"), "previous index").unwrap();
+
+    let error = index_repository_with_progress_and_cancellation_with_replace(
+        dir.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("index already exists"));
+    assert!(error.to_string().contains("--replace"));
+    assert_eq!(
+        fs::read_to_string(idx_dir.join("sentinel")).unwrap(),
+        "previous index"
+    );
+
+    index_repository_with_progress_and_cancellation_with_replace(
+        dir.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(!idx_dir.join("sentinel").exists());
+}
+
+#[tokio::test]
+async fn index_without_replace_rebuilds_stray_incomplete_and_old_format_indexes() {
+    let provider = MockProvider::new(8);
+
+    // Stray `.vera/` directory without index databases.
+    let stray = TempDir::new().unwrap();
+    fs::write(stray.path().join("lib.rs"), "pub fn rebuilt() {}\n").unwrap();
+    let stray_idx = index_dir(stray.path());
+    fs::create_dir_all(&stray_idx).unwrap();
+    fs::write(stray_idx.join("stray"), "not an index").unwrap();
+    index_repository_with_progress_and_cancellation_with_replace(
+        stray.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(!stray_idx.join("stray").exists());
+    assert!(super::super::usable_index_exists(stray.path()));
+
+    // Interrupted update (`index_complete = "0"`).
+    let incomplete = TempDir::new().unwrap();
+    fs::write(incomplete.path().join("lib.rs"), "pub fn repaired() {}\n").unwrap();
+    index_repository(
+        incomplete.path(),
+        &provider,
+        &default_config(),
+        "mock-model",
+    )
+    .await
+    .unwrap();
+    let incomplete_idx = index_dir(incomplete.path());
+    let store = MetadataStore::open(&incomplete_idx.join("metadata.db")).unwrap();
+    store
+        .set_index_meta(super::super::freshness::INDEX_COMPLETE_KEY, "0")
+        .unwrap();
+    drop(store);
+    assert!(!super::super::usable_index_exists(incomplete.path()));
+    index_repository_with_progress_and_cancellation_with_replace(
+        incomplete.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::usable_index_exists(incomplete.path()));
+
+    // Older format version (`index_format_version = "1"`).
+    let legacy = TempDir::new().unwrap();
+    fs::write(legacy.path().join("lib.rs"), "pub fn upgraded() {}\n").unwrap();
+    index_repository(legacy.path(), &provider, &default_config(), "mock-model")
+        .await
+        .unwrap();
+    let legacy_idx = index_dir(legacy.path());
+    let store = MetadataStore::open(&legacy_idx.join("metadata.db")).unwrap();
+    store
+        .set_index_meta(super::super::freshness::INDEX_FORMAT_VERSION_KEY, "1")
+        .unwrap();
+    drop(store);
+    assert!(!super::super::usable_index_exists(legacy.path()));
+    index_repository_with_progress_and_cancellation_with_replace(
+        legacy.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::usable_index_exists(legacy.path()));
+
+    // Corrupt `bm25/meta.json`.
+    let corrupt_bm25 = TempDir::new().unwrap();
+    fs::write(
+        corrupt_bm25.path().join("lib.rs"),
+        "pub fn rebuilt_bm25() {}\n",
+    )
+    .unwrap();
+    index_repository(
+        corrupt_bm25.path(),
+        &provider,
+        &default_config(),
+        "mock-model",
+    )
+    .await
+    .unwrap();
+    let corrupt_idx = index_dir(corrupt_bm25.path());
+    fs::write(corrupt_idx.join("bm25/meta.json"), "corrupt").unwrap();
+    assert!(!super::super::usable_index_exists(corrupt_bm25.path()));
+    index_repository_with_progress_and_cancellation_with_replace(
+        corrupt_bm25.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::usable_index_exists(corrupt_bm25.path()));
+}
+
+#[tokio::test]
+async fn index_without_replace_recovers_old_index_and_refuses_overwrite() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("lib.rs"), "pub fn preserved() {}\n").unwrap();
+
+    let provider = MockProvider::new(8);
+    index_repository(dir.path(), &provider, &default_config(), "mock-model")
+        .await
+        .unwrap();
+
+    let idx_dir = index_dir(dir.path());
+    let old_dir = sibling_index_dir(&idx_dir, "old");
+    fs::write(idx_dir.join("sentinel"), "recoverable index").unwrap();
+    fs::rename(&idx_dir, &old_dir).unwrap();
+    assert!(super::super::usable_index_exists(dir.path()));
+
+    let error = index_repository_with_progress_and_cancellation_with_replace(
+        dir.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("--replace"));
+    assert!(!old_dir.exists());
+    assert_eq!(
+        fs::read_to_string(idx_dir.join("sentinel")).unwrap(),
+        "recoverable index"
+    );
+}
+
+#[tokio::test]
 async fn index_simple_repo() {
     let dir = TempDir::new().unwrap();
     fs::write(

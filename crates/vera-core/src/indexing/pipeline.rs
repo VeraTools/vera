@@ -248,7 +248,33 @@ where
     P: EmbeddingProvider,
     F: Fn(IndexProgress) + Send + Sync,
 {
-    index_repository_with_progress_and_cancellation_with_window_target(
+    index_repository_with_progress_and_cancellation_with_replace(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        true,
+    )
+    .await
+}
+
+/// Index a repository, refusing to overwrite a usable index unless `replace_existing` is set.
+pub async fn index_repository_with_progress_and_cancellation_with_replace<P, F>(
+    repo_path: &Path,
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    replace_existing: bool,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_replace(
         repo_path,
         provider,
         config,
@@ -256,12 +282,14 @@ where
         on_progress,
         cancellation,
         WINDOW_CHUNK_TARGET,
+        replace_existing,
     )
     .await
 }
 
 /// Run the full-index pipeline with an explicit chunk-window target.
 /// Production uses `WINDOW_CHUNK_TARGET`; tests lower it to exercise staging windows.
+#[cfg(test)]
 pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_target<P, F>(
     repo_path: &Path,
     provider: Option<&P>,
@@ -270,6 +298,37 @@ pub(crate) async fn index_repository_with_progress_and_cancellation_with_window_
     on_progress: F,
     cancellation: &CancellationToken,
     window_chunk_target: usize,
+) -> Result<IndexSummary>
+where
+    P: EmbeddingProvider,
+    F: Fn(IndexProgress) + Send + Sync,
+{
+    index_repository_with_progress_and_cancellation_with_window_target_and_replace(
+        repo_path,
+        provider,
+        config,
+        model_name,
+        on_progress,
+        cancellation,
+        window_chunk_target,
+        true,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Internal orchestrator threads window sizing and overwrite control from public wrappers"
+)]
+async fn index_repository_with_progress_and_cancellation_with_window_target_and_replace<P, F>(
+    repo_path: &Path,
+    provider: Option<&P>,
+    config: &VeraConfig,
+    model_name: &str,
+    on_progress: F,
+    cancellation: &CancellationToken,
+    window_chunk_target: usize,
+    replace_existing: bool,
 ) -> Result<IndexSummary>
 where
     P: EmbeddingProvider,
@@ -306,6 +365,7 @@ where
     let _index_lock = crate::indexing::lock::IndexLock::acquire_blocking_for_index_dir(&idx_dir)
         .context("failed to acquire index lock")?;
     recover_index_directories(&idx_dir).context("failed to recover index directories")?;
+    super::ensure_replaceable_under_lock(&repo_root, replace_existing)?;
     let checkpoint = provider
         .and_then(|provider| EmbeddingCheckpoint::for_provider(&idx_dir, provider, model_name));
 
@@ -486,9 +546,15 @@ where
                         cancellation.check()?;
                     }
                     stores.abort().await;
+                    let resume_command =
+                        if replace_existing && super::usable_index_exists_under_lock(&repo_root) {
+                            "index --replace"
+                        } else {
+                            "index"
+                        };
                     return Err(error).context(EmbeddingCheckpoint::failure_context(
                         checkpoint.as_ref(),
-                        "index",
+                        resume_command,
                     ));
                 }
             };
@@ -1159,7 +1225,7 @@ pub(crate) fn sibling_index_dir(idx_dir: &Path, suffix: &str) -> PathBuf {
         .join(format!("{name}.{suffix}"))
 }
 
-fn recover_index_directories(idx_dir: &Path) -> Result<()> {
+pub(crate) fn recover_index_directories(idx_dir: &Path) -> Result<()> {
     let build_dir = sibling_index_dir(idx_dir, INDEX_BUILD_SUFFIX);
     let old_dir = sibling_index_dir(idx_dir, INDEX_OLD_SUFFIX);
     if !idx_dir.exists() && old_dir.exists() {
@@ -1329,7 +1395,12 @@ mod resume_tests {
                 error.to_string().contains("2 embeddings saved"),
                 "{error:#}"
             );
-            assert!(error.to_string().contains("`vera index`"));
+            let expected_command = if existing_index {
+                "`vera index --replace`"
+            } else {
+                "`vera index`"
+            };
+            assert!(error.to_string().contains(expected_command), "{error:#}");
             assert!(error.downcast_ref::<EmbeddingError>().is_some());
             assert!(root.path().join(".vera.resume/embeddings.db").is_file());
             assert!(!root.path().join(".vera.build").exists());

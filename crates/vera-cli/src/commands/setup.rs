@@ -298,11 +298,9 @@ fn run_wizard() -> anyhow::Result<()> {
         let path: String = cliclack::input("Project path")
             .default_input(".")
             .interact()?;
-        commands::index::execute(
-            path.trim(),
-            false,
-            commands::index::CommandOptions::new(effective_backend),
-        )?;
+        let mut options = commands::index::CommandOptions::new(effective_backend);
+        options.replace = true;
+        commands::index::execute(path.trim(), false, options)?;
     }
 
     cliclack::outro(if index_now {
@@ -425,11 +423,9 @@ fn configure_backend_with_api_setup(
     }
 
     if let Some(path) = index_path.as_deref() {
-        commands::index::execute(
-            path,
-            json_output,
-            commands::index::CommandOptions::new(effective_backend),
-        )?;
+        let mut options = commands::index::CommandOptions::new(effective_backend);
+        options.replace = true;
+        commands::index::execute(path, json_output, options)?;
     }
 
     let report = SetupReport {

@@ -114,7 +114,7 @@ export VERA_COMPLETION_MAX_TOKENS=16384
 export VERA_COMPLETION_TIMEOUT_SECS=120
 ```
 
-After changing `indexing.max_chunk_bytes`, run `vera index .` so every file is chunked with the new limit.
+After changing `indexing.max_chunk_bytes`, run `vera index . --replace` so every file is chunked with the new limit.
 
 ## 7. Use it from an MCP client
 

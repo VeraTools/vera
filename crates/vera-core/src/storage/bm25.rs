@@ -68,6 +68,11 @@ fn register_stemmed_tokenizer(index: &Index) {
 }
 
 impl Bm25Index {
+    /// Whether `index_dir` contains a Tantivy index whose metadata opens cleanly.
+    pub(crate) fn is_valid_dir(index_dir: &Path) -> bool {
+        index_dir.join("meta.json").is_file() && Index::open_in_dir(index_dir).is_ok()
+    }
+
     /// Open (or create) a BM25 index at the given directory path.
     pub fn open(index_dir: &Path) -> Result<Self> {
         let schema = build_schema();
