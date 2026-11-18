@@ -131,10 +131,15 @@ jobs:
           fi
           cargo update --workspace
 
+      # Skip sccache on Windows: wrapping rustc expands Cargo's @response_file
+      # onto the command line and hits Windows' 32 KB CreateProcessW limit
+      # (os error 206) across the workspace's tree-sitter grammars.
       - name: Set up sccache
+        if: runner.os != 'Windows'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Configure sccache
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
