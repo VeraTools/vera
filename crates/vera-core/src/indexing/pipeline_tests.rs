@@ -622,6 +622,42 @@ async fn index_without_replace_rebuilds_stray_incomplete_and_old_format_indexes(
     .await
     .unwrap();
     assert!(super::super::usable_index_exists(corrupt_bm25.path()));
+
+    // Missing Tantivy segment file with intact `meta.json`.
+    let missing_segment = TempDir::new().unwrap();
+    fs::write(
+        missing_segment.path().join("lib.rs"),
+        "pub fn rebuilt_segment() {}\n",
+    )
+    .unwrap();
+    index_repository(
+        missing_segment.path(),
+        &provider,
+        &default_config(),
+        "mock-model",
+    )
+    .await
+    .unwrap();
+    let bm25_dir = index_dir(missing_segment.path()).join("bm25");
+    let segment_file = fs::read_dir(&bm25_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "term"))
+        .expect("bm25 index should contain a .term segment file");
+    fs::remove_file(segment_file).unwrap();
+    assert!(!super::super::usable_index_exists(missing_segment.path()));
+    index_repository_with_progress_and_cancellation_with_replace(
+        missing_segment.path(),
+        Some(&provider),
+        &default_config(),
+        "mock-model",
+        |_| {},
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::usable_index_exists(missing_segment.path()));
 }
 
 #[tokio::test]
