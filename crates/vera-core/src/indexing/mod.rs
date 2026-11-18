@@ -24,7 +24,8 @@ pub use estimate::{IndexEstimate, estimate_index};
 pub use freshness::{IndexFreshness, detect_staleness};
 pub use pipeline::{
     FULL_TEXT_ONLY_MODE, FileError, INDEX_MODE_KEY, IndexProgress, IndexSummary, index_dir,
-    index_repository, index_repository_with_progress, is_full_text_only,
+    index_repository, index_repository_with_progress,
+    index_repository_with_progress_and_cancellation_with_replace, is_full_text_only,
 };
 pub use update::{
     UpdateOptions, UpdateProgress, UpdateSummary, content_hash, update_repository,
@@ -35,6 +36,89 @@ pub use update::{
 /// Whether a repository has index metadata, rather than just a stray `.vera/`.
 pub fn index_exists(root: &std::path::Path) -> bool {
     index_dir(root).join("metadata.db").is_file()
+}
+
+/// Whether `repo_root` already has a complete, current-format index (or a
+/// recoverable `.vera.old` directory awaiting startup recovery).
+///
+/// Stray `.vera/` directories, missing tables, format mismatches, retired
+/// character-cap chunking, and unlocked interrupted updates return `false` so
+/// `vera index` can rebuild them without `--replace`.
+pub fn usable_index_exists(repo_root: &std::path::Path) -> bool {
+    usable_index_exists_inner(repo_root, false)
+}
+
+pub(crate) fn usable_index_exists_under_lock(repo_root: &std::path::Path) -> bool {
+    usable_index_exists_inner(repo_root, true)
+}
+
+fn usable_index_exists_inner(repo_root: &std::path::Path, lock_held: bool) -> bool {
+    let idx_dir = index_dir(repo_root);
+    let old_dir = pipeline::sibling_index_dir(&idx_dir, "old");
+    let store_dir = if idx_dir.exists() {
+        idx_dir.clone()
+    } else if old_dir.exists() {
+        old_dir
+    } else {
+        return false;
+    };
+    if !crate::storage::bm25::Bm25Index::is_valid_dir(&store_dir.join("bm25")) {
+        return false;
+    }
+    let Ok(store) =
+        crate::storage::metadata::MetadataStore::open_existing(&store_dir.join("metadata.db"))
+    else {
+        return false;
+    };
+    let complete = if lock_held {
+        store
+            .get_index_meta(freshness::INDEX_COMPLETE_KEY)
+            .is_ok_and(|value| value.as_deref() != Some("0"))
+    } else {
+        freshness::ensure_index_complete_with_store(&idx_dir, &store).is_ok()
+    };
+    freshness::index_format_is_current(&store)
+        && complete
+        && freshness::ensure_index_chunking_compatible(&store, repo_root).is_ok()
+}
+
+/// Refuse to overwrite a usable index unless `replace_existing` is set.
+pub fn ensure_replaceable(
+    repo_root: &std::path::Path,
+    replace_existing: bool,
+) -> anyhow::Result<()> {
+    ensure_replaceable_inner(repo_root, replace_existing, false)
+}
+
+pub(crate) fn ensure_replaceable_under_lock(
+    repo_root: &std::path::Path,
+    replace_existing: bool,
+) -> anyhow::Result<()> {
+    ensure_replaceable_inner(repo_root, replace_existing, true)
+}
+
+fn ensure_replaceable_inner(
+    repo_root: &std::path::Path,
+    replace_existing: bool,
+    lock_held: bool,
+) -> anyhow::Result<()> {
+    if !replace_existing && !lock_held {
+        let idx_dir = index_dir(repo_root);
+        let old_dir = pipeline::sibling_index_dir(&idx_dir, "old");
+        if !idx_dir.exists()
+            && old_dir.exists()
+            && let Ok(Some(_guard)) = lock::IndexLock::try_acquire_for_index_dir(&idx_dir)
+        {
+            let _ = pipeline::recover_index_directories(&idx_dir);
+        }
+    }
+    if !replace_existing && usable_index_exists_inner(repo_root, lock_held) {
+        anyhow::bail!(
+            "index already exists at {}. Run `vera update` to refresh changed files, or pass `--replace` to rebuild from scratch.",
+            index_dir(repo_root).display()
+        );
+    }
+    Ok(())
 }
 
 /// Walk up from `start` and return the nearest directory containing an index,
