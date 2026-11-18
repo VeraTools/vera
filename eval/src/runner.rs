@@ -14,6 +14,12 @@ use crate::types::{
 
 pub const METRIC_CONTRACT: &str = "vera-graded-2-1-task-mean-v1";
 
+fn utc_rfc3339_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("UTC SystemTime is representable in RFC 3339")
+}
+
 pub struct ReportProvenance {
     pub lane: Option<LaneProvenance>,
     pub task_set: TaskSetIdentity,
@@ -76,7 +82,7 @@ pub fn run_benchmark_scoped(
     corpus_shas: &HashMap<String, String>,
     benchmark_roots: &HashMap<String, String>,
 ) -> EvalReport {
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = utc_rfc3339_now();
 
     // Index all repos and measure time/storage
     let mut total_index_time = 0.0;
@@ -232,7 +238,7 @@ impl ToolAdapter for MockAdapter {
 /// This is the primary self-testing function: it creates deterministic results
 /// based on each task's ground truth, allowing us to verify metric computation.
 pub fn run_benchmark_with_mock(mock: &MockAdapter, tasks: &[BenchmarkTask]) -> EvalReport {
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = utc_rfc3339_now();
 
     // Create mock task results based on ground truth
     let task_results: Vec<TaskResult> = tasks
@@ -416,5 +422,12 @@ mod tests {
                 "Consecutive runs should produce identical retrieval metrics, diff={diff}"
             );
         }
+    }
+
+    #[test]
+    fn utc_rfc3339_now_formats_utc_timestamp() {
+        let timestamp = utc_rfc3339_now();
+        assert!(timestamp.contains('T'), "{timestamp}");
+        assert!(timestamp.ends_with('Z'), "{timestamp}");
     }
 }

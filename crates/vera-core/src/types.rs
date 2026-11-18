@@ -178,13 +178,8 @@ impl SearchFilters {
             return false;
         }
 
-        if self.include_generated == Some(false)
-            && matches!(content_class(), crate::corpus::ContentClass::Generated)
-        {
-            return false;
-        }
-
-        true
+        !(self.include_generated == Some(false)
+            && matches!(content_class(), crate::corpus::ContentClass::Generated))
     }
 }
 

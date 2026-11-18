@@ -123,14 +123,9 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
-      - name: Configure sccache
-        shell: bash
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      # Skip sccache here: wrapping rustc expands Cargo's @response_file onto the
+      # command line and hits Windows' 32 KB CreateProcessW limit (os error 206)
+      # across the workspace's tree-sitter grammars, while direct rustc uses @argfile.
 
       - name: Set MSVC CRT flags
         shell: bash
